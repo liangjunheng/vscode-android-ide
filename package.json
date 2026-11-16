@@ -1,9 +1,9 @@
 {
-  "name": "device-tools-for-android",
-  "displayName": "Device Tools for Android",
+  "name": "vscode-android-tools-pro",
+  "displayName": "VSCode Android Tools Pro",
   "description": "Mirror and control Android emulators and devices, manage virtual devices (AVDs) and browse Logcat without leaving VS Code.",
-  "version": "0.2.0",
-  "publisher": "MehdiBrahmi",
+  "version": "1.0.0",
+  "publisher": "liangjunheng",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -222,6 +222,6 @@
     "@grpc/proto-loader": "^0.8.1"
   },
   "author": {
-    "name": "Mehdi Brahmi"
+    "name": "liangjunheng"
   }
 }
