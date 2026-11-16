@@ -1,16 +1,18 @@
 (function () {
   const vs = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
-  const WRAP_MAX = 3000;
   const st = Object.assign({ history: [], favs: [], filter: '', fmt: 'standard', wrap: false }, vs.getState() || {});
   const save = () => vs.setState(st);
 
   let entries = [], rows = [], mine = [], maxBytes = 1024 * 1024;
   let entriesBytes = 0, pendingBytes = 0;
   let paused = false, pending = [], stick = true, serial = '', compiled = null, pkgMap = {};
-  const sc = $('sc'), win = $('win'), spacer = $('spacer'), q = $('q'), hl = $('hl');
+  const sc = $('sc'), win = $('row-window'), viewport = $('row-viewport'), spacer = $('spacer'), q = $('q'), hl = $('hl');
   let H = parseFloat(getComputedStyle(sc).lineHeight);
-  let icons = {};
+  let icons = {}, deviceList = [], statusText = '', statusTimer = 0;
+  let offsets = [0], rowHeights = new WeakMap(), layoutKey = '';
+  let viewportAnchor = null, requestedRow = null;
+  const renderedRows = new WeakMap();
   const S = { open: false, re: null, rows: [], cur: -1, err: false, dirty: false, scroll: false, timer: 0 };
 
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -26,13 +28,14 @@
   }
 
   // 构建 Logcat 工具栏；输入为当前 Webview 控件，输出为清空、暂停、滚动和采集操作入口。
-  // 清空按钮同时重置正常与暂停缓存的字节计数；回归：tests/logcat-buffer.test.js。
+  // 清空重置缓存计数，末尾按钮同步跟随状态；回归：tests/logcat-buffer.test.js 与 tests/logcat-browser.test.js。
   function buildToolbar() {
     const side = $('side'); side.innerHTML = '';
-    btn('b-clear', 'Clear Logcat', svg('lc-delete'), () => { entries = []; rows = []; pending = []; entriesBytes = 0; pendingBytes = 0; S.dirty = true; render(); vs.postMessage({ type: 'clear' }); }, side);
+    btn('b-clear', 'Clear Logcat', svg('lc-delete'), () => { if (logSelection()) { getSelection().removeAllRanges(); } entries = []; rows = []; pending = []; entriesBytes = 0; pendingBytes = 0; S.dirty = true; viewportAnchor = null; requestedRow = null; render(); vs.postMessage({ type: 'clear' }); }, side);
     btn('b-pause', 'Pause Logcat', svg('lc-pause'), togglePause, side);
     btn('b-restart', 'Restart Logcat', svg('lc-refresh'), () => vs.postMessage({ type: 'restart' }), side);
-    btn('b-end', 'Scroll to the End', svg('lc-scroll-end'), () => { stick = true; render(); }, side);
+    btn('b-end', 'Scroll to the End', svg('lc-scroll-end'), () => { if (logSelection()) { getSelection().removeAllRanges(); } setFollowing(!stick); render(); }, side);
+    setFollowing(stick);
     btn('b-prev', 'Up the Stack Trace', svg('lc-up'), () => jumpStack(-1), side);
     btn('b-next', 'Down the Stack Trace', svg('lc-down'), () => jumpStack(1), side);
     btn('b-wrap', 'Soft-Wrap', svg('lc-softwrap'), () => { st.wrap = !st.wrap; save(); applyWrap(); }, side);
@@ -55,10 +58,12 @@
     if (!paused) { const p = pending; pending = []; pendingBytes = 0; ingest(p); render(); }
   }
 
+  // 切换换行布局并同步按钮状态；输入为 st.wrap，输出保留阅读锚点的布局。
+  // 回归：tests/logcat-browser.test.js 覆盖两种格式和窄宽视口，tests/logcat-style.test.js 检查控件。
   function applyWrap() {
     $('b-wrap').classList.toggle('on', st.wrap);
     document.body.classList.toggle('wrap', st.wrap);
-    spacer.style.display = st.wrap ? 'none' : '';
+    $('b-wrap').setAttribute('aria-pressed', String(st.wrap));
     render();
   }
 
@@ -71,16 +76,12 @@
   // 前置条件是 maxBytes 已由后端限制；回归：tests/logcat-buffer.test.js。
   const normalizeItem = (item) => ({ ...item, msg: LogcatBuffer.truncateUtf8(item.msg, maxBytes - 1) });
 
-  // 让正常日志和暂停队列共享同一有界缓存；输入为日志数组，输出为淘汰后的字节数。
+  // 淘汰超出预算的完整旧记录；读取 entries/entriesBytes 并重建 rows，保留存活记录与行索引的稳定关系。
   // 前置条件是 maxBytes 已由后端校验；结果是最旧消息被移除，内存不随时间无限增长。
   // 回归：tests/logcat-buffer.test.js，npm test 执行真实接收函数并断言多行预算及保留内容。
   function trimEntries() {
     while (entriesBytes > maxBytes && entries.length) {
-      const first = entries[0];
-      if (first.lines.length > 1) {
-        const removed = LogcatBuffer.utf8Bytes(first.lines.shift()) + 1;
-        first.bytes -= removed; entriesBytes -= removed;
-      } else { entriesBytes -= entries.shift().bytes; }
+      entriesBytes -= entries.shift().bytes;
     }
     rebuild();
   }
@@ -96,23 +97,14 @@
 
   function pushRows(e) { for (let i = 0; i < e.lines.length; i++) { rows.push({ e, i }); } }
 
-  // 合并日志行并维护 UTF-8 字节预算；输入为 ADB 日志项，输出更新后的有界 entries。
-  // 前置条件是每项包含 msg；超长单项先截断，超出总预算时淘汰最旧记录。
-  // 回归：tests/logcat-buffer.test.js，npm test 断言批量、多行和超长消息均不超过预算。
+  // 按输入记录边界接收日志并维护 UTF-8 字节预算；输入为 ADB 日志项，输出更新后的有界 entries。
+  // 前置条件是每项为独立日志记录且包含 msg；仅消息内部换行产生续行，不按相同时间或 Tag 合并。
+  // 回归：tests/logcat-buffer.test.js，npm test 断言同毫秒独立记录不合并、真实消息内换行可续行及缓存预算。
   function ingest(items) {
     for (const raw of items) {
       const it = normalizeItem(raw);
       const bytes = itemBytes(it);
-      const last = entries[entries.length - 1];
-      if (last && last.ts === it.ts && last.pid === it.pid && last.tid === it.tid && last.lv === it.lv && last.tag === it.tag) {
-        last.lines.push(it.msg);
-        last.bytes += bytes;
-        entriesBytes += bytes;
-        if (last.vis) { rows.push({ e: last, i: last.lines.length - 1 }); }
-        else if (visible(last)) { last.vis = true; pushRows(last); }
-        continue;
-      }
-      const e = { ts: it.ts, pid: it.pid, tid: it.tid, lv: it.lv, lvn: LogFilter.LEVELS[it.lv] || 4, tag: it.tag, pkg: it.pkg || pkgMap[it.pid] || '', lines: [it.msg], bytes, rx: it.rx };
+      const e = { ts: it.ts, pid: it.pid, tid: it.tid, lv: it.lv, lvn: LogFilter.LEVELS[it.lv] || 4, tag: it.tag, pkg: it.pkg || pkgMap[it.pid] || '', lines: it.msg.split('\n'), bytes, rx: it.rx };
       entries.push(e);
       entriesBytes += bytes;
       if (visible(e)) { e.vis = true; pushRows(e); }
@@ -131,7 +123,7 @@
     $('filterbox').classList.toggle('error', !!compiled.error);
     $('filterbox').title = compiled.error || '';
     renderHighlight();
-    rebuild(); stick = true; render(); updateFav();
+    rebuild(); render(); updateFav();
   }
 
   function renderHighlight() {
@@ -145,7 +137,7 @@
 
   // ---- rendering ----
   // 将指定日志行渲染为 HTML；前提是行索引有效，独立记录首行显示完整元数据，续行留空，不跨记录隐藏重复 Tag。
-  // 回归：tests/logcat-style.test.js 的 row fields 测试执行本函数，断言 Standard/Compact 和续行间隔。
+  // 回归：tests/logcat-style.test.js 断言字段及续行，tests/logcat-browser.test.js 断言两种格式实际换行高度。
   function rowHtml(i) {
     const { e, i: li } = rows[i];
     const first = li === 0;
@@ -154,7 +146,7 @@
     if (st.fmt === 'compact') {
       const head = `<span class="ctime">${first ? hx(e.ts.slice(11)) : ''}</span>\t<span class="lvb">${first ? e.lv : ''}</span>`;
       const tg = `<span style="color:${tagColor(e.tag)}">${first ? hx(e.tag) : ''}</span>`;
-      return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${H}px">${head}\t<span class="tg-inline">${tg}</span>\t<span class="m">${msg}</span></div>`;
+      return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${st.wrap ? 'auto' : H + 'px'}">${head}\t<span class="tg-inline">${tg}</span>\t<span class="m">${msg}</span></div>`;
     }
     const lv = `<span class="lvb">${first ? e.lv : ''}</span>`;
     return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${st.wrap ? 'auto' : H + 'px'}"><span class="ts">${first ? hx(e.ts) : ''}</span>\t<span class="pt">${first ? hx(e.pid + '-' + e.tid) : ''}</span>\t<span class="tg" style="color:${tagColor(e.tag)}" title="${esc(e.tag)}">${first ? hx(e.tag) : ''}</span>\t<span class="pk" title="${esc(e.pkg)}">${first ? hx(e.pkg) : ''}</span>\t${lv}\t<span class="m">${msg}</span></div>`;
@@ -204,14 +196,18 @@
     $('s-up').disabled = $('s-down').disabled = !n;
   }
 
+  // 可见时调度搜索，隐藏时只记录待更新；输入保持匹配与防抖时间，输出可取消任务。回归：tests/logcat-browser.test.js。
   function scheduleSearch(keep, delay) {
     if (!S.open) { return; }
+    if (!hostVisible || document.hidden) { S.dirty = true; return; }
     if (S.timer && keep) { return; }
     clearTimeout(S.timer);
     S.timer = setTimeout(() => { S.timer = 0; runSearch(keep); }, delay);
   }
 
+  // 搜索当前过滤结果并更新匹配；隐藏时保持脏状态，不扫描或更新DOM。回归：tests/logcat-browser.test.js。
   function runSearch(keep) {
+    if (!hostVisible || document.hidden) { S.dirty = true; return; }
     S.dirty = false;
     const prev = S.rows[S.cur];
     S.re = buildRe();
@@ -228,21 +224,21 @@
       S.cur = k >= 0 ? k : Math.min(Math.max(S.cur, 0), m.length - 1);
       updateCount(); render();
     } else {
-      const top = st.wrap ? 0 : Math.floor(sc.scrollTop / H);
+      const top = rowAt(sc.scrollTop);
       const k = m.findIndex((x) => x >= top);
       S.cur = k >= 0 ? k : m.length - 1;
       reveal();
     }
   }
 
+  // 搜索定位请求交给布局层统一处理；输入为当前匹配行，输出退出跟随后的居中位置。
+  // 回归：tests/logcat-browser.test.js 搜索首部和末尾日志，验证换行定位。
   function reveal() {
     const r = S.rows[S.cur];
     updateCount();
     if (r == null) { render(); return; }
-    stick = false;
-    if (st.wrap) { S.scroll = true; } else if (r * H < sc.scrollTop || (r + 1) * H > sc.scrollTop + sc.clientHeight) {
-      sc.scrollTop = Math.max(0, r * H - sc.clientHeight / 2 + H / 2);
-    }
+    setFollowing(false);
+    requestedRow = r;
     render();
   }
 
@@ -270,6 +266,8 @@
     render();
   }
 
+  // 构建右侧日志区的搜索栏；前提是 log-content/sc 已存在，输出为不影响左侧工具栏的搜索控件。
+  // 回归：tests/logcat-style.test.js，npm test 执行构建与 Ctrl+F/Esc 开关，断言容器隔离及状态。
   (function buildSearchBar() {
     const bar = document.createElement('div');
     bar.id = 'sbar';
@@ -277,7 +275,7 @@
       '<button class="ib opt" id="s-cc" title="Match Case">Cc</button><button class="ib opt" id="s-w" title="Words">W</button><button class="ib opt" id="s-rx" title="Regex">.*</button></div>' +
       `<span id="scount"></span><button class="ib" id="s-up" title="Previous Occurrence (Shift+Enter)">${codicon('arrow-up')}</button><button class="ib" id="s-down" title="Next Occurrence (Enter)">${codicon('arrow-down')}</button>` +
       `<button class="ib" id="s-close" title="Close (Esc)">${codicon('close')}</button>`;
-    $('main').parentNode.insertBefore(bar, $('main'));
+    $('log-content').insertBefore(bar, sc);
     const input = $('sq');
     const sync = () => {
       for (const [id, k] of [['s-cc', 'scc'], ['s-w', 'sw'], ['s-rx', 'srx']]) { $(id).classList.toggle('active', !!st[k]); }
@@ -302,44 +300,188 @@
     sync();
   })();
 
-  let raf = 0;
-  function render() { if (!raf) { raf = requestAnimationFrame(() => { raf = 0; draw(); }); } }
-
-  function draw() {
-    const n = rows.length;
-    $('count').textContent = entries.length ? `${n} / ${entries.length}` : '';
-    $('empty').textContent = entries.length ? '' : (serial ? 'Waiting for logs…' : 'No device connected');
-    if (st.wrap) {
-      const start = Math.max(0, n - WRAP_MAX);
-      let h = ''; for (let i = start; i < n; i++) { h += rowHtml(i); }
-      win.innerHTML = h;
-      if (stick) { sc.scrollTop = sc.scrollHeight; } else if (S.scroll) {
-        S.scroll = false; win.querySelector(`[data-i="${S.rows[S.cur]}"]`)?.scrollIntoView({ block: 'center' });
-      }
-      if (S.open && S.dirty) { scheduleSearch(true, 500); }
+  let raf = 0, hostVisible = true;
+  // 宿主和页面都可见时才绘制；输入可选宿主状态，输出隐藏任务取消或单次恢复绘制。
+  // 不改变接收与缓存上限；回归：tests/logcat-browser.test.js 隐藏DOM零变化、搜索取消和恢复断言。
+  function syncVisibility(value = hostVisible) {
+    hostVisible = value;
+    if (!hostVisible || document.hidden) {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (S.timer) { clearTimeout(S.timer); S.timer = 0; S.dirty = true; }
       return;
     }
-    spacer.style.height = n * H + 'px';
-    if (stick) { sc.scrollTop = Math.max(0, n * H - sc.clientHeight); }
-    const top = sc.scrollTop, a = Math.max(0, Math.floor(top / H) - 10), b = Math.min(n, Math.ceil((top + sc.clientHeight) / H) + 10);
-    let h = ''; for (let i = a; i < b; i++) { h += rowHtml(i); }
-    win.style.top = a * H + 'px';
-    win.innerHTML = h;
+    render();
+  }
+  document.addEventListener('visibilitychange', () => syncVisibility());
+  // 合并可见时同帧布局；无输入，输出单次绘制，隐藏期间不排队，恢复时显示当前状态。
+  // 回归：tests/logcat-browser.test.js 的追加、缩放和连续帧稳定性断言。
+  function render() { if (hostVisible && !document.hidden && !raf) { raf = requestAnimationFrame(() => { raf = 0; draw(); }); } }
+
+  // 以缓存的实际行高构建前缀坐标；输入为当前 rows，输出完整缓存范围的 offsets。
+  // 未测量行采用编辑器行高估计，显示后立即用浏览器实际高度更新，不删除历史行。
+  // 回归：tests/logcat-browser.test.js 验证超过 3000 行可访问、搜索和跳转。
+  function measureOffsets() {
+    offsets = [0];
+    for (const row of rows) {
+      const height = st.wrap ? rowHeights.get(row.e)?.get(row.i) ?? H : H;
+      offsets.push(offsets[offsets.length - 1] + height);
+    }
+  }
+
+  // 二分定位滚动坐标所属行；输入为像素坐标，输出有界行索引，空列表返回 0。
+  // 回归：tests/logcat-style.test.js 边界断言与浏览器滚动验证。
+  function rowAt(top) {
+    let low = 0, high = rows.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (offsets[mid + 1] <= top) { low = mid + 1; } else { high = mid; }
+    }
+    return Math.min(low, Math.max(0, rows.length - 1));
+  }
+
+  // 保存正在阅读的真实记录及行内偏移；前提是 offsets 对应当前 rows，无输入无返回值。
+  // 回归：tests/logcat-browser.test.js 验证追加与淘汰旧项后存活记录屏幕位置稳定。
+  function rememberAnchor() {
+    if (stick || !rows.length) { return; }
+    const index = rowAt(sc.scrollTop), row = rows[index];
+    viewportAnchor = { e: row.e, i: row.i, offset: sc.scrollTop - offsets[index] };
+  }
+
+  // 同步末尾跟随的唯一状态与按钮；输入布尔值，输出按钮选中和可访问状态。
+  // 回归：tests/logcat-browser.test.js 验证切换、向上滚动、点击日志和追加跟随。
+  function setFollowing(value) {
+    stick = value;
+    const button = $('b-end');
+    if (button && hostVisible && !document.hidden) { button.classList.toggle('on', stick); button.setAttribute('aria-pressed', String(stick)); }
+    if (stick) { viewportAnchor = null; requestedRow = null; } else { rememberAnchor(); }
+  }
+
+  // 返回涉及日志区的非空原生选区；无输入，输出 Selection 或 null，不干扰过滤框/页面其他选区。
+  // 前提是 Webview Selection API 可用；回归：tests/logcat-browser.test.js 框选、扩选和外部选区。
+  function logSelection() {
+    const selection = getSelection();
+    return selection && !selection.isCollapsed && (sc.contains(selection.anchorNode) || sc.contains(selection.focusNode)) ? selection : null;
+  }
+
+  // 复用同一日志记录的行节点；输入可见行范围，输出增删必要节点后的窗口，未变文字不被重建。
+  // 记录/行索引是身份，data-i仅是坐标；只写变化字段，不清除既有top，未匹配批次对日志DOM零修改。
+  // 回归：tests/logcat-browser.test.js filtered-out batches断言零属性写入、选区保留和新匹配正常追加。
+  function updateWindow(a, b) {
+    const previous = new Map(), desired = [];
+    for (const node of win.children) {
+      const row = renderedRows.get(node);
+      if (row) { let lines = previous.get(row.e); if (!lines) { lines = new Map(); previous.set(row.e, lines); } lines.set(row.i, node); }
+    }
+    const template = document.createElement('template');
+    let html = ''; for (let i = a; i < b; i++) { html += rowHtml(i); }
+    template.innerHTML = html;
+    for (const fresh of template.content.children) {
+      const row = rows[+fresh.dataset.i], node = previous.get(row.e)?.get(row.i) || fresh;
+      if (node !== fresh) {
+        if (node.children.length !== fresh.children.length) { node.innerHTML = fresh.innerHTML; }
+        else {
+          // 包名延迟补全只更新相应字段，不销毁用户正在选择的消息文本节点。
+          for (let i = 0; i < node.children.length; i++) {
+            const field = node.children[i], next = fresh.children[i];
+            if (field.innerHTML !== next.innerHTML) { field.innerHTML = next.innerHTML; }
+            if (field.className !== next.className) { field.className = next.className; }
+            if (field.style.cssText !== next.style.cssText) { field.style.cssText = next.style.cssText; }
+          }
+        }
+        if (node.className !== fresh.className) { node.className = fresh.className; }
+        if (node.style.height !== fresh.style.height) { node.style.height = fresh.style.height; }
+        if (node.dataset.i !== fresh.dataset.i) { node.dataset.i = fresh.dataset.i; }
+      }
+      renderedRows.set(node, row); desired.push(node);
+    }
+    const keep = new Set(desired);
+    for (const node of Array.from(win.children)) { if (!keep.has(node)) { node.remove(); } }
+    let cursor = win.firstChild;
+    for (const node of desired) { if (node === cursor) { cursor = cursor.nextSibling; } else { win.insertBefore(node, cursor); } }
+  }
+
+  // 在固定/可变行高模式共用虚拟窗口；无输入，输出测量后的 DOM、总高度和滚动位置。
+  // spacer拥有原生滚动范围，fixed文字层逐行使用视口局部坐标排版，避免大文档坐标与滚动分别取整导致1物理像素跳动。
+  // 本帧插入测量后统一定位，回归 tests/logcat-browser.test.js 同内容字形PNG严格一致及选区/滚动断言。
+  // 回归：tests/logcat-browser.test.js 覆盖换行、跟随、搜索、缩放和淘汰位置断言。
+  function draw() {
+    if (!hostVisible || document.hidden) { return; }
+    const selection = logSelection();
+    if (selection && stick) { setFollowing(false); }
+    const n = rows.length;
+    drawHeader();
+    $('count').textContent = entries.length ? `${n} / ${entries.length}` : '';
+    $('empty').textContent = entries.length ? '' : (serial ? 'Waiting for logs...' : 'No device connected');
+    const key = [st.wrap, st.fmt, sc.clientWidth, H, getComputedStyle(sc).fontFamily, getComputedStyle(sc).fontWeight].join('|');
+    if (layoutKey !== key) { rowHeights = new WeakMap(); layoutKey = key; }
+    measureOffsets();
+    const anchorIndex = viewportAnchor ? rows.findIndex((r) => r.e === viewportAnchor.e && r.i === viewportAnchor.i) : -1;
+    const focus = requestedRow != null && requestedRow < n ? requestedRow : null;
+    let target = stick ? offsets[n] - sc.clientHeight : anchorIndex >= 0 ? offsets[anchorIndex] + viewportAnchor.offset : sc.scrollTop;
+    if (focus != null) { target = offsets[focus] - sc.clientHeight / 2 + H / 2; }
+    target = Math.max(0, target);
+    let a = Math.max(0, rowAt(target) - 10), b = Math.min(n, rowAt(target + sc.clientHeight) + 11);
+    if (selection) {
+      for (const endpoint of [selection.anchorNode, selection.focusNode]) {
+        const node = (endpoint.nodeType === Node.ELEMENT_NODE ? endpoint : endpoint.parentElement)?.closest('.row');
+        const row = node && renderedRows.get(node), index = row ? rows.findIndex((r) => r.e === row.e && r.i === row.i) : -1;
+        if (index >= 0) { a = Math.min(a, index); b = Math.max(b, index + 1); }
+      }
+    }
+    if (spacer.style.height !== offsets[n] + 'px') { spacer.style.height = offsets[n] + 'px'; }
+    const box = sc.getBoundingClientRect(), layer = $('win');
+    if (layer.style.top !== box.top + 'px') { layer.style.top = box.top + 'px'; }
+    if (layer.style.left !== box.left + 'px') { layer.style.left = box.left + 'px'; }
+    if (layer.style.width !== sc.clientWidth + 'px') { layer.style.width = sc.clientWidth + 'px'; }
+    if (viewport.style.height !== sc.clientHeight + 'px') { viewport.style.height = sc.clientHeight + 'px'; }
+    updateWindow(a, b);
+    if (st.wrap) {
+      for (const node of win.children) {
+        const row = rows[+node.dataset.i];
+        let heights = rowHeights.get(row.e);
+        if (!heights) { heights = new Map(); rowHeights.set(row.e, heights); }
+        heights.set(row.i, Math.max(H, node.getBoundingClientRect().height));
+      }
+      measureOffsets();
+    }
+    if (spacer.style.height !== offsets[n] + 'px') { spacer.style.height = offsets[n] + 'px'; }
+    if (stick) { target = offsets[n] - sc.clientHeight; }
+    else if (focus != null) { target = offsets[focus] - sc.clientHeight / 2 + (offsets[focus + 1] - offsets[focus]) / 2; }
+    else if (anchorIndex >= 0) { target = offsets[anchorIndex] + viewportAnchor.offset; }
+    else if (viewportAnchor) { target = 0; }
+    const width = (st.wrap ? 1 : Array.from(win.children).reduce((size, node) => Math.max(size, node.scrollWidth), sc.clientWidth)) + 'px';
+    if (spacer.style.width !== width) { spacer.style.width = width; }
+    const left = -sc.scrollLeft + 'px';
+    if (win.style.left !== left) { win.style.left = left; }
+    const scrollTop = Math.max(0, target);
+    if (sc.scrollTop !== scrollTop) { sc.scrollTop = scrollTop; }
+    for (const node of win.children) {
+      const top = (offsets[+node.dataset.i] - sc.scrollTop) + 'px';
+      if (node.style.top !== top) { node.style.top = top; }
+    }
+    requestedRow = null;
+    rememberAnchor();
     if (S.open && S.dirty) { scheduleSearch(true, 500); }
   }
 
+  document.addEventListener('selectionchange', () => { if (logSelection() && stick) { setFollowing(false); } });
   sc.addEventListener('scroll', () => {
-    stick = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4;
-    if (!st.wrap) { render(); }
+    if (stick && sc.scrollTop + sc.clientHeight < sc.scrollHeight - 2) { setFollowing(false); }
+    rememberAnchor();
+    render();
   });
+  sc.addEventListener('wheel', (ev) => { if (ev.deltaY < 0) { setFollowing(false); } }, { passive: true });
+  sc.addEventListener('click', (ev) => { if (ev.target.closest('.row')) { setFollowing(false); } });
+  sc.addEventListener('pointerdown', (ev) => { if (ev.target.closest('.row')) { setFollowing(false); } });
+  sc.addEventListener('keydown', (ev) => { if (['ArrowUp', 'PageUp', 'Home'].includes(ev.key)) { setFollowing(false); } });
   new ResizeObserver(render).observe(sc);
-  // VS Code 更新 body 上的字体变量时同步行高，保持虚拟列表、搜索和堆栈定位一致。
-  // 输入为 sc 的计算行高；前提是 CSS 提供数值 line-height；输出为 H 和保留的首行位置。
-  // 回归：tests/logcat-style.test.js，npm test；断言大小字号、重复通知和换行模式的定位结果。
+
+  // 从编辑器计算样式同步行高；无输入，输出更新后的 H 与布局，阅读锚点由 draw 保留。
+  // CSS 将继承字号的 1.5em 行高向上对齐整数像素；H 读取同一实际值，避免 scrollHeight 取整交替偏移。
+  // 回归：tests/logcat-style.test.js 行高边界；tests/logcat-browser.test.js 奇数字号持续追加断言基线波动 <0.05px。
   function syncFontMetrics() {
     const height = parseFloat(getComputedStyle(sc).lineHeight);
     if (height === H) { return; }
-    if (!st.wrap) { sc.scrollTop = sc.scrollTop / H * height; }
     H = height;
     render();
   }
@@ -355,11 +497,11 @@
   q.addEventListener('scroll', () => { hl.scrollLeft = q.scrollLeft; });
   const STACK = /^\s+at\s+\S+\(.*\)|^Caused by: /;
   function jumpStack(dir) {
-    const top = Math.floor(sc.scrollTop / H);
+    const top = rowAt(sc.scrollTop);
     for (let i = dir > 0 ? top + 1 : top - 1; i >= 0 && i < rows.length; i += dir) {
       const r = rows[i];
       if (STACK.test(r.e.lines[r.i] || '') && (i === 0 || !STACK.test(rows[i - 1].e.lines[rows[i - 1].i] || '') || dir < 0)) {
-        stick = false; sc.scrollTop = Math.max(0, i * H - H); render(); return;
+        setFollowing(false); requestedRow = i; render(); return;
       }
     }
   }
@@ -532,9 +674,28 @@
   $('fmt').onchange = () => { st.fmt = $('fmt').value; save(); scheduleSearch(false, 0); render(); };
   $('dev').onchange = () => { entries = []; rows = []; vs.postMessage({ type: 'select', serial: $('dev').value }); };
 
+  // 绘制设备与状态快照；无输入，输出当前可见头部，前提由 draw 保证可见，隐藏消息只更新模型。
+  // 回归：tests/logcat-browser.test.js 隐藏设备/状态消息零DOM更新及恢复后的最新值。
+  function drawHeader() {
+    const end = $('b-end');
+    end.classList.toggle('on', stick); end.setAttribute('aria-pressed', String(stick));
+    const sel = $('dev'), sig = JSON.stringify(deviceList) + serial;
+    if (sel.dataset.sig !== sig) {
+      sel.dataset.sig = sig;
+      sel.innerHTML = deviceList.length ? deviceList.map((d) => `<option value="${esc(d.serial)}">${esc(d.name || d.avdName || d.model || d.serial)} (${esc(d.serial)})</option>`).join('') : '<option value="">No devices</option>';
+      sel.value = serial;
+    }
+    const status = $('status');
+    if (status.textContent !== statusText) { status.textContent = statusText; }
+    status.style.display = statusText ? 'block' : 'none';
+  }
+
+  // 更新状态模型和原有四秒过期任务；输入文本，输出待绘制状态，定时回调不直接写DOM。
+  // 回归：tests/logcat-browser.test.js 隐藏状态与恢复；只保留最新状态的一个过期任务。
   function setStatus(text) {
-    const s = $('status'); s.textContent = text; s.style.display = text ? 'block' : 'none';
-    if (text) { setTimeout(() => { s.style.display = 'none'; }, 4000); }
+    statusText = text; clearTimeout(statusTimer); statusTimer = 0;
+    if (text) { statusTimer = setTimeout(() => { statusTimer = 0; statusText = ''; render(); }, 4000); }
+    render();
   }
 
   // 接收后端初始化、设备、日志批次和状态消息；输入为 Webview 消息，输出为界面状态及有界缓存更新。
@@ -542,18 +703,10 @@
   window.addEventListener('message', (ev) => {
     const m = ev.data;
     switch (m.type) {
-      case 'init': icons = m.icons; mine = m.mine || []; maxBytes = Number.isFinite(m.maxBytes) ? m.maxBytes : 1024 * 1024; buildToolbar(); q.value = st.filter; applyWrap(); recompile(); break;
-      case 'devices': {
-        serial = m.serial || '';
-        const sel = $('dev'); const sig = JSON.stringify(m.list) + serial;
-        if (sel.dataset.sig !== sig) {
-          sel.dataset.sig = sig;
-          sel.innerHTML = m.list.length ? m.list.map((d) => `<option value="${esc(d.serial)}">${esc(d.name || d.avdName || d.model || d.serial)} (${esc(d.serial)})</option>`).join('') : '<option value="">No devices</option>';
-          sel.value = serial;
-        }
-        break;
-      }
-      case 'reset': entries = []; rows = []; entriesBytes = 0; S.dirty = true; pending = []; pendingBytes = 0; pkgMap = {}; stick = true; render(); break;
+      case 'visibility': syncVisibility(m.visible); break;
+      case 'init': hostVisible = m.visible !== false; icons = m.icons; mine = m.mine || []; maxBytes = Number.isFinite(m.maxBytes) ? m.maxBytes : 1024 * 1024; buildToolbar(); q.value = st.filter; applyWrap(); recompile(); break;
+      case 'devices': serial = m.serial || ''; deviceList = m.list; render(); break;
+      case 'reset': if (logSelection()) { getSelection().removeAllRanges(); } entries = []; rows = []; entriesBytes = 0; S.dirty = true; pending = []; pendingBytes = 0; pkgMap = {}; viewportAnchor = null; setFollowing(true); render(); break;
       case 'batch': {
         if (paused) {
           const batch = m.items.map(normalizeItem);

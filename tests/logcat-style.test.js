@@ -30,6 +30,45 @@ test('Logcat device selector reserves a separate arrow area', () => {
   assert.ok(js.includes("$('dev').onchange"));
 });
 
+// npm test 执行生产搜索栏构建/开关；断言右侧父容器与 Ctrl+F/Esc 行为，CSS 声明约束左右分区。
+test('Logcat search stays inside log content without moving the toolbar', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/logcat.ts'), 'utf8');
+  assert.ok(source.includes('<div id="main"><div id="side"></div><div id="log-content"><div id="sc" tabindex="0" aria-label="Log messages">'));
+  const nodes = new Map();
+  // 最小 DOM 测试对象仅记录父子关系和事件，不模拟浏览器布局或像素结果。
+  const element = () => ({style:{}, value:'', classList:{add(){},remove(){},toggle(){}}, handlers:{}, addEventListener(type,handler){this.handlers[type]=handler;}, focus(){},select(){}});
+  const get = (id) => { if (!nodes.has(id)) { nodes.set(id,element()); } return nodes.get(id); };
+  const side = get('side'), scNode = get('sc'), content = get('log-content');
+  content.children = [scNode];
+  content.insertBefore = (child, before) => {
+    assert.equal(before, scNode);
+    content.children.splice(content.children.indexOf(before),0,child);
+    child.parentNode=content; nodes.set(child.id,child);
+  };
+  const events = {};
+  const state = {open:false, re:null, rows:[],cur:-1,err:false,timer:0};
+  const ctx = vm.createContext({$:get, sc:scNode, S:state,st:{},getSelection:()=>'',scheduleSearch(){},render(){},save(){},go(){},clearTimeout(){},codicon:()=>'',document:{createElement:element,addEventListener:(type,handler)=>{events[type]=handler;}}});
+  const start = js.indexOf('  function openSearch() {');
+  const end = js.indexOf('  let raf =', start);
+  vm.runInContext(js.slice(start,end),ctx);
+  assert.equal(get('sbar').parentNode,content);
+  assert.equal(content.children.length,2);
+  assert.ok(!content.children.includes(side));
+  for (let i=0;i<2;i++) {
+    events.keydown({ctrlKey:true,metaKey:false,altKey:false,key:'f',preventDefault(){}});
+    assert.equal(state.open,true);
+    assert.equal(get('sbar').style.display,'flex');
+    get('sq').handlers.keydown({key:'Escape',preventDefault(){}});
+    assert.equal(state.open,false);
+    assert.equal(get('sbar').style.display,'none');
+    assert.equal(content.children.length,2);
+  }
+  assert.match(rule('#log-content'),/display:flex;flex-direction:column/);
+  assert.match(rule('#log-content'),/min-height:0/);
+  assert.match(rule('#sc'),/min-height:0/);
+  assert.match(rule('#sbar'),/flex-shrink:0/);
+});
+
 // npm test 无设备回归：断言 UI 根节点使用宿主字体和字号变量。
 test('Logcat UI uses VS Code font variables', () => {
   assert.ok(rule('body').includes('font-family:var(--vscode-font-family)'));
@@ -39,10 +78,19 @@ test('Logcat UI uses VS Code font variables', () => {
 // npm test 无设备回归：日志选择器绑定编辑器变量；成功证据为逐项声明断言通过。
 test('Logcat rows use editor typography rather than bundled fonts', () => {
   const log = rule('#sc');
-  for (const value of ['font-family:var(--vscode-editor-font-family,var(--vscode-font-family))', 'font-size:var(--vscode-editor-font-size,var(--vscode-font-size))', 'font-weight:var(--vscode-editor-font-weight)', 'line-height:1.5']) {
+  for (const value of ['font-family:var(--vscode-editor-font-family,var(--vscode-font-family))', 'font-size:var(--vscode-editor-font-size,var(--vscode-font-size))', 'font-weight:var(--vscode-editor-font-weight)', 'line-height:round(up,1.5em,1px)']) {
     assert.ok(log.includes(value), value);
   }
   assert.doesNotMatch(css, /JetBrains|@font-face|monospace/);
+});
+
+// npm test 验证最低宿主、锁文件与说明同步，避免在不支持 CSS round() 的旧 Webview 安装。
+test('Logcat integer line height requires VS Code 1.95 consistently', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(__dirname, '../package-lock.json'), 'utf8'));
+  assert.equal(manifest.engines.vscode, '^1.95.0');
+  assert.equal(lock.packages[''].engines.vscode, manifest.engines.vscode);
+  assert.match(fs.readFileSync(path.join(__dirname, '../README.md'), 'utf8'), /VS Code 1\.95 or later/);
 });
 
 // npm test 无设备回归：Standard 和 Compact 行模板使用实际 Tab 分隔时间、进程线程、Tag、包名、级别和消息。
@@ -104,27 +152,52 @@ test('Logcat controls inherit typography and only icons retain fixed font size',
   assert.equal(rule('.ib .codicon'), 'font-size:16px');
 });
 
-// npm test 执行实际同步函数；模拟计算行高，断言变大、变小、重复通知与换行定位。
-test('font changes update virtual row height and preserve scroll position', () => {
+// npm test 执行高度前缀、坐标定位与跟随状态函数；边界和空列表断言不依赖浏览器。
+test('virtual offsets and follow state use one measured coordinate model', () => {
+  const start = js.indexOf('  function measureOffsets() {'), end = js.indexOf('  function draw() {', start);
+  const button = {classList:{toggle(name,on){this[name]=on;}},setAttribute(name,value){this[name]=value;}};
+  const entry = {};
+  const ctx = vm.createContext({button, entry, hostVisible:true, document:{hidden:false}, sc:{scrollTop:35}});
+  vm.runInContext("let rows=[{e:entry,i:0},{e:entry,i:1},{e:entry,i:2}],offsets=[0],rowHeights=new WeakMap(),H=20,stick=true,viewportAnchor=null,requestedRow=null;const st={wrap:true};const $=()=>button;rowHeights.set(entry,new Map([[0,30],[1,50]]));\n"+js.slice(start,end),ctx);
+  vm.runInContext('measureOffsets()',ctx);
+  assert.equal(vm.runInContext('offsets.join()',ctx),'0,30,80,100');
+  for (const [top,index] of [[0,0],[29,0],[30,1],[79,1],[80,2],[1000,2]]) {
+    assert.equal(vm.runInContext('rowAt('+top+')',ctx),index);
+  }
+  vm.runInContext('setFollowing(false)',ctx);
+  assert.equal(button.classList.on,false);
+  assert.equal(button['aria-pressed'],'false');
+  assert.equal(vm.runInContext('viewportAnchor.i',ctx),1);
+  assert.equal(vm.runInContext('viewportAnchor.offset',ctx),5);
+  vm.runInContext('setFollowing(true)',ctx);
+  assert.equal(button.classList.on,true);
+  assert.equal(button['aria-pressed'],'true');
+  assert.equal(vm.runInContext('viewportAnchor',ctx),null);
+  vm.runInContext('rows=[];measureOffsets()',ctx);
+  assert.equal(vm.runInContext('rowAt(900)',ctx),0);
+});
+
+// npm test 执行实际同步函数；模拟计算行高，断言行高变化与重复通知，滚动位置由布局层统一管理。
+test('font changes update height without direct scroll writes', () => {
   const start = js.indexOf('  function syncFontMetrics() {');
   const end = js.indexOf('  new MutationObserver', start);
   assert.ok(start >= 0 && end > start);
-  const ctx = vm.createContext({ sc: { scrollTop: 240 }, st: { wrap: false }, height: '36px', calls: 0 });
+  const ctx = vm.createContext({ sc: { scrollTop: 240, style: {} }, st: { wrap: false }, height: '36px', calls: 0 });
   vm.runInContext('let H = 24; const getComputedStyle = () => ({lineHeight: height}); const render = () => calls++;\n' + js.slice(start, end), ctx);
   vm.runInContext('syncFontMetrics()', ctx);
   assert.equal(vm.runInContext('H', ctx), 36);
-  assert.equal(ctx.sc.scrollTop, 360);
+  assert.equal(ctx.sc.scrollTop, 240);
   assert.equal(ctx.calls, 1);
   vm.runInContext('syncFontMetrics()', ctx);
   assert.equal(ctx.calls, 1);
   ctx.height = '18px';
   vm.runInContext('syncFontMetrics()', ctx);
-  assert.equal(ctx.sc.scrollTop, 180);
+  assert.equal(ctx.sc.scrollTop, 240);
   assert.equal(vm.runInContext('H', ctx), 18);
   ctx.st.wrap = true;
   ctx.height = '30px';
   vm.runInContext('syncFontMetrics()', ctx);
-  assert.equal(ctx.sc.scrollTop, 180);
+  assert.equal(ctx.sc.scrollTop, 240);
   assert.equal(vm.runInContext('H', ctx), 30);
   assert.ok(js.includes('new MutationObserver(syncFontMetrics).observe(document.body'));
   assert.ok(js.includes('let H = parseFloat(getComputedStyle(sc).lineHeight)'));

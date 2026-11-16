@@ -48,8 +48,9 @@ export class LogcatView implements vscode.WebviewViewProvider {
   }
 
   // 初始化 Logcat Webview 的结构、资源和生命周期；输入为 VS Code 视图，输出为可交互的日志面板。
-  // 设备选择保留原生 select，独立箭头区不接收点击，文字区为箭头预留空间。
-  // 回归：tests/logcat-style.test.js 断言结构；device-selection-sync.test.js 断言选择错误向宿主可见，均由 npm test 执行。
+  // 设备选择保留原生 select；右侧 log-content 容纳搜索与日志，左侧工具栏不随搜索栏移动。
+  // 前提为宿主提供真实 visible；生命周期事件输出 visibility.visible，隐藏释放采集，旧视图事件不得操作新视图。
+  // 回归：npm test 中 logcat-visibility.test.js 模拟隐藏/销毁/替换；既有样式和选择同步测试分别断言结构与错误。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -64,11 +65,22 @@ export class LogcatView implements vscode.WebviewViewProvider {
 <div id="header"><div class="device-select"><select id="dev" title="Device" aria-label="Device"></select><span class="device-select-arrow" aria-hidden="true"><span class="codicon codicon-chevron-down"></span></span></div><select id="fmt" title="Format"><option value="standard">Standard</option><option value="compact">Compact</option></select>
 <div id="filterbox"><button class="ib" id="hist-btn" title="Filter history"></button><div id="editor"><div id="hl"></div><input id="q" spellcheck="false" placeholder="Filter, e.g. tag:foo level:warn -message:bar"></div><button class="ib" id="fav" title="Favorite"></button></div>
 <span id="count"></span></div>
-<div id="main"><div id="side"></div><div id="sc"><div id="spacer"></div><div id="win"></div><div id="empty"></div><div id="status"></div></div></div>
+<div id="main"><div id="side"></div><div id="log-content"><div id="sc" tabindex="0" aria-label="Log messages"><div id="win"><div id="row-viewport"><div id="row-window"></div></div></div><div id="spacer"></div><div id="empty"></div><div id="status"></div></div></div></div>
 <script src="${u('logcat', 'filter.js')}"></script><script src="${u('logcat', 'buffer.js')}"></script><script src="${u('logcat', 'main.js')}"></script></body></html>`;
-    w.onDidReceiveMessage((m) => this.onMessage(m).catch((error) => vscode.window.showErrorMessage(String(error))));
-    view.onDidChangeVisibility(() => { if (view.visible) { this.startPolling(); } else { this.stopPolling(); this.stopStream(); } });
-    view.onDidDispose(() => { this.stopPolling(); this.stopStream(); this.view = undefined; });
+    w.onDidReceiveMessage((m) => {
+      if (this.view !== view) { return; }
+      return this.onMessage(m).catch((error) => vscode.window.showErrorMessage(String(error)));
+    });
+    view.onDidChangeVisibility(() => {
+      if (this.view !== view) { return; }
+      this.post({ type: 'visibility', visible: view.visible });
+      if (view.visible) { this.startPolling(); } else { this.stopPolling(); this.stopStream(); }
+    });
+    view.onDidDispose(() => {
+      if (this.view !== view) { return; }
+      this.view = undefined;
+      this.stopPolling(); this.stopStream();
+    });
   }
 
   // 打开日志面板；可不传设备，传入时同步两侧选择，不对同一日志流重复启动。
@@ -94,13 +106,19 @@ export class LogcatView implements vscode.WebviewViewProvider {
 
   private post(m: any) { this.view?.webview.postMessage(m); }
 
-  // 分派日志操作，选择交给同步入口并将错误交还宿主；npm test device selection sync 断言真实 select 消息。
+  // 分派输入消息，选择交给同步入口并将错误交还宿主；ready 在项目扫描后输出当前 init.visible。
+  // 前提为消息属于当前视图；扫描期间销毁则不初始化新视图，隐藏则初始化为 false 且不采集。
+  // 回归：npm test 的 logcat-visibility.test.js 延迟 mine 并隐藏/销毁，device-selection-sync.test.js 覆盖真实 select。
   private async onMessage(m: any) {
     switch (m.type) {
-      case 'ready':
-        this.post({ type: 'init', icons: this.icons(), mine: await this.mine(), maxBytes: this.maxBytes() });
+      case 'ready': {
+        const view = this.view;
+        const mine = await this.mine();
+        if (!view || this.view !== view) { return; }
+        this.post({ type: 'init', icons: this.icons(), mine, maxBytes: this.maxBytes(), visible: view.visible });
         this.startPolling();
         break;
+      }
       case 'select': await this.select(m.serial); break;
       case 'clear': if (this.serial) { await adb(this.serial, 'logcat', '-c').catch(() => {}); } break;
       case 'restart': this.start(); break;
@@ -110,16 +128,24 @@ export class LogcatView implements vscode.WebviewViewProvider {
     }
   }
 
-  // 沿用设备目录刷新，同步自动选择或断开后的空值；发现失败可见且不误清除选择。
-  // 回归：npm test，tests/device-selection-sync.test.js 驱动现有 tick，断言自动选择、断开和错误。
+  // 仅为当前可见宿主轮询设备；无输入/返回值，发现结果更新目录后，仅存活可见视图可同步选择、投递 DOM 或启动流。
+  // listDevices 与 select 均可能跨越隐藏/销毁，续体必须重新核对真实视图所有权与 visible，不改变既有轮询频率。
+  // 回归：npm test 的 logcat-visibility.test.js 控制两个异步边界，断言隐藏零投递/零新流与显示恢复；选择同步测试覆盖断开和显式报错。
   private startPolling() {
     this.stopPolling();
+    const view = this.view;
+    if (!view?.visible) { return; }
     const tick = async () => {
+      if (this.view !== view || !view.visible) { return; }
       try {
-        this.devices = (await listDevices()).filter((d) => d.state === 'device');
+        const devices = (await listDevices()).filter((d) => d.state === 'device');
+        if (this.view !== view) { return; }
+        this.devices = devices;
+        if (!view.visible) { return; }
         if (!this.devices.some((d) => d.serial === this.serial)) {
           await this.select(this.devices[0]?.serial);
         }
+        if (this.view !== view || !view.visible) { return; }
         this.post({ type: 'devices', list: this.devices, serial: this.serial });
         if (this.serial && !this.proc) { this.start(); }
       } catch (error) { vscode.window.showErrorMessage(String(error)); }

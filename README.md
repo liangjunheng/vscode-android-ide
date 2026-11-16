@@ -33,10 +33,11 @@ Device tooling for Android inside VS Code, inspired by the tools found in Androi
 - Studio-like filter language: `tag:`, `package:`, `process:`, `message:`, `line:`, `level:`, `age:`, `is:crash`, `is:stacktrace`, with `=` (exact) and `~` (regex) variants, `-` negation, parentheses, `&`/`|`.
 - Autocompletion of keys and values (tags and packages seen in the logs), filter history with match counts, favorites, match case.
 - Standard and compact formats, soft-wrap, pause, restart, stack trace navigation, screenshot and recording buttons.
+- Soft-wrap uses the available log viewport without hiding older buffered lines. Scroll to the End is a selected follow-mode toggle; clicking a log or scrolling up exits follow mode. The find bar occupies only the log area, leaving the left toolbar in place.
 
 ## Requirements
 
-- VS Code 1.85 or later.
+- VS Code 1.95 or later (Chromium support for integer-aligned Logcat line heights).
 - The **Android SDK** (platform-tools, emulator, and cmdline-tools for creating AVDs). It is found through the `android.sdkPath` setting, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the default install location.
 - No other install is needed: scrcpy's server is bundled.
 - Tested on macOS (Apple Silicon). Linux and Windows are expected to work but are less tested.

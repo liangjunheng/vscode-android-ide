@@ -62,7 +62,8 @@ test('actual ingestion and paused queues remain bounded', () => {
   assert.equal(vm.runInContext("entries.map(e => e.lines.join('')).join(',')", ctx), 'bbbb,cccc');
   vm.runInContext("entries=[]; rows=[]; entriesBytes=0; ingest(Array.from({length:20}, () => ({msg:'abc', ts:'1', pid:1, tid:1, lv:'I', tag:'t'})))", ctx);
   assert.equal(vm.runInContext('entriesBytes', ctx), 12);
-  assert.equal(vm.runInContext('entries[0].lines.length', ctx), 3);
+  assert.equal(vm.runInContext('entries.length', ctx), 3);
+  assert.equal(vm.runInContext('entries[0].lines.length', ctx), 1);
   assert.equal(vm.runInContext('rows.length', ctx), 3);
   vm.runInContext("pending = [{msg:'aaaa'}, {msg:'bbbb'}, {msg:'cccc'}]; trimPending()", ctx);
   assert.equal(vm.runInContext('pendingBytes', ctx), 10);
@@ -70,6 +71,33 @@ test('actual ingestion and paused queues remain bounded', () => {
   vm.runInContext("ingest([{msg:'x'.repeat(100), ts:'9', pid:2, tid:2, lv:'E', tag:'t'}])", ctx);
   assert.equal(vm.runInContext('entriesBytes', ctx), 12);
   assert.equal(vm.runInContext('entries[0].lines[0].length', ctx), 11);
+});
+
+// npm test 回归接收到渲染的完整路径：相同毫秒/进程/Tag的独立消息不能误合并；只有消息内换行可省略元数据。
+test('identical headers stay independent through ingestion rendering and search', () => {
+  const data = main.slice(main.indexOf('  const itemBytes ='), main.indexOf('  function recompile()'));
+  const rendering = main.slice(main.indexOf('  function rowHtml(i) {'), main.indexOf('  function buildRe()'));
+  const ctx = vm.createContext({LogcatBuffer, LogFilter:require('../media/logcat/filter.js')});
+  vm.runInContext("let entries=[],rows=[],maxBytes=10000,entriesBytes=0,pending=[],pendingBytes=0,pkgMap={}; const compiled={test:()=>true}; const S={cur:-1,re:null}; const st={fmt:'standard',wrap:false}; const H=24; const esc=s=>s; const tagColor=()=> 'red';\n" + data + rendering, ctx);
+  const header = {ts:'2026-11-16 18:00:00.001',pid:123,tid:456,lv:'I',tag:'SharedTag',pkg:'com.app',rx:1};
+  ctx.batch = [{...header,msg:'first'}, {...header,msg:'second'}];
+  vm.runInContext('ingest(batch)', ctx);
+  ctx.batch = [{...header,msg:'third'}, {...header,msg:'multi\ncontinued'}];
+  vm.runInContext('ingest(batch)', ctx);
+  assert.equal(vm.runInContext('entries.length', ctx), 4);
+  assert.equal(vm.runInContext('rows.length', ctx), 5);
+  assert.equal(vm.runInContext('entriesBytes', ctx), ['first','second','third','multi\ncontinued'].reduce((n,s)=>n+Buffer.byteLength(s)+1,0));
+  for (const fmt of ['standard','compact']) {
+    vm.runInContext('st.fmt=' + JSON.stringify(fmt), ctx);
+    for (const [i,msg] of ['first','second','third','multi'].entries()) {
+      const text = vm.runInContext('rowHtml(' + i + ')',ctx).replace(/<[^>]*>/g,'');
+      assert.equal(text, (fmt === 'standard' ? [header.ts,'123-456',header.tag,header.pkg,'I',msg] : [header.ts.slice(11),'I',header.tag,msg]).join('\t'));
+      assert.ok(vm.runInContext('rowFields(' + i + ')',ctx).includes(header.tag));
+    }
+    const continuation = vm.runInContext('rowHtml(4)',ctx).replace(/<[^>]*>/g,'');
+    assert.equal(continuation, (fmt === 'standard' ? ['','','','','','continued'] : ['','','','continued']).join('\t'));
+    assert.equal(vm.runInContext('rowFields(4).join()',ctx),'continued');
+  }
 });
 
 // 回归暂停队列接入；正常和暂停路径必须引用同一上限与淘汰函数，避免暂停时无限增长。
