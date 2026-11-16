@@ -197,10 +197,12 @@
           "default": 150,
           "description": "Minimum delay between screen captures in the screenshot fallback mode (physical devices without scrcpy support)."
         },
-        "android.logcat.maxEntries": {
+        "android.logcat.maxBytes": {
           "type": "number",
-          "default": 50000,
-          "description": "Maximum number of Logcat entries kept in memory."
+          "default": 1048576,
+          "minimum": 65536,
+          "maximum": 67108864,
+          "description": "Maximum UTF-8 bytes of Logcat content kept in memory (default matches Android Studio)."
         },
         "android.fixSoftwareRendering": {
           "type": "boolean",

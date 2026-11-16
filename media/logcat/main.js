@@ -1,13 +1,15 @@
 (function () {
   const vs = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
-  const H = 16, WRAP_MAX = 3000;
+  const WRAP_MAX = 3000;
   const st = Object.assign({ history: [], favs: [], filter: '', fmt: 'standard', wrap: false }, vs.getState() || {});
   const save = () => vs.setState(st);
 
-  let entries = [], rows = [], mine = [], max = 50000;
+  let entries = [], rows = [], mine = [], maxBytes = 1024 * 1024;
+  let entriesBytes = 0, pendingBytes = 0;
   let paused = false, pending = [], stick = true, serial = '', compiled = null, pkgMap = {};
   const sc = $('sc'), win = $('win'), spacer = $('spacer'), q = $('q'), hl = $('hl');
+  let H = parseFloat(getComputedStyle(sc).lineHeight);
   let icons = {};
   const S = { open: false, re: null, rows: [], cur: -1, err: false, dirty: false, scroll: false, timer: 0 };
 
@@ -23,9 +25,11 @@
     parent.appendChild(b); return b;
   }
 
+  // 构建 Logcat 工具栏；输入为当前 Webview 控件，输出为清空、暂停、滚动和采集操作入口。
+  // 清空按钮同时重置正常与暂停缓存的字节计数；回归：tests/logcat-buffer.test.js。
   function buildToolbar() {
     const side = $('side'); side.innerHTML = '';
-    btn('b-clear', 'Clear Logcat', svg('lc-delete'), () => { entries = []; rows = []; pending = []; S.dirty = true; render(); vs.postMessage({ type: 'clear' }); }, side);
+    btn('b-clear', 'Clear Logcat', svg('lc-delete'), () => { entries = []; rows = []; pending = []; entriesBytes = 0; pendingBytes = 0; S.dirty = true; render(); vs.postMessage({ type: 'clear' }); }, side);
     btn('b-pause', 'Pause Logcat', svg('lc-pause'), togglePause, side);
     btn('b-restart', 'Restart Logcat', svg('lc-refresh'), () => vs.postMessage({ type: 'restart' }), side);
     btn('b-end', 'Scroll to the End', svg('lc-scroll-end'), () => { stick = true; render(); }, side);
@@ -40,13 +44,15 @@
     updateFav();
   }
 
+  // 切换日志接收状态；输入无，输出为暂停队列转入有界 entries 或继续暂存。
+  // 恢复时先清除 pendingBytes 再交给 ingest，避免重复计量；回归：tests/logcat-buffer.test.js。
   function togglePause() {
     paused = !paused;
     const b = $('b-pause');
     b.classList.toggle('on', paused);
     b.innerHTML = paused ? codicon('debug-continue') : svg('lc-pause');
     b.title = paused ? 'Resume Logcat' : 'Pause Logcat';
-    if (!paused) { const p = pending; pending = []; ingest(p); render(); }
+    if (!paused) { const p = pending; pending = []; pendingBytes = 0; ingest(p); render(); }
   }
 
   function applyWrap() {
@@ -57,26 +63,62 @@
   }
 
   // ---- data ----
+  // 计算日志项占用的 UTF-8 字节数；输入为含 msg 的 ADB 项，输出含换行预算的字节数。
+  // 前置条件是 msg 可转为字符串；回归：tests/logcat-buffer.test.js。
+  const itemBytes = (item) => LogcatBuffer.utf8Bytes(item.msg) + 1;
+
+  // 截断超长日志项；输入为 ADB 项和当前上限，输出不超过上限的副本。
+  // 前置条件是 maxBytes 已由后端限制；回归：tests/logcat-buffer.test.js。
+  const normalizeItem = (item) => ({ ...item, msg: LogcatBuffer.truncateUtf8(item.msg, maxBytes - 1) });
+
+  // 让正常日志和暂停队列共享同一有界缓存；输入为日志数组，输出为淘汰后的字节数。
+  // 前置条件是 maxBytes 已由后端校验；结果是最旧消息被移除，内存不随时间无限增长。
+  // 回归：tests/logcat-buffer.test.js，npm test 执行真实接收函数并断言多行预算及保留内容。
+  function trimEntries() {
+    while (entriesBytes > maxBytes && entries.length) {
+      const first = entries[0];
+      if (first.lines.length > 1) {
+        const removed = LogcatBuffer.utf8Bytes(first.lines.shift()) + 1;
+        first.bytes -= removed; entriesBytes -= removed;
+      } else { entriesBytes -= entries.shift().bytes; }
+    }
+    rebuild();
+  }
+
+  // 暂停时也限制待处理日志；输入为 pending 队列，输出为保留队列的字节数。
+  // 回归：tests/logcat-buffer.test.js，npm test；断言超限后保留最新内容且队列有界。
+  function trimPending() {
+    pendingBytes = LogcatBuffer.trimOldest(pending, maxBytes, itemBytes);
+  }
+
   const filterView = (e) => ({ tag: e.tag, pkg: e.pkg, lines: e.lines, lv: e.lv, lvn: e.lvn, rx: e.rx, pid: e.pid, tid: e.tid });
   const visible = (e) => compiled.test(filterView(e));
 
   function pushRows(e) { for (let i = 0; i < e.lines.length; i++) { rows.push({ e, i }); } }
 
+  // 合并日志行并维护 UTF-8 字节预算；输入为 ADB 日志项，输出更新后的有界 entries。
+  // 前置条件是每项包含 msg；超长单项先截断，超出总预算时淘汰最旧记录。
+  // 回归：tests/logcat-buffer.test.js，npm test 断言批量、多行和超长消息均不超过预算。
   function ingest(items) {
-    for (const it of items) {
+    for (const raw of items) {
+      const it = normalizeItem(raw);
+      const bytes = itemBytes(it);
       const last = entries[entries.length - 1];
       if (last && last.ts === it.ts && last.pid === it.pid && last.tid === it.tid && last.lv === it.lv && last.tag === it.tag) {
         last.lines.push(it.msg);
+        last.bytes += bytes;
+        entriesBytes += bytes;
         if (last.vis) { rows.push({ e: last, i: last.lines.length - 1 }); }
         else if (visible(last)) { last.vis = true; pushRows(last); }
         continue;
       }
-      const e = { ts: it.ts, pid: it.pid, tid: it.tid, lv: it.lv, lvn: LogFilter.LEVELS[it.lv] || 4, tag: it.tag, pkg: it.pkg || pkgMap[it.pid] || '', lines: [it.msg], rx: it.rx };
+      const e = { ts: it.ts, pid: it.pid, tid: it.tid, lv: it.lv, lvn: LogFilter.LEVELS[it.lv] || 4, tag: it.tag, pkg: it.pkg || pkgMap[it.pid] || '', lines: [it.msg], bytes, rx: it.rx };
       entries.push(e);
+      entriesBytes += bytes;
       if (visible(e)) { e.vis = true; pushRows(e); }
     }
     S.dirty = true;
-    if (entries.length > max * 1.1) { entries = entries.slice(entries.length - max); rebuild(); }
+    if (entriesBytes > maxBytes) { trimEntries(); }
   }
 
   function rebuild() {
@@ -102,20 +144,20 @@
   }
 
   // ---- rendering ----
+  // 将指定日志行渲染为 HTML；前提是行索引有效，独立记录首行显示完整元数据，续行留空，不跨记录隐藏重复 Tag。
+  // 回归：tests/logcat-style.test.js 的 row fields 测试执行本函数，断言 Standard/Compact 和续行间隔。
   function rowHtml(i) {
     const { e, i: li } = rows[i];
-    const prev = rows[i - 1];
     const first = li === 0;
-    const hideTag = first && prev && prev.e.tag === e.tag && prev.e.pid === e.pid;
     const msg = hx(e.lines[li]);
     const cur = S.cur >= 0 && S.rows[S.cur] === i ? ' cur' : '';
     if (st.fmt === 'compact') {
-      const head = first ? `<span class="ctime">${hx(e.ts.slice(11))}</span><span class="lvb">${e.lv}</span>` : '<span class="ctime"></span><span class="lvb" style="visibility:hidden"> </span>';
-      const tg = first && !hideTag ? `<span style="color:${tagColor(e.tag)}">${hx(e.tag)}</span>: ` : '';
-      return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${H}px">${head}<span class="m">${tg}${msg}</span></div>`;
+      const head = `<span class="ctime">${first ? hx(e.ts.slice(11)) : ''}</span>\t<span class="lvb">${first ? e.lv : ''}</span>`;
+      const tg = `<span style="color:${tagColor(e.tag)}">${first ? hx(e.tag) : ''}</span>`;
+      return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${H}px">${head}\t<span class="tg-inline">${tg}</span>\t<span class="m">${msg}</span></div>`;
     }
-    const lv = first ? `<span class="lvb">${e.lv}</span>` : '<span class="lvb" style="visibility:hidden"> </span>';
-    return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${st.wrap ? 'auto' : H + 'px'}"><span class="ts">${first ? hx(e.ts) : ''}</span><span class="pt">${first ? hx(e.pid + '-' + e.tid) : ''}</span><span class="tg" style="color:${tagColor(e.tag)}" title="${esc(e.tag)}">${first && !hideTag ? hx(e.tag) : ''}</span><span class="pk" title="${esc(e.pkg)}">${first ? hx(e.pkg) : ''}</span>${lv}<span class="m">${msg}</span></div>`;
+    const lv = `<span class="lvb">${first ? e.lv : ''}</span>`;
+    return `<div class="row lv-${e.lv}${cur}" data-i="${i}" style="height:${st.wrap ? 'auto' : H + 'px'}"><span class="ts">${first ? hx(e.ts) : ''}</span>\t<span class="pt">${first ? hx(e.pid + '-' + e.tid) : ''}</span>\t<span class="tg" style="color:${tagColor(e.tag)}" title="${esc(e.tag)}">${first ? hx(e.tag) : ''}</span>\t<span class="pk" title="${esc(e.pkg)}">${first ? hx(e.pkg) : ''}</span>\t${lv}\t<span class="m">${msg}</span></div>`;
   }
 
   // ---- search in the log (find bar) ----
@@ -131,14 +173,14 @@
     return out + esc(s.slice(p));
   }
 
-  // Fields displayed for a row, so that the search only matches what is visible.
+  // 收集有效行索引对应的可见搜索字段，返回字符串数组；首行包含当前格式的元数据，续行只搜索消息，空源值不伪造。
+  // 回归：tests/logcat-style.test.js，npm test 验证重复 Tag、续行渲染和搜索一致。
   function rowFields(i) {
     const { e, i: li } = rows[i];
-    const prev = rows[i - 1];
     const f = [];
     if (li === 0) {
-      const tag = prev && prev.e.tag === e.tag && prev.e.pid === e.pid ? '' : e.tag;
-      if (st.fmt === 'compact') { f.push(e.ts.slice(11), tag); } else { f.push(e.ts, e.pid + '-' + e.tid, tag, e.pkg); }
+      if (st.fmt === 'compact') { f.push(e.ts.slice(11)); } else { f.push(e.ts, e.pid + '-' + e.tid, e.pkg); }
+      f.push(e.lv, e.tag);
     }
     f.push(e.lines[li]);
     return f;
@@ -291,6 +333,17 @@
     if (!st.wrap) { render(); }
   });
   new ResizeObserver(render).observe(sc);
+  // VS Code 更新 body 上的字体变量时同步行高，保持虚拟列表、搜索和堆栈定位一致。
+  // 输入为 sc 的计算行高；前提是 CSS 提供数值 line-height；输出为 H 和保留的首行位置。
+  // 回归：tests/logcat-style.test.js，npm test；断言大小字号、重复通知和换行模式的定位结果。
+  function syncFontMetrics() {
+    const height = parseFloat(getComputedStyle(sc).lineHeight);
+    if (height === H) { return; }
+    if (!st.wrap) { sc.scrollTop = sc.scrollTop / H * height; }
+    H = height;
+    render();
+  }
+  new MutationObserver(syncFontMetrics).observe(document.body, { attributes: true, attributeFilter: ['style', 'class'] });
 
   // ---- filter input, history, favorites ----
   function setFilter(v, remember) {
@@ -484,10 +537,12 @@
     if (text) { setTimeout(() => { s.style.display = 'none'; }, 4000); }
   }
 
+  // 接收后端初始化、设备、日志批次和状态消息；输入为 Webview 消息，输出为界面状态及有界缓存更新。
+  // init/reset/batch 分支维护 maxBytes、entriesBytes 和 pendingBytes；回归：tests/logcat-buffer.test.js。
   window.addEventListener('message', (ev) => {
     const m = ev.data;
     switch (m.type) {
-      case 'init': icons = m.icons; mine = m.mine || []; max = m.max || 50000; buildToolbar(); q.value = st.filter; applyWrap(); recompile(); break;
+      case 'init': icons = m.icons; mine = m.mine || []; maxBytes = Number.isFinite(m.maxBytes) ? m.maxBytes : 1024 * 1024; buildToolbar(); q.value = st.filter; applyWrap(); recompile(); break;
       case 'devices': {
         serial = m.serial || '';
         const sel = $('dev'); const sig = JSON.stringify(m.list) + serial;
@@ -498,8 +553,16 @@
         }
         break;
       }
-      case 'reset': entries = []; rows = []; S.dirty = true; pending = []; pkgMap = {}; stick = true; render(); break;
-      case 'batch': if (paused) { pending.push(...m.items); } else { ingest(m.items); render(); } break;
+      case 'reset': entries = []; rows = []; entriesBytes = 0; S.dirty = true; pending = []; pendingBytes = 0; pkgMap = {}; stick = true; render(); break;
+      case 'batch': {
+        if (paused) {
+          const batch = m.items.map(normalizeItem);
+          for (const item of batch) { pending.push(item); }
+          pendingBytes += batch.reduce((sum, item) => sum + itemBytes(item), 0);
+          trimPending();
+        } else { ingest(m.items); render(); }
+        break;
+      }
       case 'pkgs': {
         Object.assign(pkgMap, m.map);
         let changed = false;

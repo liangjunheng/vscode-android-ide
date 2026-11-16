@@ -5,6 +5,9 @@ import { ChildProcess, spawn } from 'child_process';
 import { Device, adb, adbPath, listDevices, sdkRoot } from './sdk';
 
 const LINE = /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+(.*?)\s*:\s?(.*)$/;
+const DEFAULT_LOGCAT_MAX_BYTES = 1024 * 1024;
+const MIN_LOGCAT_MAX_BYTES = 64 * 1024;
+const MAX_LOGCAT_MAX_BYTES = 64 * 1024 * 1024;
 
 interface Item { ts: string; pid: number; tid: number; lv: string; tag: string; pkg: string; msg: string; rx: number; }
 
@@ -24,6 +27,17 @@ export class LogcatView implements vscode.WebviewViewProvider {
 
   constructor(private extPath: string) {}
 
+  /**
+   * 读取并校验 Logcat 内存上限；输入为 VS Code 配置，输出为 64 KiB 至 64 MiB 的整数。
+   * 前置条件是配置服务可用；默认值与 Android Studio 的 1 MiB 循环缓冲一致，避免无限增长。
+   * 回归：tests/logcat-buffer.test.js 与 npm test 断言默认值、边界和初始化字段。
+   */
+  private maxBytes() {
+    const configured = Number(vscode.workspace.getConfiguration('android').get('logcat.maxBytes', DEFAULT_LOGCAT_MAX_BYTES));
+    const value = Number.isFinite(configured) ? Math.floor(configured) : DEFAULT_LOGCAT_MAX_BYTES;
+    return Math.min(MAX_LOGCAT_MAX_BYTES, Math.max(MIN_LOGCAT_MAX_BYTES, value));
+  }
+
   private icons() {
     const out: Record<string, string> = {};
     for (const n of ['logcat', 'wrap-text', 'filter-history', 'favorite', 'favorite-filled', 'screenshot', 'record', ...['delete', 'pause', 'refresh', 'scroll-end', 'up', 'down', 'softwrap'].map((x) => `lc-${x}`)]) {
@@ -32,6 +46,9 @@ export class LogcatView implements vscode.WebviewViewProvider {
     return out;
   }
 
+  // 初始化 Logcat Webview 的结构、资源和生命周期；输入为 VS Code 视图，输出为可交互的日志面板。
+  // 设备选择保留原生 select，独立箭头区不接收点击，文字区为箭头预留空间。
+  // 回归：tests/logcat-style.test.js，npm test 断言设备选择结构、箭头宽度与文字区隔离。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -43,11 +60,11 @@ export class LogcatView implements vscode.WebviewViewProvider {
     w.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
 <link rel="stylesheet" href="${w.asWebviewUri(vscode.Uri.joinPath(codicons, 'codicon.css'))}">
 <link rel="stylesheet" href="${u('logcat', 'main.css')}"></head><body>
-<div id="header"><select id="dev" title="Device"></select><select id="fmt" title="Format"><option value="standard">Standard</option><option value="compact">Compact</option></select>
+<div id="header"><div class="device-select"><select id="dev" title="Device" aria-label="Device"></select><span class="device-select-arrow" aria-hidden="true"><span class="codicon codicon-chevron-down"></span></span></div><select id="fmt" title="Format"><option value="standard">Standard</option><option value="compact">Compact</option></select>
 <div id="filterbox"><button class="ib" id="hist-btn" title="Filter history"></button><div id="editor"><div id="hl"></div><input id="q" spellcheck="false" placeholder="Filter, e.g. tag:foo level:warn -message:bar"></div><button class="ib" id="fav" title="Favorite"></button></div>
 <span id="count"></span></div>
 <div id="main"><div id="side"></div><div id="sc"><div id="spacer"></div><div id="win"></div><div id="empty"></div><div id="status"></div></div></div>
-<script src="${u('logcat', 'filter.js')}"></script><script src="${u('logcat', 'main.js')}"></script></body></html>`;
+<script src="${u('logcat', 'filter.js')}"></script><script src="${u('logcat', 'buffer.js')}"></script><script src="${u('logcat', 'main.js')}"></script></body></html>`;
     w.onDidReceiveMessage((m) => this.onMessage(m).catch(() => {}));
     view.onDidChangeVisibility(() => { if (view.visible) { this.startPolling(); } else { this.stopPolling(); this.stopStream(); } });
     view.onDidDispose(() => { this.stopPolling(); this.stopStream(); this.view = undefined; });
@@ -64,7 +81,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
   private async onMessage(m: any) {
     switch (m.type) {
       case 'ready':
-        this.post({ type: 'init', icons: this.icons(), mine: await this.mine(), max: vscode.workspace.getConfiguration('android').get('logcat.maxEntries', 50000) });
+        this.post({ type: 'init', icons: this.icons(), mine: await this.mine(), maxBytes: this.maxBytes() });
         this.startPolling();
         break;
       case 'select': this.serial = m.serial; this.start(); break;

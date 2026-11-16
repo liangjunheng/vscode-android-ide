@@ -49,7 +49,7 @@ Device tooling for Android inside VS Code, inspired by the tools found in Androi
 | `android.embeddedEmulator` | `true` | Launch emulators without their own window (`-qt-hide-window -grpc <port>`) and show them in Running Devices. |
 | `android.fixSoftwareRendering` | `true` | Before launching an AVD with `hw.gpu.enabled=no` (the `avdmanager` default, very slow), switch it to host GPU by editing its `config.ini`. |
 | `android.mirrorIntervalMs` | `150` | Delay between captures in screenshot fallback mode. |
-| `android.logcat.maxEntries` | `50000` | Logcat entries kept in memory. |
+| `android.logcat.maxBytes` | `1048576` (1 MiB) | UTF-8 message content budget per active/paused buffer; oldest records are evicted. Range: 65536 to 67108864 bytes. Reopen the Logcat view after changing. Replaces `android.logcat.maxEntries`. This is not a total JavaScript heap limit. |
 
 ## What the extension changes on your machine
 
