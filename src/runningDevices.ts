@@ -213,6 +213,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     } finally { this.capturing = false; }
   }
 
+  // 分派 Webview 输入；wake 对当前设备发送只亮屏不切换电源的命令，失败交由消息入口报告。
+  // 回归：npm test，无设备/三种模式/失败均由 tests/mirror-interaction.test.js 断言。
   private async onMessage(m: any) {
     const s = this.serial;
     switch (m.type) {
@@ -222,6 +224,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
       case 'ext': if (s) { vscode.commands.executeCommand('android.extendedControls', { serial: s }); } return;
       case 'logcat': if (s) { vscode.commands.executeCommand('android.showLogcat', { serial: s }); } return;
       case 'reboot': if (s) { return this.reboot(s); } return;
+      case 'wake': if (s) { await adb(s, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); } return;
       case 'openDM': vscode.commands.executeCommand('android.deviceManager.focus'); return;
       case 'viewport': this.viewport = { w: Math.max(200, m.w), h: Math.max(200, m.h) }; this.emu?.setViewport(this.viewport); return;
       case 'ack': this.inflight = false; return this.flush();
@@ -324,12 +327,13 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   }
 }
 
+// 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标随宽度缩小且最大 24px，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
 function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline';">
 <link rel="stylesheet" href="${codicons}"><style>
-body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);display:flex;flex-direction:column;align-items:center;gap:6px;height:100vh;box-sizing:border-box}
-#tabs{display:flex;width:100%;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box}
+body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);display:flex;flex-direction:column;align-items:center;gap:0;height:100vh;box-sizing:border-box}
+#tabs{display:flex;flex:none;width:100%;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box}
 #tab{position:relative;display:flex;align-items:center;gap:8px;padding:4px 10px;border:1px solid var(--vscode-focusBorder,#3574f0);background:var(--vscode-list-inactiveSelectionBackground,#2e436e);border-radius:6px;max-width:100%}
 #tab svg{width:18px;height:18px}
 #tab .dot{position:absolute;left:24px;bottom:5px;width:6px;height:6px;border-radius:50%;background:#57965c}
@@ -338,17 +342,33 @@ body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--
 #tab.multi select{padding-right:0}
 #tab select{background:transparent;border:0;color:inherit;font-size:14px;appearance:none;-webkit-appearance:none;outline:0;cursor:pointer;padding:0 4px;text-overflow:ellipsis;max-width:320px}
 .dk,.lt{display:none}body:not(.vscode-light) .dk{display:flex}body.vscode-light .lt{display:flex}
-#bar{display:flex;gap:2px;flex-wrap:wrap;width:100%;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box;align-items:center}
+#bar{display:flex;flex:none;justify-content:space-between;gap:4px;flex-wrap:nowrap;width:100%;height:43px;padding:6px 0;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box;align-items:center}
+#bar .tool-group{display:flex;flex:0 1 auto;min-width:0;gap:2px}
+#bar .sep{width:1px;height:22px;flex:none;background:var(--vscode-panel-border,#555)}
+#bar button{flex:0 1 30px;min-width:0}
+#bar button svg{max-width:100%;height:auto;max-height:20px}
+#bar button .codicon{max-width:100%;overflow:hidden}
 button{background:transparent;color:var(--vscode-icon-foreground);border:0;width:30px;height:30px;padding:0;cursor:pointer;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-size:16px}
 button:hover{background:var(--vscode-toolbar-hoverBackground)}
 button svg{width:20px;height:20px}
 #rec.on{background:#db3b4b33}
 #timer{font-size:11px;color:#db3b4b;align-self:center}
-.sep{width:1px;height:22px;background:var(--vscode-panel-border,#555);margin:0 6px}
-#wrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;width:100%;padding:8px;box-sizing:border-box}
-#screen,#cv{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;cursor:default;user-select:none;outline:none}
+#status{display:flex;flex:none;align-items:center;justify-content:center;gap:8px;max-width:100%;min-height:18px}
+#wrap{flex:1;min-height:0;display:flex;align-items:flex-start;justify-content:center;width:100%;padding:0 8px 8px;box-sizing:border-box}
+#screen,#cv{max-width:100%;max-height:100%;object-fit:contain;object-position:top center;border-radius:8px;cursor:default;user-select:none;outline:none}
 #screen{display:none}
-#frame{display:contents}
+#stage{display:flex;flex-direction:column;flex:none;min-width:0;gap:0}
+#navigation{--nav-icon-max:24px;--nav-icon-ratio:0.08;--nav-padding:4px;--nav-icon-size:24px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;flex:none}
+#navigation button{width:100%;height:auto;min-width:0;border-radius:0;padding:var(--nav-padding) 0}
+#navigation button svg{width:var(--nav-icon-size);height:var(--nav-icon-size);max-width:100%;flex:none}
+#frame{display:block;position:relative;flex:none;background:#000}
+#placeholder{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:#000;color:#fff;text-align:center;padding:12px;box-sizing:border-box;overflow:hidden}
+#placeholder[hidden]{display:none}
+#placeholder .codicon{font-size:28px;flex:none}
+#placeholder-text{max-width:100%;overflow-wrap:anywhere;font-size:13px}
+#frame[data-state="error"] #placeholder .codicon{display:none}
+#frame:not([data-state="live"]) #cv,#frame:not([data-state="live"]) #screen,#frame:not([data-state="live"]) #bk,#frame:not([data-state="live"]) #fg{visibility:hidden}
+#frame #cv,#frame #screen{width:100%;height:100%}
 #bk,#fg{display:none}
 #frame.skin{display:block;position:relative;flex:none}
 #frame.skin #bk,#frame.skin #fg{display:block;position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
@@ -363,44 +383,66 @@ body.empty #tabs,body.empty #bar,body.empty #wrap,body.empty #msg{display:none}
 body.empty #empty{display:flex}
 </style></head><body class="empty">
 <div id="tabs"><div id="tab"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><i class="dot" id="tdot"></i><select id="dev"></select><i class="codicon codicon-chevron-down" id="chev"></i></div></div>
-<div id="bar">
-<button data-k="26" title="Power">${icons['power']}</button>
-<button data-k="24" title="Volume up">${icons['volume-up']}</button>
-<button data-k="25" title="Volume down">${icons['volume-down']}</button><span class="sep"></span>
-<button id="rotl" title="Rotate left">${icons['rotate-left']}</button>
-<button id="rotr" title="Rotate right">${icons['rotate-right']}</button><span class="sep"></span>
-<button data-k="4" title="Back">${icons['back']}</button>
-<button data-k="3" title="Home">${icons['home']}</button>
-<button data-k="187" title="Overview">${icons['overview']}</button><span class="sep"></span>
-<button id="shot" title="Take screenshot">${icons['screenshot']}</button>
-<button id="rec" title="Record screen">${icons['record']}</button><span id="timer"></span><span class="sep"></span>
-<button id="ref" title="Restart device"><i class="codicon codicon-debug-restart"></i></button>
-<button id="more" title="More"><i class="codicon codicon-kebab-vertical"></i></button></div>
 <div id="menu"><div id="m-frame">Show Device Frame</div><div id="m-ext">Extended Controls</div><div id="m-log">Show Logcat</div></div>
 <div id="empty"><img class="dk" src="${art.dark}" alt=""><img class="lt" src="${art.light}" alt="">
 <div>To mirror a physical device, connect it via USB cable or over Wi-Fi.<br>To launch a virtual device, start one from the <a id="open-dm">Device Manager</a>.</div></div>
-<div id="wrap"><div id="frame"><img id="screen" tabindex="0" draggable="false"><canvas id="cv" tabindex="0"></canvas><img id="bk" draggable="false" alt=""><img id="fg" draggable="false" alt=""></div></div><div id="msg">No device</div>
+<div id="wrap"><div id="stage"><div id="bar"><div class="tool-group" role="group" aria-label="Power and volume">
+<button data-k="26" title="Power">${icons['power']}</button>
+<button data-k="24" title="Volume up">${icons['volume-up']}</button>
+<button data-k="25" title="Volume down">${icons['volume-down']}</button>
+</div><span class="sep" aria-hidden="true"></span><div class="tool-group" role="group" aria-label="Rotation">
+<button id="rotl" title="Rotate left">${icons['rotate-left']}</button>
+<button id="rotr" title="Rotate right">${icons['rotate-right']}</button>
+</div><span class="sep" aria-hidden="true"></span><div class="tool-group" role="group" aria-label="Capture">
+<button id="shot" title="Take screenshot">${icons['screenshot']}</button>
+<button id="rec" title="Record screen">${icons['record']}</button>
+</div><span class="sep" aria-hidden="true"></span><div class="tool-group" role="group" aria-label="Device tools">
+<button id="ref" title="Restart device"><i class="codicon codicon-debug-restart"></i></button>
+<button id="more" title="More"><i class="codicon codicon-kebab-vertical"></i></button></div></div>
+<div id="frame" data-state="loading"><div id="placeholder" role="status" aria-live="polite"><i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i><span id="placeholder-text">正在加载...</span></div><img id="screen" tabindex="0" draggable="false"><canvas id="cv" tabindex="0"></canvas><img id="bk" draggable="false" alt=""><img id="fg" draggable="false" alt=""></div><div id="navigation" role="group" aria-label="Android navigation">
+<button data-k="4" title="Back" aria-label="Back">${icons['back']}</button>
+<button data-k="3" title="Home" aria-label="Home">${icons['home']}</button>
+<button data-k="187" title="Overview" aria-label="Overview">${icons['overview']}</button>
+</div></div></div><div id="status"><div id="msg">No device</div><span id="timer"></span></div>
 <script>
 const vs=acquireVsCodeApi(),img=document.getElementById('screen'),cv=document.getElementById('cv'),dev=document.getElementById('dev'),msg=document.getElementById('msg');
 const ctx=cv.getContext('2d');let tm;
 const send=m=>vs.postMessage(m);
 let mode='emulator',target=cv,fw=0,fh=0;
 document.getElementById('open-dm').onclick=()=>send({type:'openDM'});
-const frame=document.getElementById('frame'),bk=document.getElementById('bk'),fg=document.getElementById('fg'),wrapEl=document.getElementById('wrap');
+const frame=document.getElementById('frame'),bk=document.getElementById('bk'),fg=document.getElementById('fg'),wrapEl=document.getElementById('wrap'),stage=document.getElementById('stage'),navigation=document.getElementById('navigation'),barEl=document.getElementById('bar');
 let skin=null,frameOn=(vs.getState()||{}).frame!==false,skinOn=false,fScale=1;
 const place=(el,x,y,w,h)=>{el.style.setProperty('left',x*100+'%','important');el.style.setProperty('top',y*100+'%','important');el.style.setProperty('width',w*100+'%','important');el.style.setProperty('height',h*100+'%','important')};
+// 输入容器、帧和皮肤尺寸，首帧前按 1080x1920 占位；扣除顶部工具栏后，按 CSS 图标比例和留白同时约束画面/导航高度，无需迭代测量。
+// 回归：npm test，tests/mirror-interaction.test.js 的 mirror layout/navigation 覆盖上下工具栏同宽、顶部首尾对齐、图标缩放、4px 留白、横竖屏和皮肤开关。
 function layout(){
- const r=wrapEl.getBoundingClientRect(),W=r.width-16,H=r.height-16;
- const on=!!skin&&frameOn&&!(fw&&fh&&fw>fh);
+ const r=wrapEl.getBoundingClientRect(),W=Math.max(0,r.width-16),H=Math.max(0,r.height-8-barEl.offsetHeight);
+ const live=frame.dataset.state==='live',on=live&&!!skin&&frameOn&&!(fw&&fh&&fw>fh);
  if(on!==skinOn||on){skinOn=on;frame.classList.toggle('skin',on)}
+ const w=on?skin.lw:live?(fw||cv.width):1080,h=on?skin.lh:live?(fh||cv.height):1920;
+ const css=getComputedStyle(navigation),padding=2*parseFloat(css.getPropertyValue('--nav-padding'));
+ const iconMax=parseFloat(css.getPropertyValue('--nav-icon-max')),ratio=parseFloat(css.getPropertyValue('--nav-icon-ratio'));
+ // 未达图标上限时，画面高与图标高都正比于宽度；达到上限后仅扣除固定图标高。
+ let s=w&&h?Math.min(W/w,Math.max(0,H-padding)/(h+w*ratio)):0;
+ if(w*s*ratio>iconMax)s=Math.min(W/w,Math.max(0,H-padding-iconMax)/h);
+ const icon=Math.min(iconMax,w*s*ratio),availableH=Math.max(0,H-padding-icon);
+ navigation.style.setProperty('--nav-icon-size',icon+'px');
+ frame.style.width=stage.style.width=w*s+'px';frame.style.height=h*s+'px';
  if(!on){for(const el of[cv,img])for(const k of['left','top','width','height','border-radius'])el.style.removeProperty(k);
-  if(mode==='emulator'&&cv.width){const k=devicePixelRatio||1;cv.style.width=cv.width/k+'px';cv.style.height=cv.height/k+'px'}
-  return W>0&&H>0?{w:W,h:H}:null}
- fScale=Math.max(0.01,Math.min(W/skin.lw,H/skin.lh));
- frame.style.width=skin.lw*fScale+'px';frame.style.height=skin.lh*fScale+'px';
+  return W>0&&availableH>0?{w:W,h:availableH}:null}
+ fScale=s;
  const f=[skin.dx/skin.lw,skin.dy/skin.lh,skin.dw/skin.lw,skin.dh/skin.lh];
  place(cv,...f);place(img,...f);place(fg,...f);for(const el of[cv,img])el.style.setProperty('border-radius',(skin.radius/skin.dw*100)+'% / '+(skin.radius/skin.dh*100)+'%','important');
  return{w:skin.dw*fScale,h:skin.dh*fScale};
+}
+// 同步加载/首帧/失败的展示状态；加载时清空帧尺寸，布局按 1080x1920 占位，live 仅由实际绘制成功触发。
+// 回归：npm test，tests/mirror-interaction.test.js 的 mirror loading 验证占位比例、状态切换、首帧和异常。
+function setPresentation(state,text){
+ const changed=frame.dataset.state!==state;frame.dataset.state=state;
+ document.getElementById('placeholder').hidden=state==='live';
+ document.getElementById('placeholder-text').textContent=state==='error'?text:'正在加载...';
+ if(state==='loading'){fw=0;fh=0}
+ if(changed||state==='loading')layout();
 }
 let vpT;const sendVp=()=>{const s=layout(),d=devicePixelRatio||1;if(s)send({type:'viewport',w:Math.round(s.w*d),h:Math.round(s.h*d)})};
 new ResizeObserver(()=>{layout();clearTimeout(vpT);vpT=setTimeout(sendVp,250)}).observe(wrapEl);
@@ -435,10 +477,12 @@ document.getElementById('m-ext').onclick=()=>send({type:'ext'});document.getElem
 
 // ---- video decoding (scrcpy H.264 annex-B) ----
 let decoder,configData,spsKey,needKey=true;
+// 创建视频解码器并在实际绘制首帧后退出加载；npm test 的 mirror loading 和 navigation frame updates 验证真实回调。
 function newDecoder(){
  if(decoder&&decoder.state!=='closed')decoder.close();
  decoder=new VideoDecoder({
-  output:f=>{if(cv.width!==f.displayWidth||cv.height!==f.displayHeight){cv.width=f.displayWidth;cv.height=f.displayHeight}fw=f.displayWidth;fh=f.displayHeight;ctx.drawImage(f,0,0);f.close();msg.textContent=fw+'×'+fh},
+  // 解码帧尺寸变化时同步画面和底部导航；npm test 的 mirror navigation frame updates 执行 output 并断言横屏尺寸更新。
+  output:f=>{const changed=fw!==f.displayWidth||fh!==f.displayHeight;if(cv.width!==f.displayWidth||cv.height!==f.displayHeight){cv.width=f.displayWidth;cv.height=f.displayHeight}fw=f.displayWidth;fh=f.displayHeight;if(changed)layout();ctx.drawImage(f,0,0);f.close();setPresentation('live');msg.textContent=fw+'×'+fh},
   error:e=>send({type:'decodeError',text:String(e.message||e)})});
  needKey=true;
 }
@@ -465,8 +509,10 @@ function onVideo(kind,raw){
 // ---- input ----
 const rel=e=>{const r=target.getBoundingClientRect();return{x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}};
 let down=null;
+// 绑定画面输入；主键按下发送幂等唤醒并保留各模式触摸/拖动，右键不触发唤醒。
+// 回归：npm test，tests/mirror-interaction.test.js 的 mirror wake 执行 canvas/img 三模式按下、移动和释放并断言消息。
 function bind(el){
- el.onmousedown=e=>{e.preventDefault();el.focus();const p=rel(e);down={...p,t:Date.now()};
+ el.onmousedown=e=>{if(e.button!==0)return;e.preventDefault();el.focus();send({type:'wake'});const p=rel(e);down={...p,t:Date.now()};
   if(mode!=='screencap')send({type:'touch',action:0,...p,w:fw,h:fh})};
  el.onmousemove=e=>{if(down&&mode!=='screencap'&&e.buttons)send({type:'touch',action:2,...rel(e),w:fw,h:fh})};
  const up=e=>{if(!down)return;const u=rel(e);
@@ -484,23 +530,29 @@ function bind(el){
 }
 bind(img);bind(cv);
 
-function setMode(m){mode=m;const c=m!=='screencap';target=c?cv:img;cv.style.display=c?'block':'none';img.style.display=c?'none':'block'}
+// 模式启动或回退时恢复加载占位；截图仅在图片加载成功后退出，失败保留黑底错误；npm test 的 mirror loading 覆盖三模式。
+function setMode(m){mode=m;const c=m!=='screencap';target=c?cv:img;cv.style.display=c?'block':'none';img.style.display=c?'none':'block';setPresentation('loading')}
+// 图片加载完成代表截图首帧可显示；npm test 的 mirror loading 验证未完成、成功及图片错误状态。
+img.onload=()=>{if(mode==='screencap')setPresentation('live')};
+img.onerror=()=>{if(mode==='screencap'){const text='投屏画面加载失败';msg.textContent=text;setPresentation('error',text)}};
+// 绘制模拟器 RGBA 帧后退出加载，尺寸/方向变化同步布局视口；npm test 的 mirror loading/navigation frame updates 验证。
 function onRgba(m){const d=m.data instanceof Uint8Array?m.data:new Uint8Array(m.data);
- if(cv.width!==m.w||cv.height!==m.h){cv.width=m.w;cv.height=m.h;const k=devicePixelRatio||1;if(!skinOn){cv.style.width=(m.w/k)+'px';cv.style.height=(m.h/k)+'px'}}const wasLand=fw>fh;fw=m.w;fh=m.h;if((fw>fh)!==wasLand){layout();sendVp()}
+ const changed=fw!==m.w||fh!==m.h;if(cv.width!==m.w||cv.height!==m.h){cv.width=m.w;cv.height=m.h}const wasLand=fw>fh;fw=m.w;fh=m.h;if(changed)layout();if((fw>fh)!==wasLand)sendVp();
  ctx.putImageData(new ImageData(new Uint8ClampedArray(d.buffer,d.byteOffset,m.w*m.h*4),m.w,m.h),0,0);
- msg.textContent=fw+'×'+fh+' · emulator';send({type:'ack'})}
+ setPresentation('live');msg.textContent=fw+'×'+fh+' · emulator';send({type:'ack'})}
 addEventListener('message',({data:m})=>{
+ // 接收帧消息并同步截图模式画面与底部导航；npm test 的 mirror navigation frame updates 验证尺寸和布局调用。
  if(m.type==='video')onVideo(m.kind,m.data);
  else if(m.type==='rgba')onRgba(m);
  else if(m.type==='recording'){rec.classList.toggle('on',m.on);rec.title=m.on?'Stop recording':'Record screen';clearInterval(tm);timer.textContent='';if(m.on){const t0=Date.now();tm=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timer.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500)}}
- else if(m.type==='frame'){img.src='data:image/png;base64,'+m.data;msg.textContent=m.w+'×'+m.h}
+ else if(m.type==='frame'){fw=m.w;fh=m.h;img.src='data:image/png;base64,'+m.data;layout();msg.textContent=m.w+'×'+m.h}
  else if(m.type==='mode'){setMode(m.mode);spsKey=undefined;if(m.mode==='scrcpy'&&typeof VideoDecoder==='undefined')send({type:'noDecoder'})}
  else if(m.type==='devices'){document.body.classList.toggle('empty',!m.devices.length);dev.innerHTML=m.devices.map(d=>'<option value="'+d.serial+'">'+d.label+(d.physical?' ('+d.serial+')':'')+'</option>').join('');if(m.serial)dev.value=m.serial;tdot.style.display=m.devices.length?'block':'none';tab.classList.toggle('multi',m.devices.length>1);
   if(!m.devices.length){msg.textContent='No device. Start an emulator or connect a phone.';img.removeAttribute('src');ctx.clearRect(0,0,cv.width,cv.height)}}
  else if(m.type==='select'){dev.value=m.serial}
  else if(m.type==='skin')setSkin(m.skin);
  else if(m.type==='compose')compose(m);
- else if(m.type==='error')msg.textContent=m.text;});
+ else if(m.type==='error'){msg.textContent=m.text;if(frame.dataset.state!=='live')setPresentation('error',m.text)};});
 send({type:'ready'});
 </script></body></html>`;
 }
