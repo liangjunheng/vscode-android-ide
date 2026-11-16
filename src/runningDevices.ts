@@ -90,7 +90,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     const media = vscode.Uri.file(path.join(this.extPath, 'media', 'codicons'));
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(path.join(this.extPath, 'media')), media, vscode.Uri.file(path.join(this.extPath, 'media', 'icons'))] };
     const art = (n: string) => view.webview.asWebviewUri(vscode.Uri.file(path.join(this.extPath, 'media', 'icons', n))).toString();
-    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), mirrorVisible: this.mirrorVisible, deviceViewMode: this.deviceViewMode, processesScript: art('../device-explorer/processes.js'), explorerScript: art('../device-explorer/main.js'), explorerStyle: art('../device-explorer/main.css') });
+    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), mirrorVisible: this.mirrorVisible, deviceViewMode: this.deviceViewMode, processesScript: art('../device-processes/processes.js'), processesStyle: art('../device-processes/processes.css'), explorerScript: art('../device-explorer/main.js'), explorerStyle: art('../device-explorer/main.css') });
     view.webview.onDidReceiveMessage((m) => this.onMessage(m).catch((e) => this.post({ type: 'error', text: e.message })));
     view.onDidChangeVisibility(() => this.restart());
     view.onDidDispose(() => { if (this.view !== view) { return; } this.view = undefined; void this.dispose().catch(error => vscode.window.showErrorMessage(String(error))); });
@@ -478,10 +478,10 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 // 生成当前设备名称和全设备下拉 UI；npm test 的 DOM 回归执行 renderDevices 并断言状态、禁用项和空态。
 // 输入资源和模式，在设备选择框后输出投屏/Explorer/Processes图标组，不生成Wi-Fi按钮；build-panel-ui与device-view-mode回归验证同排顺序、移除绑定与四态恢复。
 // 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
-function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; explorerScript: string; explorerStyle: string }) {
+function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; processesStyle: string; explorerScript: string; explorerStyle: string }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource};">
-<link rel="stylesheet" href="${codicons}"><style>
+<link rel="stylesheet" href="${codicons}"><link rel="stylesheet" href="${art.processesStyle}"><style>
 body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);display:flex;flex-direction:column;align-items:center;gap:0;height:100vh;box-sizing:border-box}
 #tabs{display:flex;flex:none;width:100%;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box}
 #tab{position:relative;display:flex;align-items:center;gap:8px;padding:4px 10px;border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border,#444));background:var(--vscode-dropdown-background);border-radius:4px;width:100%;min-width:0;height:34px;box-sizing:border-box}

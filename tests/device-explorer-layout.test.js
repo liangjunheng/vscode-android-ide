@@ -21,7 +21,7 @@ function fixture() {
   const html = webview.html.replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/g, '').replace(/<link[^>]*>/g, '').replace(/<script[\s\S]*?<\/script>/g, '');
   const font = fs.readFileSync(path.join(root, 'media/codicons/codicon.ttf')).toString('base64');
   const css = fs.readFileSync(path.join(root, 'media/codicons/codicon.css'), 'utf8').replace(/url\([^)]*\)/g, 'url(data:font/ttf;base64,' + font + ')')
-    + fs.readFileSync(path.join(root, 'media/build-panel.css'), 'utf8') + fs.readFileSync(path.join(root, 'media/device-explorer/main.css'), 'utf8');
+    + fs.readFileSync(path.join(root, 'media/build-panel.css'), 'utf8') + fs.readFileSync(path.join(root, 'media/device-explorer/main.css'), 'utf8') + fs.readFileSync(path.join(root, 'media/device-processes/processes.css'), 'utf8');
   return html.replace('</head>', '<style>' + css + '</style></head>');
 }
 
@@ -42,7 +42,7 @@ test('Explorer files scroll in aligned columns and process cards never scroll ho
         await page.setContent(html);
         await page.addStyleTag({ content: ':root{--vscode-font-family:Segoe UI;--vscode-font-size:13px;--vscode-editor-background:' + (theme === 'dark' ? '#202124' : '#fff') + ';--vscode-foreground:' + (theme === 'dark' ? '#ddd' : '#222') + ';--vscode-icon-foreground:var(--vscode-foreground);--vscode-descriptionForeground:var(--vscode-foreground);--vscode-input-foreground:var(--vscode-foreground);--vscode-dropdown-foreground:var(--vscode-foreground);--vscode-dropdown-background:var(--vscode-editor-background)}body{background:var(--vscode-editor-background)}' });
         await page.evaluate(theme => { window.sent = []; window.send = message => window.sent.push(message); document.body.classList.toggle('vscode-light', theme === 'light'); }, theme);
-        for (const file of ['media/build-panel.js', 'media/device-explorer/processes.js', 'media/device-explorer/main.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(root, file), 'utf8') });
+        for (const file of ['media/build-panel.js', 'media/device-processes/processes.js', 'media/device-explorer/main.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(root, file), 'utf8') });
         await page.evaluate(mode => {
           const deliver = data => window.dispatchEvent(new MessageEvent('message', { data }));
           deliver({ type: 'deviceViewMode', mode });
@@ -57,14 +57,14 @@ test('Explorer files scroll in aligned columns and process cards never scroll ho
             const list = document.querySelector('.process-list'), cards = [...list.querySelectorAll('.process-card')];
             const first = cards[0], name = first.querySelector('.process-name'), pid = first.querySelector('.process-pid');
             const bounds = element => { const r = element.getBoundingClientRect(); return { x:r.x, right:r.right, y:r.y, bottom:r.bottom, height:r.height }; };
-            return { count:cards.length, card:bounds(first), name:bounds(name), pid:bounds(pid), details:bounds(first.querySelector('.process-details')), fields:[...first.querySelectorAll('.process-field')].map(bounds), labels:[...first.querySelectorAll('dt')].map(e=>e.textContent), values:[...first.querySelectorAll('dd')].map(e=>e.textContent), fits:cards.every(card=>card.scrollWidth<=card.clientWidth&&[...card.querySelectorAll('.process-name,dd')].every(e=>e.scrollWidth<=e.clientWidth)), noOverlap:cards.every((card,i)=>i===0||cards[i-1].getBoundingClientRect().bottom<=card.getBoundingClientRect().y), horizontal:list.scrollWidth>list.clientWidth, vertical:list.scrollHeight>list.clientHeight, pageOverflow:document.documentElement.scrollWidth>innerWidth||document.documentElement.scrollHeight>innerHeight, headCount:document.querySelectorAll('.process-head').length };
+            return { count:cards.length, card:bounds(first), name:bounds(name), pid:bounds(pid), details:bounds(first.querySelector('.process-details')), actions:bounds(first.querySelector('.process-actions')), fields:[...first.querySelectorAll('.process-field')].map(bounds), labels:[...first.querySelectorAll('dt')].map(e=>e.textContent), values:[...first.querySelectorAll('dd')].map(e=>e.textContent), fits:cards.every(card=>card.scrollWidth<=card.clientWidth&&[...card.querySelectorAll('.process-name,dd')].every(e=>e.scrollWidth<=e.clientWidth)), noOverlap:cards.every((card,i)=>i===0||cards[i-1].getBoundingClientRect().bottom<=card.getBoundingClientRect().y), horizontal:list.scrollWidth>list.clientWidth, vertical:list.scrollHeight>list.clientHeight, pageOverflow:document.documentElement.scrollWidth>innerWidth||document.documentElement.scrollHeight>innerHeight, headCount:document.querySelectorAll('.process-head').length };
           });
           assert.equal(geometry.count,100); assert.equal(geometry.headCount,0);
           const controls=await page.evaluate(()=>{const select=document.querySelector('.process-sort'),query=document.querySelector('.process-filter'),direction=document.querySelector('.process-sort-direction');const canvas=document.createElement('canvas'),context=canvas.getContext('2d');context.font=getComputedStyle(select).font;return {text:context.measureText(select.options[select.selectedIndex].text).width,available:select.clientWidth-32,ordered:query.getBoundingClientRect().right<=select.getBoundingClientRect().x&&select.getBoundingClientRect().right<=direction.getBoundingClientRect().x,right:direction.getBoundingClientRect().right};});
           assert.ok(controls.text<=controls.available&&controls.ordered&&controls.right<=width);
           assert.equal(geometry.horizontal,false); assert.equal(geometry.pageOverflow,false); assert.equal(geometry.fits,true); assert.equal(geometry.noOverlap,true); assert.equal(geometry.vertical,true);
           assert.ok(geometry.card.x>=0&&geometry.card.right<=width);
-          assert.ok(geometry.name.height>18&&geometry.name.right<=geometry.pid.x&&geometry.details.y>=geometry.name.bottom);
+          assert.ok(geometry.name.height>18&&geometry.name.right<=geometry.pid.x&&geometry.details.y>=geometry.name.bottom); assert.ok(geometry.actions.y>=geometry.details.bottom&&geometry.actions.right<=geometry.card.right);
           assert.ok(geometry.fields[0].right<=geometry.fields[1].x&&geometry.fields[0].bottom<=geometry.fields[2].y);
           assert.deepEqual(geometry.labels,['ABI','VM','User ID','Debugger']); assert.equal(geometry.values[2],'0'); assert.equal(geometry.values[3],'Default');
           // 每卡片五图标在窄面板完整可见、无重叠且有名称；真实键盘激活只发所属PID一次。
