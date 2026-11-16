@@ -28,7 +28,13 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
   private rec?: { proc: ChildProcess; serial: string; stopping: boolean };
 
-  constructor(private extPath: string, private buildAction?: (message: any, serial?: string) => Promise<void>) {}
+  // 输入路径、构建处理器、可选偏好及选择回调；恢复投屏状态并保留同步入口。
+  // 回归：npm test mirror preference / device selection sync 断言重建隐藏、ready 回传和双向接线。
+  constructor(private extPath: string, private buildAction?: (message: any, serial?: string) => Promise<void>,
+    private mirrorPreference?: { visible: boolean; save: (visible: boolean) => PromiseLike<void> },
+    private selectionChanged?: (serial?: string) => Promise<void> | void) {
+    this.mirrorVisible = mirrorPreference?.visible ?? true;
+  }
 
   // 将构建状态交给当前 Webview；npm test build panel bridge 验证快照投递。
   publishBuildState(message: unknown) { this.post(message); }
@@ -68,32 +74,39 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     });
   }
 
+  // 输入 VS Code 视图，安装消息与生命周期监听并输出带配置初始状态的 HTML。
+  // 回归：npm test 的 build panel bridge / initial mirror state 及 mirror preference 断言初始隐藏和握手。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media', 'codicons'));
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(path.join(this.extPath, 'media')), media, vscode.Uri.file(path.join(this.extPath, 'media', 'icons'))] };
     const art = (n: string) => view.webview.asWebviewUri(vscode.Uri.file(path.join(this.extPath, 'media', 'icons', n))).toString();
-    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css') });
+    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), mirrorVisible: this.mirrorVisible });
     view.webview.onDidReceiveMessage((m) => this.onMessage(m).catch((e) => this.post({ type: 'error', text: e.message })));
     view.onDidChangeVisibility(() => this.restart());
     view.onDidDispose(() => this.stop());
   }
 
-  // 输入设备或空值同步卡片选择，不抢占列表焦点；npm test 镜像选择回归断言清屏、串号及停止旧流。
-  async select(d?: Device) {
-    this.serial = d?.serial;
+  // 输入设备或空值同步选择并通知 Logcat，不抢焦点；相同串号不重复启动。
+  // 回归：npm test，tests/device-selection-sync.test.js 断言双向切换、空选择、隐藏及无回传循环。
+  async select(d?: Pick<Device, 'serial'>) {
+    const serial = d?.serial || undefined;
+    if (this.serial === serial) { return; }
+    this.serial = serial;
     this.forced = undefined;
-    this.post({ type: 'devices', devices: [], serial: this.serial });
+    this.post({ type: 'devices', devices: [], serial });
+    this.stop();
+    await this.selectionChanged?.(serial);
     return this.restart();
   }
 
   // 标题栏刷新当前镜像，不自动选择其他设备；npm test 标题栏回归验证错误由命令入口展示。
   async refresh() { return this.restart(); }
 
-  // 输入在线设备并聚焦镜像，等待连接结果；npm test 选择器及镜像回归断言参数与失败传播。
+  // 输入在线设备并聚焦镜像，选择变化时通知日志侧，等待连接结果；npm test 选择器与 device selection sync 断言同步和失败传播。
   async show(d?: Device) {
-    if (d) { this.serial = d.serial; }
     await vscode.commands.executeCommand('android.runningDevice.focus');
+    if (d && d.serial !== this.serial) { return this.select(d); }
     this.post({ type: 'select', serial: this.serial });
     return this.restart();
   }
@@ -132,8 +145,14 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     else { this.startScreencap(); }
   }
 
-  // 切换投屏可见性，隐藏释放流而保留所选设备；npm test mirror visibility 回归验证幂等、停止及重新显示。
+  // 用户按钮先保存配置，失败不改变显示状态；npm test mirror preference 回归断言持久化、幂等和失败传播。
   private async setMirrorVisible(visible: boolean): Promise<void> {
+    if (this.mirrorVisible !== visible) { await this.mirrorPreference?.save(visible); }
+    await this.applyMirrorVisibility(visible);
+  }
+
+  // 应用设置页或按钮状态，不重复写回配置；npm test mirror preference/visibility 回归断言实时同步、停止与恢复。
+  async applyMirrorVisibility(visible: boolean): Promise<void> {
     if (this.mirrorVisible === visible) { this.post({ type: 'mirrorVisibility', visible }); return; }
     this.mirrorVisible = visible;
     this.post({ type: 'mirrorVisibility', visible });
@@ -210,10 +229,13 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.loop = setInterval(() => this.capture(), every);
   }
 
-  // 下拉展示全部连接状态，镜像只使用所选在线设备；npm test 下拉与镜像回归断言完整列表、切换和断线不回退。
+  // 读取设备目录，展示全部连接状态并将失效选择通知日志侧，不在镜像侧回退；npm test 下拉及 device selection sync 断言断开清空。
   private async refreshDevices() {
     const devs = await listDevices();
-    if (!devs.some((d) => d.serial === this.serial && d.state === 'device')) { this.serial = undefined; }
+    if (this.serial && !devs.some((d) => d.serial === this.serial && d.state === 'device')) {
+      this.serial = undefined;
+      await this.selectionChanged?.(undefined);
+    }
     this.post({ type: 'devices', devices: devs.map((d) => ({ serial: d.serial, label: d.name || d.avdName || d.model || d.serial, state: d.state, physical: !d.serial.startsWith('emulator-') })), serial: this.serial });
     this.skin = skinForAvd(devs.find((d) => d.serial === this.serial)?.avdName);
     this.post({ type: 'skin', skin: this.skin ? this.skinPayload(this.skin) : null });
@@ -242,19 +264,21 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 分派 Webview 输入；wake 对当前设备发送只亮屏不切换电源的命令，失败交由消息入口报告。
   // 回归：npm test，无设备/三种模式/失败均由 tests/mirror-interaction.test.js 断言。
   // 处理下拉切换和空态入口；npm test 的下拉回归断言设备选择消息及 openDM 委托。
+  // 配置握手/保存回归见 mirror preference；双向选择及无设备日志入口见 device-selection-sync.test.js，npm test 严格断言消息与结果。
   private async onMessage(m: any) {
     const s = this.serial;
     switch (m.type) {
       case 'buildPanel': if (this.buildAction) { return this.buildAction(m, s); } return;
       case 'pairDevice': return vscode.commands.executeCommand('android.pairDevice');
+      case 'getMirrorVisibility': this.post({ type: 'mirrorVisibility', visible: this.mirrorVisible }); return;
       case 'setMirrorVisibility':
         if (typeof m.visible !== 'boolean') { throw new Error('Invalid mirror visibility'); }
         return this.setMirrorVisible(m.visible);
       case 'ready': this.post({ type: 'mirrorVisibility', visible: this.mirrorVisible }); return this.restart();
-      case 'select': this.serial = m.serial; this.forced = undefined; return this.restart();
+      case 'select': return this.select(m.serial ? { serial: m.serial } : undefined);
       case 'refresh': this.forced = undefined; return this.restart();
       case 'ext': if (s) { vscode.commands.executeCommand('android.extendedControls', { serial: s }); } return;
-      case 'logcat': if (s) { return vscode.commands.executeCommand('android.showLogcat', { serial: s }); } return;
+      case 'logcat': return vscode.commands.executeCommand('android.showLogcat', s ? { serial: s } : undefined);
       case 'reboot': if (s) { return this.reboot(s); } return;
       case 'wake': if (s) { await adb(s, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); } return;
       case 'openDM': vscode.commands.executeCommand('android.addDevice'); return;
@@ -361,7 +385,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
 // 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标随宽度缩小且最大 24px，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
 // 生成当前设备名称和全设备下拉 UI；npm test 的 DOM 回归执行 renderDevices 并断言状态、禁用项和空态。
-function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string }) {
+// 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
+function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource};">
 <link rel="stylesheet" href="${codicons}"><style>
@@ -416,7 +441,7 @@ button svg{width:20px;height:20px}
 #empty a{color:var(--vscode-textLink-foreground);cursor:pointer;text-decoration:none}#empty a:hover{text-decoration:underline}
 body.empty #bar,body.empty #wrap{display:none}
 body.empty #empty{display:flex}
-</style><link rel="stylesheet" href="${art.style}"></head><body class="empty">
+</style><link rel="stylesheet" href="${art.style}"></head><body class="empty${art.mirrorVisible ? '' : ' mirror-hidden'}" data-mirror-visible="${art.mirrorVisible}">
 <div id="tabs" aria-label="Android run configuration">
 <div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
 <div class="build-surface">

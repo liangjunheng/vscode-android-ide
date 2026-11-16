@@ -8,11 +8,11 @@ const js = fs.readFileSync(path.join(__dirname, '../media/build-panel.js'), 'utf
 const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'utf8');
 
 // 执行面板完整脚本并记录真实 DOM 状态与宿主消息；npm test 回归涵盖按钮、状态、选择及空列表。
-function fixture() {
+function fixture(initialVisible = true) {
   const nodes = {}, sent = [];
   let receive;
   const get = id => nodes[id] ||= { value: '', children: [], textContent: '', disabled: false, title: '', classList: { toggle() {} }, setAttribute(k, v) { this[k] = v; }, replaceChildren() { this.children = []; }, appendChild(o) { this.children.push(o); } };
-  vm.runInNewContext(js, { document: { body: { classList: { toggle() {} } }, getElementById: get, createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
+  vm.runInNewContext(js, { document: { body: { dataset: { mirrorVisible: String(initialVisible) }, classList: { toggle() {} } }, getElementById: get, createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
   return { get, sent, receive: data => receive({ data }) };
 }
 
@@ -20,8 +20,11 @@ function fixture() {
 test('build panel UI renders safe options and routes all commands', () => {
   const f = fixture(), get = f.get;
   assert.equal(f.sent[0].action, 'refresh');
+  assert.equal(f.sent[1].type, 'getMirrorVisibility');
   assert.equal(get('build-run').disabled, true);
-  assert.equal(get('build-logcat').disabled, true);
+  assert.equal(get('build-logcat').disabled, false);
+  get('build-logcat').onclick();
+  assert.equal(f.sent.at(-1).type, 'logcat');
   const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', busy: false, status: 'Ready' };
   f.receive(state);
   assert.equal(get('build-project').children[0].textContent, '<Project>');
@@ -54,6 +57,7 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-run-label').textContent, 'Stop');
   assert.equal(get('build-run').disabled, false);
   assert.equal(get('build-target').disabled, true);
+  assert.equal(get('build-logcat').disabled, false);
   get('build-run').onclick();
   assert.equal(f.sent.at(-1).action, 'stop');
   f.receive({ ...state, busy: false, running: true });
@@ -62,6 +66,9 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(f.sent.at(-1).action, 'stop');
   f.receive({ ...state, error: 'Build failed' });
   assert.equal(get('build-status').textContent, 'Build failed');
+  f.receive({ type: 'devices', serial: undefined });
+  assert.equal(get('build-logcat').disabled, false);
+  get('build-logcat').onclick(); assert.equal(f.sent.at(-1).type, 'logcat');
   f.receive({ type: 'buildState', targets: [], projects: [], busy: false });
   assert.equal(get('build-target').children[0].textContent, 'No Android variants');
   assert.equal(get('build-run').disabled, true);
@@ -102,7 +109,7 @@ test('build panel integration owns controller and connects both directions', asy
   let running, build;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
   class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } dispose() {} }
-  const deps = { vscode: { commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {} } }, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {} };
+  const deps = { vscode: { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {} } }, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {} };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
   module.exports.activate({ extensionPath: '', subscriptions });
@@ -111,4 +118,13 @@ test('build panel integration owns controller and connects both directions', asy
   assert.deepEqual(calls.at(-1), ['build', 'phone']);
   build.post({ type: 'buildState', status: 'Ready' });
   assert.equal(calls.at(-1).status, 'Ready');
+});
+// npm test：脚本尚未收到宿主消息时使用页面初始配置，隐藏状态不会在初始化期间错误显示选中。
+test('build panel initial mirror state reflects restored markup before messages', () => {
+  const f = fixture(false);
+  assert.equal(f.get('build-mirror')['aria-pressed'], 'false');
+  assert.equal(f.get('build-mirror').title, 'Show mirroring');
+  assert.equal(f.sent.at(-1).type, 'getMirrorVisibility');
+  f.receive({ type: 'mirrorVisibility', visible: true });
+  assert.equal(f.get('build-mirror')['aria-pressed'], 'true');
 });

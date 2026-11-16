@@ -25,7 +25,8 @@ export class LogcatView implements vscode.WebviewViewProvider {
   private psBusy = false;
   private devices: Device[] = [];
 
-  constructor(private extPath: string) {}
+  // 输入扩展路径及选择回调，保留未创建视图时的设备；npm test device selection sync 回归覆盖延迟打开。
+  constructor(private extPath: string, private selectionChanged?: (serial?: string) => Promise<void> | void) {}
 
   /**
    * 读取并校验 Logcat 内存上限；输入为 VS Code 配置，输出为 64 KiB 至 64 MiB 的整数。
@@ -48,7 +49,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
 
   // 初始化 Logcat Webview 的结构、资源和生命周期；输入为 VS Code 视图，输出为可交互的日志面板。
   // 设备选择保留原生 select，独立箭头区不接收点击，文字区为箭头预留空间。
-  // 回归：tests/logcat-style.test.js，npm test 断言设备选择结构、箭头宽度与文字区隔离。
+  // 回归：tests/logcat-style.test.js 断言结构；device-selection-sync.test.js 断言选择错误向宿主可见，均由 npm test 执行。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -65,26 +66,42 @@ export class LogcatView implements vscode.WebviewViewProvider {
 <span id="count"></span></div>
 <div id="main"><div id="side"></div><div id="sc"><div id="spacer"></div><div id="win"></div><div id="empty"></div><div id="status"></div></div></div>
 <script src="${u('logcat', 'filter.js')}"></script><script src="${u('logcat', 'buffer.js')}"></script><script src="${u('logcat', 'main.js')}"></script></body></html>`;
-    w.onDidReceiveMessage((m) => this.onMessage(m).catch(() => {}));
+    w.onDidReceiveMessage((m) => this.onMessage(m).catch((error) => vscode.window.showErrorMessage(String(error))));
     view.onDidChangeVisibility(() => { if (view.visible) { this.startPolling(); } else { this.stopPolling(); this.stopStream(); } });
     view.onDidDispose(() => { this.stopPolling(); this.stopStream(); this.view = undefined; });
   }
 
+  // 打开日志面板；可不传设备，传入时同步两侧选择，不对同一日志流重复启动。
+  // 回归：npm test，tests/device-selection-sync.test.js 断言无设备聚焦、选择保留和重复打开。
   async show(d?: { serial: string }) {
-    if (d?.serial) { this.serial = d.serial; }
+    if (d?.serial) { await this.select(d.serial); }
     await vscode.commands.executeCommand('android.logcat.focus');
-    if (d?.serial && this.view) { this.start(); this.post({ type: 'devices', list: this.devices, serial: this.serial }); }
+    if (this.serial && !this.proc) { this.start(); }
+    this.post({ type: 'devices', list: this.devices, serial: this.serial });
+  }
+
+  // 输入串号或空值，停止旧日志、更新下拉并通知 Device Tools；相同选择不回传或重启。
+  // 回归：npm test，tests/device-selection-sync.test.js 覆盖双向同步、隐藏、断开和异常传播。
+  async select(serial?: string): Promise<void> {
+    serial = serial || undefined;
+    if (this.serial === serial) { return; }
+    this.serial = serial;
+    this.start();
+    if (!serial) { this.post({ type: 'reset' }); }
+    this.post({ type: 'devices', list: this.devices, serial });
+    await this.selectionChanged?.(serial);
   }
 
   private post(m: any) { this.view?.webview.postMessage(m); }
 
+  // 分派日志操作，选择交给同步入口并将错误交还宿主；npm test device selection sync 断言真实 select 消息。
   private async onMessage(m: any) {
     switch (m.type) {
       case 'ready':
         this.post({ type: 'init', icons: this.icons(), mine: await this.mine(), maxBytes: this.maxBytes() });
         this.startPolling();
         break;
-      case 'select': this.serial = m.serial; this.start(); break;
+      case 'select': await this.select(m.serial); break;
       case 'clear': if (this.serial) { await adb(this.serial, 'logcat', '-c').catch(() => {}); } break;
       case 'restart': this.start(); break;
       case 'screenshot': if (this.serial) { vscode.commands.executeCommand('android.screenshot', { serial: this.serial }); } break;
@@ -93,19 +110,21 @@ export class LogcatView implements vscode.WebviewViewProvider {
     }
   }
 
+  // 沿用设备目录刷新，同步自动选择或断开后的空值；发现失败可见且不误清除选择。
+  // 回归：npm test，tests/device-selection-sync.test.js 驱动现有 tick，断言自动选择、断开和错误。
   private startPolling() {
     this.stopPolling();
     const tick = async () => {
-      try { this.devices = (await listDevices()).filter((d) => d.state === 'device'); } catch { this.devices = []; }
-      if (!this.devices.some((d) => d.serial === this.serial)) {
-        const was = this.serial;
-        this.serial = this.devices[0]?.serial;
-        if (was !== this.serial) { this.stopStream(); }
-      }
-      this.post({ type: 'devices', list: this.devices, serial: this.serial });
-      if (this.serial && !this.proc) { this.start(); }
+      try {
+        this.devices = (await listDevices()).filter((d) => d.state === 'device');
+        if (!this.devices.some((d) => d.serial === this.serial)) {
+          await this.select(this.devices[0]?.serial);
+        }
+        this.post({ type: 'devices', list: this.devices, serial: this.serial });
+        if (this.serial && !this.proc) { this.start(); }
+      } catch (error) { vscode.window.showErrorMessage(String(error)); }
     };
-    tick();
+    void tick();
     this.poll = setInterval(tick, 3000);
   }
 
@@ -119,10 +138,11 @@ export class LogcatView implements vscode.WebviewViewProvider {
     this.queue = [];
   }
 
+  // 仅在可见视图为所选设备建立日志流，切换先释放旧流；npm test device selection sync 断言启动次数和隐藏零进程。
   private start() {
     this.stopStream();
     const serial = this.serial;
-    if (!serial || !this.view) { return; }
+    if (!serial || !this.view?.visible) { return; }
     const gen = this.gen;
     this.pkgs.clear(); this.missing.clear(); this.lastPs = 0;
     this.post({ type: 'reset' });

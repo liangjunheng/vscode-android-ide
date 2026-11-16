@@ -72,7 +72,7 @@ test('title selector replaces device list and registers only the mirror view', a
   assert.match(runningSource, /id=\"open-dm\"/);
   assert.match(runningSource, /send\(\{type:'openDM'\}\)/);
   const handlers = {}, views = [], errors = [];
-  const vscode = { commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) } };
+  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
   load('extension', { './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
   assert.deepEqual(views, ['android.runningDevice', 'android.logcat']);

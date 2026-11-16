@@ -189,6 +189,7 @@
           "default": true,
           "description": "Start emulators without their own window and display them in the Running Devices view (gRPC)."
         },
+        "android.mirrorVisible": { "type": "boolean", "scope": "window", "default": true, "description": "Show device mirroring in Device Tools. The mirror toggle saves this setting and restores it after extension restart." },
         "android.mirrorIntervalMs": {
           "type": "number",
           "default": 150,

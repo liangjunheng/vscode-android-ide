@@ -28,3 +28,4 @@ select:focus-visible,button:focus-visible{outline:1px solid var(--vscode-focusBo
 #build-mirror[aria-pressed="true"]{background:var(--vscode-toolbar-activeBackground,var(--vscode-list-inactiveSelectionBackground))}
 body.mirror-hidden #wrap,body.mirror-hidden #bar,body.mirror-hidden #msg,body.mirror-hidden #empty{display:none}
 @media(max-width:280px){.build-actions #build-run-label{display:none}.build-actions #build-run{justify-content:center;padding:0}}
+#build-logcat svg{width:20px;height:20px;max-width:100%;flex:none}
