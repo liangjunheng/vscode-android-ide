@@ -40,6 +40,12 @@ export class EmulatorSession {
   private closed = false;
   native: NativeSize = { w: 0, h: 0 };
 
+  // 活动流和client都存在且未关闭才可复用；view-idle传输回归验证真实关闭后状态为false。
+  get connected(): boolean { return !this.closed && !!this.client && !!this.stream; }
+
+  // 取消创建不能在异步继续后再打开流；view-idle回归覆盖waitForReady/getStatus期间关闭。
+  private requireOpen(): void { if (this.closed) { throw Object.assign(new Error('Emulator session stopped'), { name: 'AbortError' }); } }
+
   constructor(private port: number, private h: EmulatorHandlers, private viewport: { w: number; h: number }, private token?: string) {}
 
   /** Ask the emulator for frames sized to the on-screen box (device pixels) so they are sharp without wasting bandwidth. */
@@ -53,7 +59,9 @@ export class EmulatorSession {
     }
   }
 
+  // client创建后等待就绪，每次异步继续核对关闭状态；view-idle传输回归验证启动中取消不打开新流。
   async start() {
+    this.requireOpen();
     const { grpc, svc } = controllerClass();
     this.client = new svc(`127.0.0.1:${this.port}`, grpc.credentials.createInsecure(), {
       'grpc.max_receive_message_length': 128 * 1024 * 1024,
@@ -61,7 +69,8 @@ export class EmulatorSession {
     });
     const status: any = await new Promise((res, rej) => {
       this.client.waitForReady(Date.now() + 5000, (e: Error) => (e ? rej(e) : res(undefined)));
-    }).then(() => new Promise((res, rej) => this.client.getStatus({}, (e: Error, r: any) => (e ? rej(e) : res(r)))));
+    }).then(() => { this.requireOpen(); return new Promise((res, rej) => this.client.getStatus({}, (e: Error, r: any) => (e ? rej(e) : res(r)))); });
+    this.requireOpen();
     const get = (k: string) => Number(status.hardwareConfig?.entry?.find((x: any) => x.key === k)?.value ?? 0);
     this.native = { w: get('hw.lcd.width'), h: get('hw.lcd.height') };
     this.openStream();

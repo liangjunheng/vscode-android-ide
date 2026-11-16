@@ -1,35 +1,48 @@
 import * as vscode from 'vscode';
 import { registerDeviceManager } from './deviceManager';
-import { RunningDeviceView } from './runningDevices';
+import { RunningDeviceView, DeviceViewMode } from './runningDevices';
+import { DeviceExplorerController } from './deviceExplorer';
 import { LogcatView } from './logcat';
 import { openExtendedControls } from './extendedControls';
 import { AndroidBuildController } from './androidBuild';
 
-// 注册紧凑运行面板、构建控制器及镜像；npm test build panel integration 回归断言动作、状态和生命周期接线。
+// 注册共享设备区域、构建、日志及Explorer，资源交给扩展；device-view-mode和device-selection-sync回归执行真实激活接线。
 export function activate(ctx: vscode.ExtensionContext) {
-  // 从 VS Code 配置恢复状态，按钮更新现有工作区覆盖或用户设置；npm test mirror configuration 回归断言目标与重启恢复。
+  // 显式四态配置优先，未配置则兼容旧布尔项；device-view-mode回归验证迁移与设置页同步。
+  const readMode = (): DeviceViewMode => {
+    const configuration = vscode.workspace.getConfiguration('android');
+    const inspected = configuration.inspect<DeviceViewMode>('deviceViewMode');
+    const explicit = inspected?.workspaceValue ?? inspected?.globalValue;
+    return explicit === 'mirror' || explicit === 'explorer' || explicit === 'processes' || explicit === 'hidden' ? explicit : configuration.get<boolean>('mirrorVisible', true) ? 'mirror' : 'hidden';
+  };
   const preference = {
     visible: vscode.workspace.getConfiguration('android').get<boolean>('mirrorVisible', true),
+    mode: readMode(),
+    // 新按钮保存唯一模式；device-view-mode回归断言目标、保存失败和扩展重建恢复。
+    saveMode: async (mode: DeviceViewMode) => {
+      const configuration = vscode.workspace.getConfiguration('android');
+      const target = configuration.inspect('deviceViewMode')?.workspaceValue !== undefined || configuration.inspect('mirrorVisible')?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+      await configuration.update('deviceViewMode', mode, target);
+    },
+    // 保留旧布尔消息的配置入口；mirror-configuration回归验证用户/工作区及失败传播。
     save: async (visible: boolean) => {
       const configuration = vscode.workspace.getConfiguration('android');
-      const target = configuration.inspect<boolean>('mirrorVisible')?.workspaceValue !== undefined
-        ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+      const target = configuration.inspect<boolean>('mirrorVisible')?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
       await configuration.update('mirrorVisible', visible, target);
     },
   };
-  // 两侧选择变化直接同步，提供方相同串号幂等避免循环；npm test device selection sync 执行真实 activate 接线。
-  const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, (serial) => logcat.select(serial));
-  const build = new AndroidBuildController((message) => running.publishBuildState(message));
-  const logcat = new LogcatView(ctx.extensionPath, (serial) => running.select(serial ? { serial } : undefined));
-  const refresh = () => running.refresh().catch((error) => vscode.window.showErrorMessage(String(error)));
-
+  // 提供方同串号幂等阻止回传循环；device-selection-sync回归验证双方选择、隐藏和无设备日志入口。
+  const explorer = new DeviceExplorerController(message => running.publishBuildState(message));
+  const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer);
+  const build = new AndroidBuildController(message => running.publishBuildState(message));
+  const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined));
+  const refresh = () => running.refresh().catch(error => vscode.window.showErrorMessage(String(error)));
   ctx.subscriptions.push(
-    build,
-    // 设置页变化只同步显示，不重新保存；npm test mirror configuration 验证过滤、异常提示与监听释放所有权。
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('android.mirrorVisible')) {
-        running.applyMirrorVisibility(vscode.workspace.getConfiguration('android').get<boolean>('mirrorVisible', true))
-          .catch((error) => vscode.window.showErrorMessage(String(error)));
+    build, explorer, running,
+    // 监听只应用不写回，订阅由ctx释放；device-view-mode/mirror-configuration回归断言过滤和错误展示。
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration('android.deviceViewMode') || event.affectsConfiguration('android.mirrorVisible')) {
+        running.applyDeviceViewMode(readMode()).catch(error => vscode.window.showErrorMessage(String(error)));
       }
     }),
     vscode.window.registerWebviewViewProvider('android.runningDevice', running, { webviewOptions: { retainContextWhenHidden: true } }),
@@ -42,10 +55,7 @@ export function activate(ctx: vscode.ExtensionContext) {
     vscode.commands.registerCommand('android.mirroredSerial', () => running.mirroredSerial()),
     vscode.commands.registerCommand('android.stopMirror', () => running.stopMirroring()),
     vscode.commands.registerCommand('android.selectDevice', (device: any) => running.select(device)),
-    vscode.commands.registerCommand('android.mirrorDevice', (arg: any) => {
-      const d = arg?.kind === 'avd' ? arg.running : arg;
-      return running.show(d);
-    }),
+    vscode.commands.registerCommand('android.mirrorDevice', (arg: any) => running.show(arg?.kind === 'avd' ? arg.running : arg)),
   );
   registerDeviceManager(ctx, () => {});
 }

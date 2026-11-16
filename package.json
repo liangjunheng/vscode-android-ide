@@ -190,6 +190,9 @@
           "description": "Start emulators without their own window and display them in the Running Devices view (gRPC)."
         },
         "android.mirrorVisible": { "type": "boolean", "scope": "window", "default": true, "description": "Show device mirroring in Device Tools. The mirror toggle saves this setting and restores it after extension restart." },
+        "android.deviceViewMode": { "type": "string", "scope": "window", "enum": ["mirror", "explorer", "processes", "hidden"], "default": "mirror", "description": "Active Device Tools surface. Mirroring, Device Explorer files, and Processes are mutually exclusive; hidden closes all three. Explicit values take precedence over android.mirrorVisible." },
+        "android.explorer.downloadLocation": { "type": "string", "scope": "window", "default": "", "description": "Existing local directory for Device Explorer downloads. Empty uses the system Downloads directory." },
+        "android.explorer.packageFilter": { "type": "boolean", "scope": "window", "default": false, "description": "Filter Device Explorer app entries and processes by application IDs in the current project." },
         "android.mirrorIntervalMs": {
           "type": "number",
           "default": 150,

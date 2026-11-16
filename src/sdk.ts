@@ -47,9 +47,10 @@ export function run(cmd: string, args: string[], input?: string): Promise<string
   });
 }
 
-export function runBuffer(cmd: string, args: string[]): Promise<Buffer> {
+// 二进制调用可绑定连接取消信号，未传signal的既有调用不变；view-idle/SDK回归验证取消和字节结果。
+export function runBuffer(cmd: string, args: string[], signal?: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    execFile(cmd, args, { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, signal }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
   });
 }
 

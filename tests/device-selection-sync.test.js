@@ -11,7 +11,7 @@ function fixture() {
   const f = { devices: [{ serial: 'phone', state: 'device' }, { serial: 'two', state: 'device' }], views: {}, handlers: {}, commands: [], errors: [], streams: [], mirrors: [], intervals: new Map() };
   const vscode = {
     Uri: { file: p => p, joinPath: (...p) => p.join('/') },
-    workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback }), onDidChangeConfiguration: () => ({ dispose() {} }) },
+    workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) },
     commands: { registerCommand: (id, fn) => { f.handlers[id] = fn; }, executeCommand: async (id, arg) => { f.commands.push([id, arg]); return f.handlers[id]?.(arg); } },
     window: { registerWebviewViewProvider: (id, view) => { f.views[id] = view; }, showErrorMessage: e => f.errors.push(e) },
   };
@@ -25,7 +25,7 @@ function fixture() {
   function load(name, deps) {
     const module = { exports: {} };
     vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, {
-      module, exports: module.exports, process, Buffer,
+      module, exports: module.exports, process, Buffer, AbortController, setTimeout, clearTimeout,
       setInterval: (fn, ms) => { const id = ++timerId; f.intervals.set(id, { fn, ms }); return id; }, clearInterval: id => f.intervals.delete(id),
       require: id => Object.hasOwn(deps, id) ? deps[id] : require(id),
     });
@@ -33,9 +33,9 @@ function fixture() {
   }
   const running = load('runningDevices', { vscode, './sdk': sdk, './emulatorGrpc': {}, './scrcpy': {}, './skin': sdk });
   const logcat = load('logcat', { vscode, './sdk': sdk, child_process: { spawn } });
-  load('extension', { vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
   f.running = f.views['android.runningDevice']; f.logcat = f.views['android.logcat'];
-  f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => f.mirrors.push(f.running.serial);
+  f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
   // 创建实际 HTML 与宿主消息入口，默认均可见；可在测试中延迟创建或隐藏来覆盖生命周期。
   f.resolve = (provider) => {
     const messages = [], view = { visible: true, webview: { cspSource: 'test:', asWebviewUri: p => p, postMessage: m => messages.push(m), onDidReceiveMessage: fn => { view.receive = fn; } }, onDidDispose() {}, onDidChangeVisibility: fn => { view.visibilityChanged = fn; } };

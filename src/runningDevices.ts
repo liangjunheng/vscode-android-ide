@@ -9,18 +9,26 @@ import { ScrcpySession, bundledJar } from './scrcpy';
 import { Skin, skinForAvd } from './skin';
 
 type Mode = 'emulator' | 'scrcpy' | 'screencap';
+export type DeviceViewMode = 'mirror' | 'explorer' | 'processes' | 'hidden';
+// 独立文件/进程视图共用宿主区域，view决定唯一活动资源；device-view-mode及controller回归验证切换关闭。
+interface ExplorerSurface { setContext(serial: string | undefined, visible: boolean, view?: 'files' | 'processes'): Promise<void>; handle(message: any): Promise<void>; }
 
 export class RunningDeviceView implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private serial?: string;
-  private mirrorVisible = true;
+  private deviceViewMode: DeviceViewMode = 'mirror';
+  // 派生旧投屏状态，不引入第二个模式源；tests/device-view-mode.test.js 断言三个视图与隐藏模式互斥。
+  private get mirrorVisible() { return this.deviceViewMode === 'mirror'; }
   private forced?: Mode; // set after a failure to skip a mode that does not work
   private session?: ScrcpySession;
   private emu?: EmulatorSession;
   private inflight = false;
   private pending?: { w: number; h: number; data: Uint8Array };
   private viewport = { w: 1080, h: 2200 };
-  private generation = 0;
+  private mirrorConnection?: { serial: string; controller: AbortController; starting?: Promise<void> };
+  private mirrorIdle?: NodeJS.Timeout;
+  private readonly mirrorStarts = new Set<Promise<void>>();
+  private readonly mirrorReleases = new Set<Promise<void>>();
   private capturing = false;
   private loop?: NodeJS.Timeout;
   private size = { w: 0, h: 0 };
@@ -31,9 +39,10 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 输入路径、构建处理器、可选偏好及选择回调；恢复投屏状态并保留同步入口。
   // 回归：npm test mirror preference / device selection sync 断言重建隐藏、ready 回传和双向接线。
   constructor(private extPath: string, private buildAction?: (message: any, serial?: string) => Promise<void>,
-    private mirrorPreference?: { visible: boolean; save: (visible: boolean) => PromiseLike<void> },
-    private selectionChanged?: (serial?: string) => Promise<void> | void) {
-    this.mirrorVisible = mirrorPreference?.visible ?? true;
+    private mirrorPreference?: { visible: boolean; save: (visible: boolean) => PromiseLike<void>; mode?: DeviceViewMode; saveMode?: (mode: DeviceViewMode) => PromiseLike<void> },
+    private selectionChanged?: (serial?: string) => Promise<void> | void,
+    private explorer?: ExplorerSurface) {
+    this.deviceViewMode = mirrorPreference?.mode ?? (mirrorPreference?.visible === false ? 'hidden' : 'mirror');
   }
 
   // 将构建状态交给当前 Webview；npm test build panel bridge 验证快照投递。
@@ -81,10 +90,10 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     const media = vscode.Uri.file(path.join(this.extPath, 'media', 'codicons'));
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(path.join(this.extPath, 'media')), media, vscode.Uri.file(path.join(this.extPath, 'media', 'icons'))] };
     const art = (n: string) => view.webview.asWebviewUri(vscode.Uri.file(path.join(this.extPath, 'media', 'icons', n))).toString();
-    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), mirrorVisible: this.mirrorVisible });
+    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), mirrorVisible: this.mirrorVisible, deviceViewMode: this.deviceViewMode, processesScript: art('../device-explorer/processes.js'), explorerScript: art('../device-explorer/main.js'), explorerStyle: art('../device-explorer/main.css') });
     view.webview.onDidReceiveMessage((m) => this.onMessage(m).catch((e) => this.post({ type: 'error', text: e.message })));
     view.onDidChangeVisibility(() => this.restart());
-    view.onDidDispose(() => this.stop());
+    view.onDidDispose(() => { if (this.view !== view) { return; } this.view = undefined; void this.dispose().catch(error => vscode.window.showErrorMessage(String(error))); });
   }
 
   // 输入设备或空值同步选择并通知 Logcat，不抢焦点；相同串号不重复启动。
@@ -96,7 +105,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.forced = undefined;
     this.post({ type: 'devices', devices: [], serial });
     this.stop();
-    await this.selectionChanged?.(serial);
+    await this.explorer?.setContext(serial, false);
+    await this.selectionChanged?.(this.serial);
     return this.restart();
   }
 
@@ -112,7 +122,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   }
 
   mirroredSerial(): string | undefined {
-    return this.view?.visible && (this.session || this.emu || this.loop) ? this.serial : undefined;
+    return this.mirrorVisible && this.view?.visible && (this.session || this.emu || this.loop) ? this.serial : undefined;
   }
 
   stopMirroring() {
@@ -122,25 +132,71 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
   private post(m: unknown) { this.view?.webview.postMessage(m); }
 
+  // 明确停止/设备切换/销毁立即取消真实连接所有者；view-idle回归验证清计时器及创建中取消不重新泄漏连接。
   private stop() {
-    this.generation++;
+    this.cancelMirrorIdle();
+    this.mirrorConnection?.controller.abort(new Error('Mirroring connection closed')); this.mirrorConnection = undefined;
     if (this.loop) { clearInterval(this.loop); this.loop = undefined; }
-    this.session?.stop();
-    this.session = undefined;
-    this.emu?.stop();
-    this.emu = undefined;
-    this.pending = undefined;
-    this.inflight = false;
+    const session = this.session, emu = this.emu; this.session = undefined; this.emu = undefined;
+    this.trackMirrorRelease(session?.stop()); emu?.stop(); this.pending = undefined; this.inflight = false;
   }
 
-  // 刷新设备目录，仅显示投屏时建立视频流；npm test mirror visibility 回归断言隐藏时选择仍同步且无流启动。
+  // 异步forward清理由提供方持有并报告失败，销毁等待它结束；view-idle回归验证释放任务不遗留。
+  private trackMirrorRelease(task: Promise<void> | undefined | void): void {
+    if (!task) { return; } this.mirrorReleases.add(task);
+    void task.then(() => { this.mirrorReleases.delete(task); }, error => { this.mirrorReleases.delete(task); vscode.window.showErrorMessage(String(error)); });
+  }
+
+  // 只在首次切出时安排60秒断开，反复切其他视图不重置期限；view-idle回归精确验证59999/60000ms边界。
+  private idleMirror(): void {
+    if (this.mirrorIdle || !(this.mirrorConnection || this.session || this.emu || this.loop)) { return; }
+    this.mirrorIdle = setTimeout(() => { this.mirrorIdle = undefined; if (!this.mirrorVisible || !this.view?.visible) { this.stop(); } }, 60000);
+    this.mirrorIdle.unref?.();
+  }
+
+  // 切回活动投屏会撤销闲置释放，不重建已连接/正在创建的资源；view-idle回归验证提前返回后旧期限失效。
+  private cancelMirrorIdle(): void { if (this.mirrorIdle) { clearTimeout(this.mirrorIdle); this.mirrorIdle = undefined; } }
+
+  // 连接状态来自实际会话/截图循环，关闭过的对象不能被当作已连接；view-idle回归验证异常关闭后的重连。
+  private mirrorConnected(): boolean { return !!(this.session?.connected || this.emu?.connected || this.loop); }
+
+  // 提供方销毁立即关闭投屏并等待创建任务结束，清理Explorer所有闲置会话；view-idle与activate回归验证全资源回收。
+  async dispose(): Promise<void> {
+    this.view = undefined; this.stop();
+    const results = await Promise.allSettled([...this.mirrorStarts, ...this.mirrorReleases, this.explorer?.setContext(undefined, false)]);
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failures.length) { throw new AggregateError(failures.map(result => result.reason), 'Device view cleanup failed'); }
+  }
+
+  // 刷新设备目录并恢复唯一活动视图；device-view-mode与mirror visibility回归断言Files/Processes路由及隐藏零新流。
   private async restart() {
-    this.stop();
-    if (!this.view?.visible) { return; }
+    if (!this.view?.visible) { this.idleMirror(); await this.explorer?.setContext(this.serial, false); return; }
     await this.refreshDevices();
-    if (!this.serial || !this.mirrorVisible) { return; }
-    const mode = this.pickMode(this.serial);
-    if (mode === 'emulator') { await this.startEmulator(this.serial); }
+    if (!this.view?.visible) { this.idleMirror(); await this.explorer?.setContext(this.serial, false); return; }
+    if (this.mirrorConnection && this.mirrorConnection.serial !== this.serial) { this.stop(); }
+    await this.explorer?.setContext(this.serial, this.deviceViewMode === 'explorer' || this.deviceViewMode === 'processes', this.deviceViewMode === 'processes' ? 'processes' : 'files');
+    if (!this.serial || !this.mirrorVisible || !this.view?.visible) { this.idleMirror(); return; }
+    this.cancelMirrorIdle();
+    const current = this.mirrorConnection;
+    if (current?.starting) { await current.starting; return; }
+    if (current && !current.controller.signal.aborted && this.mirrorConnected()) { this.flush(); return; }
+    this.stop();
+    if (this.mirrorStarts.size) { await Promise.allSettled([...this.mirrorStarts]); }
+    if (!this.serial || !this.mirrorVisible || !this.view?.visible) { return; }
+    const resumed = this.mirrorConnection;
+    if (resumed?.starting) { await resumed.starting; return; }
+    if (resumed && !resumed.controller.signal.aborted && this.mirrorConnected()) { return; }
+    const connection = { serial: this.serial, controller: new AbortController(), starting: undefined as Promise<void> | undefined };
+    this.mirrorConnection = connection;
+    const task = this.connectMirror(connection); connection.starting = task; this.mirrorStarts.add(task);
+    try { await task; } finally { connection.starting = undefined; this.mirrorStarts.delete(task); }
+  }
+
+  // 创建任务只有一个真实所有者，快速切回共用它，不使用代次标记；view-idle回归验证并发ready/切换零重复start。
+  private async connectMirror(connection: { serial: string; controller: AbortController }): Promise<void> {
+    connection.controller.signal.throwIfAborted();
+    const mode = this.pickMode(connection.serial);
+    if (mode === 'emulator') { await this.startEmulator(connection.serial); }
     else if (mode === 'scrcpy') { await this.startScrcpy(); }
     else { this.startScreencap(); }
   }
@@ -153,10 +209,35 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
   // 应用设置页或按钮状态，不重复写回配置；npm test mirror preference/visibility 回归断言实时同步、停止与恢复。
   async applyMirrorVisibility(visible: boolean): Promise<void> {
-    if (this.mirrorVisible === visible) { this.post({ type: 'mirrorVisibility', visible }); return; }
-    this.mirrorVisible = visible;
-    this.post({ type: 'mirrorVisibility', visible });
-    if (visible) { await this.restart(); } else { this.stop(); }
+    return this.applyDeviceViewMode(visible ? 'mirror' : 'hidden');
+  }
+
+  // 唯一显示模式互斥，非活动连接保留60秒，切回先检查真实状态；view-idle/device-view-mode回归覆盖复用、超时及保存失败。
+  async applyDeviceViewMode(mode: DeviceViewMode): Promise<void> {
+    if (!['mirror', 'explorer', 'processes', 'hidden'].includes(mode)) { throw new Error('Invalid device view mode'); }
+    const changed = this.deviceViewMode !== mode;
+    this.deviceViewMode = mode;
+    this.postViewMode();
+    if (!changed && mode !== 'mirror') { return; }
+    if (mode !== 'mirror') { this.idleMirror(); }
+    await this.explorer?.setContext(this.serial, (mode === 'explorer' || mode === 'processes') && !!this.view?.visible, mode === 'processes' ? 'processes' : 'files');
+    if (mode === 'mirror') { await this.restart(); }
+  }
+
+  // 旧消息同时携带四态值，前端监听注册后可恢复选中状态；tests/device-view-mode.test.js 验证握手。
+  private postViewMode(): void {
+    this.post({ type: 'deviceViewMode', mode: this.deviceViewMode });
+    this.post({ type: 'mirrorVisibility', visible: this.mirrorVisible, mode: this.deviceViewMode });
+  }
+
+  // 用户动作保存成功后才更新状态，失败不伪装成功；tests/device-view-mode.test.js 断言保存拒绝与重启恢复。
+  private async setDeviceViewMode(mode: DeviceViewMode): Promise<void> {
+    if (!['mirror', 'explorer', 'processes', 'hidden'].includes(mode)) { throw new Error('Invalid device view mode'); }
+    if (mode !== this.deviceViewMode) {
+      if (this.mirrorPreference?.saveMode) { await this.mirrorPreference.saveMode(mode); }
+      else { await this.mirrorPreference?.save(mode === 'mirror'); }
+    }
+    await this.applyDeviceViewMode(mode);
   }
 
   private pickMode(serial: string): Mode {
@@ -166,44 +247,47 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     return order.slice(start).find(usable)!;
   }
 
+  // gRPC会话回调绑定实际AbortSignal所有者，不用代次过滤；view-idle回归验证创建/断线/重入及失效后无帧。
   private async startEmulator(serial: string) {
-    const gen = this.generation;
+    const connection = this.mirrorConnection; if (!connection) { throw new Error('Mirror connection owner is missing'); }
     this.post({ type: 'mode', mode: 'emulator' });
     const emu = new EmulatorSession(grpcPortFor(serial)!, {
       onFrame: (f) => {
-        if (gen !== this.generation) { return; }
+        if (connection.controller.signal.aborted) { return; }
         this.pending = { w: f.w, h: f.h, data: new Uint8Array(f.rgba.buffer, f.rgba.byteOffset, f.rgba.length) };
         this.flush();
       },
       onClose: (reason) => {
-        if (gen !== this.generation) { return; }
+        if (connection.controller.signal.aborted) { return; }
+        this.emu = undefined;
         if (reason) { this.fallback('scrcpy', `Emulator stream stopped (${reason}); switching to scrcpy`); }
       },
     }, this.viewport, grpcTokenFor(serial));
     this.emu = emu;
     try { await emu.start(); } catch (e: any) {
-      if (gen === this.generation) { this.fallback('scrcpy', `Emulator gRPC failed (${e.message}); switching to scrcpy`); }
+      if (!connection.controller.signal.aborted) { this.fallback('scrcpy', `Emulator gRPC failed (${e.message}); switching to scrcpy`); }
     }
   }
 
   // Only one frame in flight: the webview acks each frame, newer frames replace the pending one.
   private flush() {
-    if (this.inflight || !this.pending) { return; }
+    if (!this.mirrorVisible || !this.view?.visible || this.inflight || !this.pending) { return; }
     const f = this.pending;
     this.pending = undefined;
     this.inflight = true;
     this.post({ type: 'rgba', ...f });
   }
 
+  // scrcpy创建与回调归单一连接所有者，闲置期可复用；view-idle回归验证单start、关闭状态及超时。
   private async startScrcpy() {
-    const gen = this.generation;
+    const connection = this.mirrorConnection; if (!connection) { throw new Error('Mirror connection owner is missing'); }
     const serial = this.serial!;
     this.post({ type: 'mode', mode: 'scrcpy' });
     const session = new ScrcpySession(serial, bundledJar(this.extPath), {
-      onPacket: (kind, data) => { if (gen === this.generation) { this.post({ type: 'video', kind, data: new Uint8Array(data) }); } },
+      onPacket: (kind, data) => { if (!connection.controller.signal.aborted) { this.post({ type: 'video', kind, data: new Uint8Array(data) }); } },
       onClose: (reason) => {
-        if (gen !== this.generation) { return; }
-        this.session = undefined;
+        if (connection.controller.signal.aborted) { return; }
+        this.session = undefined; this.trackMirrorRelease(session.stop());
         if (reason) { this.post({ type: 'error', text: `Stream stopped: ${reason}` }); }
       },
     });
@@ -211,7 +295,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     try {
       await session.start();
     } catch (e: any) {
-      if (gen !== this.generation) { return; }
+      if (connection.controller.signal.aborted) { if (e.name !== 'AbortError') { vscode.window.showErrorMessage(String(e)); } return; }
       this.fallback('screencap', `scrcpy failed (${e.message}); using screenshot mode`);
     }
   }
@@ -220,7 +304,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.stop();
     this.forced = mode;
     this.post({ type: 'error', text: reason });
-    this.restart().then(() => this.post({ type: 'error', text: reason }));
+    if (this.mirrorVisible && this.view?.visible) { void this.restart().then(() => this.post({ type: 'error', text: reason })).catch(error => this.post({ type: 'error', text: String(error) })); }
   }
 
   private startScreencap() {
@@ -233,7 +317,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private async refreshDevices() {
     const devs = await listDevices();
     if (this.serial && !devs.some((d) => d.serial === this.serial && d.state === 'device')) {
-      this.serial = undefined;
+      this.serial = undefined; this.stop();
+      await this.explorer?.setContext(undefined, false);
       await this.selectionChanged?.(undefined);
     }
     this.post({ type: 'devices', devices: devs.map((d) => ({ serial: d.serial, label: d.name || d.avdName || d.model || d.serial, state: d.state, physical: !d.serial.startsWith('emulator-') })), serial: this.serial });
@@ -246,18 +331,22 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     return { back: url(k.back), mask: url(k.mask), lw: k.lw, lh: k.lh, dx: k.dx, dy: k.dy, dw: k.dw, dh: k.dh, radius: k.radius };
   }
 
+  // 截图循环闲置时不发ADB，明确断开中止正在读取的进程；view-idle回归验证信号、串号及非活动零读取。
   private async capture() {
-    if (this.capturing || !this.serial) { return; }
+    const connection = this.mirrorConnection;
+    if (this.capturing || !connection || !this.mirrorVisible || !this.view?.visible) { return; }
     this.capturing = true;
     try {
-      const png = await runBuffer(adbPath(), ['-s', this.serial, 'exec-out', 'screencap', '-p']);
+      const png = await runBuffer(adbPath(), ['-s', connection.serial, 'exec-out', 'screencap', '-p'], connection.controller.signal);
+      if (connection.controller.signal.aborted || !this.mirrorVisible || !this.view?.visible) { return; }
       if (png.length > 24 && png.readUInt32BE(12) === 0x49484452) { // IHDR
         this.size = { w: png.readUInt32BE(16), h: png.readUInt32BE(20) };
       }
       this.post({ type: 'frame', data: png.toString('base64'), ...this.size });
     } catch (e: any) {
+      if (connection.controller.signal.aborted) { return; }
       this.post({ type: 'error', text: e.message });
-      this.refreshDevices();
+      await this.refreshDevices();
     } finally { this.capturing = false; }
   }
 
@@ -270,11 +359,13 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     switch (m.type) {
       case 'buildPanel': if (this.buildAction) { return this.buildAction(m, s); } return;
       case 'pairDevice': return vscode.commands.executeCommand('android.pairDevice');
-      case 'getMirrorVisibility': this.post({ type: 'mirrorVisibility', visible: this.mirrorVisible }); return;
+      case 'explorer': if (!this.explorer) { throw new Error('Device Explorer is unavailable'); } return this.explorer.handle(m);
+      case 'setDeviceViewMode': return this.setDeviceViewMode(m.mode);
+      case 'getMirrorVisibility': this.postViewMode(); return;
       case 'setMirrorVisibility':
         if (typeof m.visible !== 'boolean') { throw new Error('Invalid mirror visibility'); }
         return this.setMirrorVisible(m.visible);
-      case 'ready': this.post({ type: 'mirrorVisibility', visible: this.mirrorVisible }); return this.restart();
+      case 'ready': this.postViewMode(); return this.restart();
       case 'select': return this.select(m.serial ? { serial: m.serial } : undefined);
       case 'refresh': this.forced = undefined; return this.restart();
       case 'ext': if (s) { vscode.commands.executeCommand('android.extendedControls', { serial: s }); } return;
@@ -282,7 +373,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
       case 'reboot': if (s) { return this.reboot(s); } return;
       case 'wake': if (s) { await adb(s, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); } return;
       case 'openDM': vscode.commands.executeCommand('android.addDevice'); return;
-      case 'viewport': this.viewport = { w: Math.max(200, m.w), h: Math.max(200, m.h) }; this.emu?.setViewport(this.viewport); return;
+      case 'viewport': this.viewport = { w: Math.max(200, m.w), h: Math.max(200, m.h) }; if (this.mirrorVisible && this.view?.visible) { this.emu?.setViewport(this.viewport); } return;
       case 'ack': this.inflight = false; return this.flush();
       case 'rotate': if (this.emu) { this.emu.rotate(m.dir); return; } if (s) { return this.rotate(s, m.dir); } return;
       case 'record': if (s) { return this.toggleRecording(s); } return;
@@ -385,8 +476,9 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
 // 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标随宽度缩小且最大 24px，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
 // 生成当前设备名称和全设备下拉 UI；npm test 的 DOM 回归执行 renderDevices 并断言状态、禁用项和空态。
+// 输入资源和模式，在设备选择框后输出投屏/Explorer/Processes图标组，不生成Wi-Fi按钮；build-panel-ui与device-view-mode回归验证同排顺序、移除绑定与四态恢复。
 // 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
-function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean }) {
+function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; explorerScript: string; explorerStyle: string }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource};">
 <link rel="stylesheet" href="${codicons}"><style>
@@ -441,15 +533,16 @@ button svg{width:20px;height:20px}
 #empty a{color:var(--vscode-textLink-foreground);cursor:pointer;text-decoration:none}#empty a:hover{text-decoration:underline}
 body.empty #bar,body.empty #wrap{display:none}
 body.empty #empty{display:flex}
-</style><link rel="stylesheet" href="${art.style}"></head><body class="empty${art.mirrorVisible ? '' : ' mirror-hidden'}" data-mirror-visible="${art.mirrorVisible}">
+</style><link rel="stylesheet" href="${art.style}"><link rel="stylesheet" href="${art.explorerStyle}"></head><body class="empty${art.mirrorVisible ? '' : ' mirror-hidden'}" data-mirror-visible="${art.mirrorVisible}" data-device-view-mode="${art.deviceViewMode}">
 <div id="tabs" aria-label="Android run configuration">
 <div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
 <div class="build-surface">
 <div class="build-target-row"><i class="codicon codicon-package" aria-hidden="true"></i><select id="build-target" aria-label="Module and build variant" title="Module and build variant"><option value="">No Android variants</option></select></div>
-<div class="build-device-row"><div id="tab"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><button id="build-wifi" title="Connect Device over Wi-Fi" aria-label="Connect Device over Wi-Fi">${icons['pair-over-wifi']}</button></div>
-<div class="build-actions"><button id="build-run" title="Build, install and run"><i id="build-run-icon" class="codicon codicon-play"></i><span id="build-run-label">Run</span></button><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-debug" title="Debug app" aria-label="Debug app"><i class="codicon codicon-debug-alt"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button><button id="build-mirror" title="Hide mirroring" aria-label="Hide mirroring" aria-pressed="true"><i class="codicon codicon-device-desktop"></i></button></div>
+<div class="build-device-row"><div id="tab"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
+<div class="build-actions"><button id="build-run" title="Build, install and run"><i id="build-run-icon" class="codicon codicon-play"></i><span id="build-run-label">Run</span></button><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-debug" title="Debug app" aria-label="Debug app"><i class="codicon codicon-debug-alt"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button></div>
 <div class="build-status" role="status" aria-live="polite"><i id="build-progress" class="codicon"></i><span id="build-status">No Gradle project</span></div>
 </div></div>
+<section id="device-explorer" hidden></section>
 <div id="menu"><div id="m-frame">Show Device Frame</div><div id="m-ext">Extended Controls</div><div id="m-log">Show Logcat</div></div>
 <div id="empty"><img class="dk" src="${art.dark}" alt=""><img class="lt" src="${art.light}" alt="">
 <div>To mirror a physical device, connect it via USB cable or over Wi-Fi.<br>To launch a virtual device, start one from <a id="open-dm">Select Device</a>.</div></div>
@@ -631,5 +724,5 @@ addEventListener('message',({data:m})=>{
  else if(m.type==='compose')compose(m);
  else if(m.type==='error'){msg.textContent=m.text;if(frame.dataset.state!=='live')setPresentation('error',m.text)};});
 send({type:'ready'});
-</script><script src="${art.panel}"></script></body></html>`;
+</script><script src="${art.panel}"></script><script src="${art.processesScript}"></script><script src="${art.explorerScript}"></script></body></html>`;
 }

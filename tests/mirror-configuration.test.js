@@ -7,15 +7,15 @@ const { transformSync } = require('esbuild');
 
 // 执行真实 activate 配置接线，模拟 VS Code 有效值及更新目标；npm test 回归断言重启恢复、工作区优先和资源释放。
 function fixture() {
-  const f = { value: false, workspaceValue: undefined, writes: [], applied: [], errors: [], instances: [], subscriptions: [], fail: false };
+  const f = { value: false, workspaceValue: undefined, workspaceMode: undefined, globalMode: undefined, writes: [], applied: [], errors: [], instances: [], subscriptions: [], fail: false };
   const listener = { disposed: false, dispose() { this.disposed = true; } };
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2 },
     workspace: {
       getConfiguration: () => ({
         get: (key, fallback) => key === 'mirrorVisible' ? f.value : fallback,
-        inspect: () => ({ workspaceValue: f.workspaceValue }),
-        update: async (key, value, target) => { if (f.fail) throw new Error('read-only settings'); f.writes.push({ key, value, target }); f.value = value; },
+        inspect: key => key === 'deviceViewMode' ? { workspaceValue: f.workspaceMode, globalValue: f.globalMode } : { workspaceValue: f.workspaceValue },
+        update: async (key, value, target) => { if (f.fail) throw new Error('read-only settings'); f.writes.push({ key, value, target }); if (key === 'mirrorVisible') f.value = value; else if (key === 'deviceViewMode') { if (target === 2) f.workspaceMode = value; else f.globalMode = value; } },
       }),
       onDidChangeConfiguration: fn => { f.listener = fn; return listener; },
     },
@@ -23,9 +23,9 @@ function fixture() {
   };
   class Running {
     constructor(ext, action, preference) { this.preference = preference; f.instances.push(this); }
-    async applyMirrorVisibility(visible) { if (f.rejectApply) throw new Error('stream failed'); f.applied.push(visible); }
+    async applyDeviceViewMode(visible) { if (f.rejectApply) throw new Error('stream failed'); f.applied.push(visible); }
   }
-  const deps = { vscode, './runningDevices': { RunningDeviceView: Running }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './logcat': { LogcatView: class {} }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} };
+  const deps = { './deviceExplorer': { DeviceExplorerController: class { async dispose() {} } }, vscode, './runningDevices': { RunningDeviceView: Running }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './logcat': { LogcatView: class {} }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
   f.activate = () => module.exports.activate({ extensionPath: '', subscriptions: f.subscriptions });
@@ -57,7 +57,7 @@ test('mirror configuration changes sync live and own the settings subscription',
   assert.deepEqual(f.applied, []);
   f.value = true;
   f.listener({ affectsConfiguration: key => key === 'android.mirrorVisible' });
-  assert.deepEqual(f.applied, [true]);
+  assert.deepEqual(f.applied, ['mirror']);
   assert.equal(f.writes.length, 0);
   f.rejectApply = true;
   f.listener({ affectsConfiguration: () => true });
@@ -73,4 +73,15 @@ test('mirror configuration schema and enlarged Logcat icon are registered', () =
   assert.equal(schema.type, 'boolean'); assert.equal(schema.default, true); assert.equal(schema.scope, 'window');
   const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'utf8');
   assert.match(css, /#build-logcat svg\{width:20px;height:20px;max-width:100%;flex:none\}/);
+});
+
+// 执行真实activate配置接线，Processes写入后扩展重建、设置监听及工作区覆盖均保持同一模式。
+test('Processes mode persists across activation and respects live workspace configuration',async()=>{
+  const f=fixture();f.activate();assert.equal(f.instances.at(-1).preference.mode,'hidden');
+  await f.instances.at(-1).preference.saveMode('processes');assert.equal(f.writes.at(-1).key,'deviceViewMode');assert.equal(f.writes.at(-1).target,1);
+  f.activate();assert.equal(f.instances.at(-1).preference.mode,'processes');
+  f.workspaceMode='explorer';await f.instances.at(-1).preference.saveMode('processes');assert.equal(f.writes.at(-1).target,2);
+  f.activate();assert.equal(f.instances.at(-1).preference.mode,'processes');
+  const writes=f.writes.length;f.workspaceMode='hidden';f.listener({affectsConfiguration:key=>key==='android.deviceViewMode'});assert.deepEqual(f.applied,['hidden']);assert.equal(f.writes.length,writes);
+  f.fail=true;await assert.rejects(f.instances.at(-1).preference.saveMode('mirror'),/read-only/);assert.equal(f.workspaceMode,'hidden');
 });

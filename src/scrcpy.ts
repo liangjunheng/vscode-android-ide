@@ -1,7 +1,7 @@
 import * as net from 'net';
 import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
-import { adb, adbPath, freePort, sdkRoot } from './sdk';
+import { adb, adbPath, freePort, sdkRoot, runBuffer } from './sdk';
 
 // Must match the bundled resources/scrcpy-server.jar
 export const SCRCPY_VERSION = '3.3.4';
@@ -15,21 +15,24 @@ export interface ScrcpyHandlers {
   onClose(reason?: string): void;
 }
 
-function connectWithRetry(port: number, isStopped: () => boolean, attempts = 100): Promise<{ sock: net.Socket; first: Buffer }> {
+// 沿用服务启动时的连接尝试，但仅ECONNREFUSED可接续，取消立即销毁当前socket和等待计时器；view-idle传输回归验证无迟到重连。
+function connectWithRetry(port: number, signal: AbortSignal, attempts = 100): Promise<{ sock: net.Socket; first: Buffer }> {
   return new Promise((resolve, reject) => {
-    let n = 0;
+    let n = 0, socket: net.Socket | undefined, timer: NodeJS.Timeout | undefined;
+    const cleanup = () => { signal.removeEventListener('abort', abort); if (timer) { clearTimeout(timer); timer = undefined; } };
+    const abort = () => { cleanup(); const owned = socket; socket = undefined; owned?.destroy(); reject(signal.reason); };
     const attempt = () => {
-      if (isStopped()) { return reject(new Error('stopped')); }
-      const sock = net.connect(port, '127.0.0.1');
-      let got = false;
-      sock.once('data', (d: Buffer) => { got = true; resolve({ sock, first: d }); });
-      sock.on('error', () => { /* retried on close */ });
-      sock.on('close', () => {
-        if (got) { return; }
-        if (++n >= attempts) { reject(new Error('scrcpy server did not start')); } else { setTimeout(attempt, 100); }
+      if (signal.aborted) { abort(); return; }
+      const sock = net.connect(port, '127.0.0.1'); socket = sock; let failure: NodeJS.ErrnoException | undefined;
+      sock.once('data', (first: Buffer) => { cleanup(); socket = undefined; resolve({ sock, first }); });
+      sock.once('error', (error: NodeJS.ErrnoException) => { failure = error; });
+      sock.once('close', () => {
+        if (socket !== sock) { return; } socket = undefined;
+        if (!signal.aborted && failure?.code === 'ECONNREFUSED' && ++n < attempts) { timer = setTimeout(attempt, 100); }
+        else { cleanup(); reject(signal.aborted ? signal.reason : failure || new Error('scrcpy server closed before handshake')); }
       });
     };
-    attempt();
+    signal.addEventListener('abort', abort, { once: true }); attempt();
   });
 }
 
@@ -39,15 +42,28 @@ export class ScrcpySession {
   private control?: net.Socket;
   private stopped = false;
   private port = 0;
+  private forwarded = false;
+  private closing?: Promise<void>;
+  private readonly controller = new AbortController();
+
+  // 读取真实socket/子进程状态，不把停止对象当连接；view-idle传输回归验证关闭和复用检查。
+  get connected(): boolean { return !this.stopped && !!this.video && !this.video.destroyed && !!this.control && !this.control.destroyed && this.proc?.exitCode === null; }
+
+  // 创建任务每次异步继续前核对实际取消信号；view-idle回归覆盖push/forward/握手中停止。
+  private requireOpen(): void { this.controller.signal.throwIfAborted(); }
   private log = '';
 
   constructor(private serial: string, private jarPath: string, private h: ScrcpyHandlers) {}
 
+  // 逐步拥有push/forward/进程/socket，停止后不继续创建；view-idle传输回归覆盖创建中取消及forward清理。
   async start() {
+    this.requireOpen();
     const scid = Math.floor(Math.random() * 0x7fffffff).toString(16).padStart(8, '0');
-    await adb(this.serial, 'push', this.jarPath, REMOTE_JAR);
-    this.port = await freePort();
+    await runBuffer(adbPath(), ['-s', this.serial, 'push', this.jarPath, REMOTE_JAR], this.controller.signal); this.requireOpen();
+    this.port = await freePort(); this.requireOpen();
     await adb(this.serial, 'forward', `tcp:${this.port}`, `localabstract:scrcpy_${scid}`);
+    this.forwarded = true;
+    if (this.stopped) { await this.removeForward(); this.requireOpen(); }
 
     this.proc = spawn(adbPath(), ['-s', this.serial, 'shell',
       `CLASSPATH=${REMOTE_JAR}`, 'app_process', '/', 'com.genymobile.scrcpy.Server', SCRCPY_VERSION,
@@ -58,14 +74,17 @@ export class ScrcpySession {
     this.proc.stdout?.on('data', collect);
     this.proc.stderr?.on('data', collect);
     this.proc.on('exit', () => this.close(this.log.trim() || 'scrcpy server exited'));
+    this.proc.on('error', error => { this.close(error.message); });
 
-    const { sock, first } = await connectWithRetry(this.port, () => this.stopped);
+    const { sock, first } = await connectWithRetry(this.port, this.controller.signal);
+    if (this.stopped || sock.destroyed) { sock.destroy(); this.requireOpen(); throw new Error('scrcpy video closed before startup completed'); }
     this.video = sock;
     // first connection = video (after the dummy byte), second = control
     const ctl = net.connect(this.port, '127.0.0.1');
     this.control = ctl;
     ctl.on('data', () => { /* device messages (clipboard…) ignored */ });
-    ctl.on('error', () => {});
+    ctl.on('error', error => { this.close(error.message); });
+    ctl.on('close', () => { this.close('control stream closed'); });
     this.readVideo(sock, first.subarray(1));
   }
 
@@ -134,16 +153,24 @@ export class ScrcpySession {
   rotate() { this.send(Buffer.from([11])); }
   expandNotifications() { this.send(Buffer.from([5])); }
 
-  private close(reason?: string) {
-    if (this.stopped) { return; }
-    this.stopped = true;
-    this.video?.destroy(); this.control?.destroy();
-    this.proc?.kill();
-    if (this.port) { adb(this.serial, 'forward', '--remove', `tcp:${this.port}`).catch(() => {}); }
-    this.h.onClose(reason);
+  // 关闭真实句柄并保留异步forward释放任务，所有失败可观察；view-idle传输回归验证关闭中不再连接。
+  private close(reason?: string): Promise<void> {
+    if (this.stopped) { return this.closing || Promise.resolve(); }
+    this.stopped = true; this.controller.abort(Object.assign(new Error('scrcpy session stopped'), { name: 'AbortError' }));
+    this.video?.destroy(); this.control?.destroy(); this.proc?.kill();
+    this.closing = this.removeForward();
+    void this.closing.catch(error => console.error('scrcpy forward cleanup failed', error));
+    this.h.onClose(reason); return this.closing;
   }
 
-  stop() { this.close(); }
+  // 只删除实际创建完成的forward，创建期间取消由start在ACK后回收；view-idle回归验证无提前删除/重复删除。
+  private async removeForward(): Promise<void> {
+    if (!this.forwarded) { return; } this.forwarded = false;
+    await adb(this.serial, 'forward', '--remove', `tcp:${this.port}`);
+  }
+
+  // 明确停止返回真实清理Promise，提供方销毁会等待；view-idle回归验证forward关闭完成。
+  stop(): Promise<void> { return this.close(); }
 }
 
 export const bundledJar = (extPath: string) => path.join(extPath, 'resources', 'scrcpy-server.jar');

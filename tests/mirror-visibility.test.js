@@ -14,11 +14,11 @@ function fixture(preference) {
     './emulatorGrpc': {}, './scrcpy': {}, './skin': { skinForAvd: () => undefined },
   };
   const source = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController, setTimeout, clearTimeout, clearInterval, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id) });
   const view = new module.exports.RunningDeviceView(path.join(__dirname, '..'), undefined, preference);
   view.view = { visible: true, webview: { postMessage: m => messages.push(m) } };
   view.pickMode = () => 'screencap';
-  view.startScreencap = () => started.push(view.serial);
+  view.startScreencap = () => { started.push(view.serial); view.loop = {}; };
   return { view, calls, messages, started };
 }
 
@@ -35,18 +35,18 @@ test('mirror controls use bundled Android Studio Logcat icon and selected device
   assert.equal(f.calls[1][1].serial, 'phone');
 });
 
-// npm test：隐藏释放视频源但保留设备，设备切换仍更新目录，显示后恢复最新设备，不重复启动或改变构建。
+// npm test：隐藏保留连接进入60秒宽限，设备变更立即释放，恢复后不重复建立；精确超时见view-idle回归。
 test('mirror controls hide stop preserve selection and resume the latest device', async () => {
   const f = fixture(); let stops = 0;
   f.view.serial = 'phone'; f.view.session = { stop: () => stops++ };
   await f.view.onMessage({ type: 'setMirrorVisibility', visible: false });
-  assert.equal(stops, 1);
+  assert.equal(stops, 0);
   assert.equal(f.view.serial, 'phone');
   assert.equal(f.messages.at(-1).visible, false);
   await f.view.onMessage({ type: 'setMirrorVisibility', visible: false });
-  assert.equal(stops, 1);
+  assert.equal(stops, 0);
   await f.view.onMessage({ type: 'select', serial: 'two' });
-  assert.equal(f.view.serial, 'two'); assert.equal(f.started.length, 0);
+  assert.equal(f.view.serial, 'two'); assert.equal(f.started.length, 0); assert.equal(stops, 1);
   assert.equal(f.messages.filter(m => m.type === 'devices').at(-1).serial, 'two');
   await f.view.onMessage({ type: 'setMirrorVisibility', visible: true });
   assert.deepEqual(f.started, ['two']);

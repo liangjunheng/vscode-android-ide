@@ -1,0 +1,24 @@
+#device-explorer{width:100%;min-width:0;flex:1;overflow:hidden;height:100%;display:flex;flex-direction:column;min-height:0;color:var(--vscode-foreground);font:13px var(--vscode-font-family)}#device-explorer *{box-sizing:border-box}#device-explorer button,.explorer-menu button{font:inherit;color:inherit}.files-view,.processes-view{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;width:100%}.explorer-title{flex:none;height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 6px 0 10px;font-weight:600;border-bottom:1px solid var(--vscode-panel-border,#444);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tabs{height:32px;display:flex;border-bottom:1px solid var(--vscode-panel-border,#444)}.tabs button{border:0;background:transparent;padding:0 14px;border-bottom:2px solid transparent;cursor:pointer}.tabs button.active{border-bottom-color:var(--vscode-focusBorder);color:var(--vscode-textLink-foreground)}.toolbar{height:34px;display:flex;align-items:center;gap:2px;padding:3px 6px;border-bottom:1px solid var(--vscode-panel-border,#444);flex:none}.explorer-icon,.filter-toggle{width:28px;height:28px;border:0;background:transparent;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;border-radius:4px}.explorer-icon:hover,.filter-toggle:hover{background:var(--vscode-toolbar-hoverBackground)}#device-explorer button:disabled,.explorer-menu button:disabled{opacity:.45;cursor:default}.filter-toggle[aria-pressed=true]{background:var(--vscode-toolbar-activeBackground)}.pathbar{flex:none;height:28px;padding:5px 10px;color:var(--vscode-descriptionForeground);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.file-head,.file-row{display:grid;grid-template-columns:minmax(240px,1fr) 120px 180px 90px;min-width:630px}.file-head{height:28px;align-items:center;border-top:1px solid var(--vscode-panel-border,#444);border-bottom:1px solid var(--vscode-panel-border,#444);color:var(--vscode-descriptionForeground... (line truncated to 2000 chars)
+/* 进程卡片按容器宽度排版，长字段自然换行；device-explorer-layout.test.js断言240px起无横向滚动和字段重叠。 */
+.process-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,128px) 26px;align-items:center;gap:4px;padding:4px 6px;flex:none;border-bottom:1px solid var(--vscode-panel-border,#444)}
+.process-filter,.process-sort{width:100%;min-width:0;height:26px;margin:0;padding:2px 6px;font:inherit;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--vscode-panel-border,#444));border-radius:3px;color:var(--vscode-input-foreground,var(--vscode-foreground))}
+.process-sort{background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground)}
+.process-sort-direction{width:26px;height:26px}
+.process-list{overflow:auto;flex:1;min-height:0;min-width:0;padding:6px;scrollbar-gutter:stable}
+.process-card{width:100%;min-width:0;margin:0 0 6px;padding:10px;border:1px solid var(--vscode-panel-border,#444);border-radius:4px;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));cursor:pointer}
+.process-card:last-child{margin-bottom:0}
+.process-card:hover{background:var(--vscode-list-hoverBackground)}
+.process-card.selected{border-color:var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground,var(--vscode-toolbar-activeBackground));color:var(--vscode-list-activeSelectionForeground,var(--vscode-foreground))}
+.process-card:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-2px}
+.process-card-header{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:8px}
+.process-name{min-width:0;font-weight:600;line-height:18px;white-space:normal;overflow-wrap:anywhere}
+.process-pid{font-size:11px;line-height:18px;white-space:nowrap;color:var(--vscode-descriptionForeground)}
+.process-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin:10px 0 0}
+.process-field{min-width:0}
+.process-field dt{font-size:11px;line-height:16px;color:var(--vscode-descriptionForeground)}
+.process-field dd{min-width:0;margin:0;font-size:12px;line-height:18px;white-space:normal;overflow-wrap:anywhere}
+.process-card.selected .process-pid,.process-card.selected dt{color:inherit;opacity:.8}
+/* 五个卡片动作固定28px且可换行；UI/layout回归验证240px面板的按钮边界、间距及图标可见。 */
+.process-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;margin-top:10px}
+.process-actions .explorer-icon{flex:0 0 28px;width:28px;height:28px}
+.process-actions .explorer-icon:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px}
