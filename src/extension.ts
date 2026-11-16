@@ -1,18 +1,19 @@
 import * as vscode from 'vscode';
 import { registerDeviceManager } from './deviceManager';
-import { DeviceManagerView } from './deviceManagerView';
 import { RunningDeviceView } from './runningDevices';
 import { LogcatView } from './logcat';
 import { openExtendedControls } from './extendedControls';
+import { AndroidBuildController } from './androidBuild';
 
+// 注册紧凑运行面板、构建控制器及镜像；npm test build panel integration 回归断言动作、状态和生命周期接线。
 export function activate(ctx: vscode.ExtensionContext) {
-  const dm = new DeviceManagerView(ctx.extensionPath);
-  const running = new RunningDeviceView(ctx.extensionPath);
+  const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial));
+  const build = new AndroidBuildController((message) => running.publishBuildState(message));
   const logcat = new LogcatView(ctx.extensionPath);
-  const refresh = () => { dm.refresh(); };
+  const refresh = () => running.refresh().catch((error) => vscode.window.showErrorMessage(String(error)));
 
   ctx.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('android.deviceManager', dm, { webviewOptions: { retainContextWhenHidden: true } }),
+    build,
     vscode.window.registerWebviewViewProvider('android.runningDevice', running, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.window.registerWebviewViewProvider('android.logcat', logcat, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.commands.registerCommand('android.showLogcat', (arg: any) => logcat.show(arg?.kind === 'avd' ? arg.running : arg)),
@@ -22,12 +23,13 @@ export function activate(ctx: vscode.ExtensionContext) {
     vscode.commands.registerCommand('android.refresh', refresh),
     vscode.commands.registerCommand('android.mirroredSerial', () => running.mirroredSerial()),
     vscode.commands.registerCommand('android.stopMirror', () => running.stopMirroring()),
+    vscode.commands.registerCommand('android.selectDevice', (device: any) => running.select(device)),
     vscode.commands.registerCommand('android.mirrorDevice', (arg: any) => {
       const d = arg?.kind === 'avd' ? arg.running : arg;
       return running.show(d);
     }),
   );
-  registerDeviceManager(ctx, refresh);
+  registerDeviceManager(ctx, () => {});
 }
 
 export function deactivate() {}

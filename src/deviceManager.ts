@@ -119,10 +119,11 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
     }
   }));
 
+  // 标题栏选择器包含真机、模拟器及未授权/离线状态；npm test 选择器回归断言选择、取消、配对、启动和错误提示。
   reg('android.addDevice', guard(async () => {
     const devices = await listDevices();
     const icon = (n: string) => vscode.Uri.file(path.join(ctx.extensionPath, 'media', 'icons', n));
-    type Item = vscode.QuickPickItem & { avd?: Avd; pair?: boolean };
+    type Item = vscode.QuickPickItem & { avd?: Avd; device?: Device; pair?: boolean };
     const avds: Item[] = listAvds().map((a) => ({
       label: a.config['avd.ini.displayname'] || a.name.replace(/_/g, ' '),
       description: devices.some((d) => d.avdName === a.name) ? 'running' : undefined,
@@ -130,6 +131,13 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
       avd: a,
     }));
     const items: Item[] = [
+      { label: 'Connected Devices', kind: vscode.QuickPickItemKind.Separator },
+      ...devices.map((device) => ({
+        label: device.name || device.model?.replace(/_/g, ' ') || device.serial,
+        description: device.state,
+        detail: device.serial,
+        device,
+      })),
       { label: 'Virtual Devices', kind: vscode.QuickPickItemKind.Separator },
       ...avds,
       { label: '', kind: vscode.QuickPickItemKind.Separator },
@@ -138,6 +146,16 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
     const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select a device' });
     if (!pick) { return; }
     if (pick.pair) { await vscode.commands.executeCommand('android.pairDevice'); return; }
+    if (pick.device) {
+      if (pick.device.state !== 'device') {
+        await vscode.window.showWarningMessage(pick.device.state === 'unauthorized'
+          ? 'Device unauthorized. Unlock the device and allow USB debugging.'
+          : 'Device is ' + pick.device.state + '. Check its USB or Wi-Fi connection.');
+        return;
+      }
+      await vscode.commands.executeCommand('android.mirrorDevice', pick.device);
+      return;
+    }
     const running = devices.find((d) => d.avdName === pick.avd!.name);
     if (running) { await vscode.commands.executeCommand('android.mirrorDevice', running); }
     else { await vscode.commands.executeCommand('android.startAvd', { kind: 'avd', avd: pick.avd }); }

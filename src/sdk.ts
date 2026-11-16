@@ -21,7 +21,11 @@ export function sdkRoot(): string {
 const exe = (n: string) => (process.platform === 'win32' ? n + '.exe' : n);
 const bat = (n: string) => (process.platform === 'win32' ? n + '.bat' : n);
 
-export function adbPath() { return path.join(sdkRoot(), 'platform-tools', exe('adb')); }
+// 优先使用配置 SDK；未安装 SDK 时由系统 PATH 解析 adb。npm test 的 SDK 回归覆盖两种路径及命令失败。
+export function adbPath() {
+  const root = sdkRoot();
+  return root ? path.join(root, 'platform-tools', exe('adb')) : exe('adb');
+}
 export function emulatorPath() { return path.join(sdkRoot(), 'emulator', exe('emulator')); }
 function cmdlineTool(name: string) {
   const root = path.join(sdkRoot(), 'cmdline-tools');
@@ -83,9 +87,11 @@ async function friendlyName(d: Device): Promise<string> {
   return p.api ? `${model} API ${p.api}` : model;
 }
 
+// 列出 adb 的所有连接状态，命令失败携带实际路径向调用方报错；npm test SDK 回归断言在线/未授权/离线和失败。
 export async function listDevices(): Promise<Device[]> {
   let out: string;
-  try { out = await adb(undefined, 'devices', '-l'); } catch { return []; }
+  try { out = await adb(undefined, 'devices', '-l'); }
+  catch (error) { throw new Error('ADB discovery failed (' + adbPath() + '): ' + String(error)); }
   const devices: Device[] = [];
   for (const line of out.split('\n').slice(1)) {
     const m = line.trim().match(/^(\S+)\s+(\S+)(.*)$/);

@@ -69,11 +69,6 @@
       ],
       "panel": [
         {
-          "id": "androidRunning",
-          "title": "Running Devices",
-          "icon": "media/icons/running-devices.svg"
-        },
-        {
           "id": "androidLogcat",
           "title": "Logcat",
           "icon": "media/icons/logcat.svg"
@@ -84,15 +79,8 @@
       "androidTools": [
         {
           "type": "webview",
-          "id": "android.deviceManager",
-          "name": "Device Manager"
-        }
-      ],
-      "androidRunning": [
-        {
-          "type": "webview",
           "id": "android.runningDevice",
-          "name": "Running Devices"
+          "name": "Device Tools"
         }
       ],
       "androidLogcat": [
@@ -149,7 +137,11 @@
       },
       {
         "command": "android.pairDevice",
-        "title": "Device Tools: Connect Device over Wi-Fi (adb connect)"
+        "title": "Device Tools: Connect Device over Wi-Fi (adb connect)",
+        "icon": {
+          "light": "media/icons/pair-over-wifi-light.svg",
+          "dark": "media/icons/pair-over-wifi-dark.svg"
+        }
       },
       {
         "command": "android.showLogcat",
@@ -161,21 +153,26 @@
       },
       {
         "command": "android.addDevice",
-        "title": "Device Tools: Add Device…",
-        "icon": "$(add)"
+        "title": "Device Tools: Select Device",
+        "icon": "$(device-mobile)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "android.refresh",
-          "when": "view == android.deviceManager",
-          "group": "navigation"
-        },
-        {
-          "command": "android.addDevice",
+          "command": "android.createAvd",
           "when": "view == android.runningDevice",
           "group": "navigation@1"
+        },
+        {
+          "command": "android.pairDevice",
+          "when": "view == android.runningDevice",
+          "group": "navigation@2"
+        },
+        {
+          "command": "android.refresh",
+          "when": "view == android.runningDevice",
+          "group": "navigation@3"
         }
       ]
     },
