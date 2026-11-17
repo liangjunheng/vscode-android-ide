@@ -11,12 +11,13 @@ function fixture() {
   const f = { devices: [{ serial: 'phone', state: 'device' }, { serial: 'two', state: 'device' }], views: {}, handlers: {}, commands: [], errors: [], streams: [], mirrors: [], intervals: new Map() };
   const vscode = {
     Uri: { file: p => p, joinPath: (...p) => p.join('/') },
+    debug: { registerDebugAdapterDescriptorFactory: () => ({ dispose() {} }) },
     workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) },
     commands: { registerCommand: (id, fn) => { f.handlers[id] = fn; }, executeCommand: async (id, arg) => { f.commands.push([id, arg]); return f.handlers[id]?.(arg); } },
     window: { registerWebviewViewProvider: (id, view) => { f.views[id] = view; }, showErrorMessage: e => f.errors.push(e) },
   };
   let timerId = 0;
-  const sdk = { listDevices: async () => { if (f.failure) throw f.failure; return f.devices; }, skinForAvd: () => undefined, adbPath: () => 'adb', sdkRoot: () => '' };
+  const sdk = { listDevices: async () => { f.discoveries = (f.discoveries || 0) + 1; if (f.failure) throw f.failure; return f.devices; }, skinForAvd: () => undefined, adbPath: () => 'adb', sdkRoot: () => '' };
   const spawn = (exe, args) => {
     const proc = new EventEmitter(); proc.stdout = new EventEmitter(); proc.stdout.setEncoding = () => {};
     proc.kill = () => { proc.killed = true; }; f.streams.push({ args, proc }); return proc;
@@ -33,7 +34,8 @@ function fixture() {
   }
   const running = load('runningDevices', { vscode, './sdk': sdk, './emulatorGrpc': {}, './scrcpy': {}, './skin': sdk });
   const logcat = load('logcat', { vscode, './sdk': sdk, child_process: { spawn } });
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
+  // 调试适配器注册属于独立宿主依赖；仍执行真实 activate 和两侧设备选择，不加载无关调试会话。
+  load('extension', { './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
   f.running = f.views['android.runningDevice']; f.logcat = f.views['android.logcat'];
   f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
   // 创建实际 HTML 与宿主消息入口，默认均可见；可在测试中延迟创建或隐藏来覆盖生命周期。
@@ -81,14 +83,17 @@ test('device selection sync retains selection before views exist and while hidde
   assert.equal(f.running.serial, 'two'); assert.equal(f.mirrors.length, 0);
 });
 
-// 现有目录 tick 的初始自动选择、拔出替换及全部断开均通知另一侧；目录失败只报告且不误清选择。
+// 现有目录 tick 初始默认首台，拔出清空而不替换且下次保持空；重新手选后查询失败保留选择并报错。
 test('device selection sync publishes catalog choices disconnects and discovery errors', async () => {
   const f = fixture(); f.resolve(f.running); f.resolve(f.logcat);
   f.logcat.startPolling(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.running.serial, 'phone'); assert.equal(f.logcat.serial, 'phone');
   const tick = [...f.intervals.values()].find(v => v.ms === 3000).fn;
   f.devices = [{ serial: 'two', state: 'device' }]; await tick();
-  assert.equal(f.running.serial, 'two'); assert.equal(f.logcat.serial, 'two');
+  assert.equal(f.running.serial, undefined); assert.equal(f.logcat.serial, undefined);
+  await tick();
+  assert.equal(f.running.serial, undefined); assert.equal(f.logcat.serial, undefined);
+  await f.logcat.select('two');
   f.failure = new Error('discovery failed'); await tick();
   assert.equal(f.running.serial, 'two'); assert.match(f.errors.at(-1), /discovery failed/);
   f.failure = undefined; f.devices = []; await tick();
@@ -122,4 +127,83 @@ test('Logcat entry always opens without a device and preserves selected device',
   await f.running.onMessage({ type: 'logcat' }); assert.equal(f.streams.length, 1);
   f.handlers['android.showLogcat'] = async () => { throw new Error('focus failed'); };
   await assert.rejects(f.running.onMessage({ type: 'logcat' }), /focus failed/);
+});
+
+// 真实入口无硬件复现重复展开；npm test 断言查询次数、默认首台、在线保留、离线清空和查询失败。
+test('device dropdown discovery refreshes every opening and respects selection lifecycle', async () => {
+  for (const side of ['running', 'logcat']) {
+    const f = fixture(), r = f.resolve(f.running); f.resolve(f.logcat);
+    const provider = f[side];
+    f.devices.unshift({ serial: 'offline', state: 'offline' });
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.running.serial, 'phone'); assert.equal(f.logcat.serial, 'phone');
+    const before = f.discoveries, mirrors = f.mirrors.length, streams = f.streams.length;
+    f.devices.push({ serial: 'new', state: 'device' });
+    await provider.onMessage({ type: 'discoverDevices' });
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.discoveries, before + 2);
+    assert.equal(f.mirrors.length, mirrors); assert.equal(f.streams.length, streams);
+    const snapshot = side === 'running' ? r.messages.findLast(m => m.type === 'devices').devices : f.logcat.devices;
+    assert.ok(snapshot.some(d => d.serial === 'new'));
+    assert.ok(snapshot.some(d => d.serial === 'offline' && d.state === 'offline'));
+    await provider.onMessage({ type: 'select', serial: 'two' });
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.running.serial, 'two'); assert.equal(f.logcat.serial, 'two');
+    f.failure = new Error('discovery failed');
+    await assert.rejects(provider.onMessage({ type: 'discoverDevices' }), /discovery failed/);
+    assert.equal(provider.serial, 'two'); f.failure = undefined;
+    f.devices = [{ serial: 'two', state: 'offline' }, { serial: 'phone', state: 'device' }];
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.running.serial, undefined); assert.equal(f.logcat.serial, undefined);
+    assert.equal(f.streams.at(-1).proc.killed, true);
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.running.serial, undefined); assert.equal(f.logcat.serial, undefined);
+    f.logcat.stopStream(); await f.running.dispose();
+  }
+});
+
+// 执行真实页面/脚本绑定，主键每次展开及键盘展开都查询；右键和非展开键不查询。
+test('device dropdown pointer and keyboard openings request fresh discovery', () => {
+  const f = fixture(), { view } = f.resolve(f.running);
+  for (const script of [view.webview.html, fs.readFileSync(path.join(__dirname, '../media/logcat/main.js'), 'utf8')]) {
+    const dev = {}, sent = [];
+    const bindings = script.split('\n').filter(line => line.includes('.onpointerdown') || line.includes('.onkeydown = e =>') || line.startsWith('dev.onkeydown=')).join('\n');
+    assert.ok(bindings.includes('onpointerdown') && bindings.includes('onkeydown'));
+    vm.runInNewContext(bindings, { dev, $: () => dev, send: m => sent.push(m), vs: { postMessage: m => sent.push(m) } });
+    dev.onpointerdown({ button: 0 }); dev.onpointerdown({ button: 0 });
+    dev.onpointerdown({ button: 2 }); dev.onkeydown({ key: 'Tab' });
+    for (const key of ['Enter', ' ', 'ArrowDown', 'ArrowUp', 'F4']) dev.onkeydown({ key });
+    assert.deepEqual(sent.map(m => m.type), Array(7).fill('discoverDevices'));
+  }
+});
+
+// 执行生产头部渲染：其他设备仍存在时，断开后的空选择有明确占位而非隐式显示首台。
+test('Logcat dropdown renders explicit unselected state after disconnect', () => {
+  const script = fs.readFileSync(path.join(__dirname, '../media/logcat/main.js'), 'utf8');
+  const dev = { dataset: {} }, end = { classList: { toggle() {} }, setAttribute() {} }, status = { style: {} };
+  const context = { $: id => ({ dev, 'b-end': end, status })[id], deviceList: [{ serial: 'two', model: 'Phone', state: 'device' }, { serial: 'offline', state: 'offline' }, { serial: 'locked', state: 'unauthorized' }], serial: '', stick: false, statusText: '', esc: s => s };
+  vm.runInNewContext(script.slice(script.indexOf('  function drawHeader()'), script.indexOf('  // 更新状态模型')) + ';drawHeader();', context);
+  assert.match(dev.innerHTML, /<option value="">Select Device<\/option>/);
+  assert.match(dev.innerHTML, /value="two">/); assert.equal(dev.value, '');
+  assert.match(dev.innerHTML, /value="offline" disabled>[^<]*\(offline\)/);
+  assert.match(dev.innerHTML, /value="locked" disabled>[^<]*\(unauthorized\)/);
+});
+
+
+// 初始无在线设备时保留默认选择意图；后续发现第一台在线设备后同步两侧，明确清空后不再自动选择。
+test('device dropdown discovery selects first later connection but preserves explicit clearing', async () => {
+  for (const side of ['running', 'logcat']) {
+    const f = fixture(); f.resolve(f.running); f.resolve(f.logcat);
+    const provider = f[side];
+    f.devices = [{ serial: 'offline', state: 'unauthorized' }];
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.ok(!f.running.serial && !f.logcat.serial); assert.equal(f.streams.length, 0); assert.equal(f.mirrors.length, 0);
+    f.devices.push({ serial: 'first', state: 'device' });
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.running.serial, 'first'); assert.equal(f.logcat.serial, 'first');
+    await provider.onMessage({ type: 'select', serial: '' });
+    await provider.onMessage({ type: 'discoverDevices' });
+    assert.equal(f.running.serial, undefined); assert.equal(f.logcat.serial, undefined);
+    f.logcat.stopStream(); await f.running.dispose();
+  }
 });

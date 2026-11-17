@@ -13,7 +13,8 @@ interface Item { ts: string; pid: number; tid: number; lv: string; tag: string; 
 
 export class LogcatView implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  private serial?: string;
+  // 空串为待默认选择；undefined 为明确未选择，断开后不得在下一次查询自动切换。
+  private serial: string | undefined = '';
   private proc?: ChildProcess;
   private gen = 0;
   private queue: Item[] = [];
@@ -108,7 +109,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
 
   // 分派输入消息，选择交给同步入口并将错误交还宿主；ready 在项目扫描后输出当前 init.visible。
   // 前提为消息属于当前视图；扫描期间销毁则不初始化新视图，隐藏则初始化为 false 且不采集。
-  // 回归：npm test 的 logcat-visibility.test.js 延迟 mine 并隐藏/销毁，device-selection-sync.test.js 覆盖真实 select。
+  // 展开消息查询最新设备，不改变轮询调度；npm test 的 device-selection-sync.test.js 覆盖展开/选择/错误，logcat-visibility.test.js 覆盖隐藏/销毁。
   private async onMessage(m: any) {
     switch (m.type) {
       case 'ready': {
@@ -119,6 +120,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
         this.startPolling();
         break;
       }
+      case 'discoverDevices': await this.refreshDevices(); break;
       case 'select': await this.select(m.serial); break;
       case 'clear': if (this.serial) { await adb(this.serial, 'logcat', '-c').catch(() => {}); } break;
       case 'restart': this.start(); break;
@@ -137,23 +139,33 @@ export class LogcatView implements vscode.WebviewViewProvider {
     if (!view?.visible) { return; }
     const tick = async () => {
       if (this.view !== view || !view.visible) { return; }
-      try {
-        const devices = (await listDevices()).filter((d) => d.state === 'device');
-        if (this.view !== view) { return; }
-        this.devices = devices;
-        if (!view.visible) { return; }
-        if (!this.devices.some((d) => d.serial === this.serial)) {
-          await this.select(this.devices[0]?.serial);
-        }
-        if (this.view !== view || !view.visible) { return; }
-        this.post({ type: 'devices', list: this.devices, serial: this.serial });
-        if (this.serial && !this.proc) { this.start(); }
-      } catch (error) { vscode.window.showErrorMessage(String(error)); }
+      try { await this.refreshDevices(); }
+      catch (error) { vscode.window.showErrorMessage(String(error)); }
     };
     void tick();
     this.poll = setInterval(tick, 3000);
   }
 
+  // 轮询与展开共用目录查询；无输入，输出全部设备状态和选择快照，失败交调用入口报告。
+  // 首次选择第一台在线设备，断开清空且不回退；异步边界核对视图所有权和可见性。
+  // 回归：npm test 的 device-selection-sync.test.js / logcat-visibility.test.js 断言查询、默认、断开、错误及隐藏零新流。
+  private async refreshDevices() {
+    const view = this.view;
+    if (!view?.visible) { return; }
+    const devices = await listDevices();
+    if (this.view !== view) { return; }
+    this.devices = devices;
+    if (!view.visible) { return; }
+    if (this.serial && !devices.some((d) => d.serial === this.serial && d.state === 'device')) {
+      await this.select(undefined);
+    } else if (this.serial === '') {
+      const first = devices.find((d) => d.state === 'device');
+      if (first) { await this.select(first.serial); }
+    }
+    if (this.view !== view || !view.visible) { return; }
+    this.post({ type: 'devices', list: this.devices, serial: this.serial });
+    if (this.serial && !this.proc) { this.start(); }
+  }
   private stopPolling() { if (this.poll) { clearInterval(this.poll); this.poll = undefined; } }
 
   private stopStream() {

@@ -170,7 +170,7 @@ async function browser(t, data, signal) {
   async function region(clip) { return (await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...clip,scale:1}})).data; }
   await viewport(1440);
   await post({type:'init',icons:data.icons,mine:[],maxBytes:1048576});
-  await post({type:'devices',list:[{serial:'browser-fixture',model:'Browser fixture'}],serial:'browser-fixture'});
+  await post({type:'devices',list:[{serial:'browser-fixture',model:'Browser fixture',state:'device'}],serial:'browser-fixture'});
   await post({type:'reset'});
   return {evaluate,frames,post,viewport,click,key,mouse,format,search,screenshot,region};
 }
@@ -219,7 +219,7 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
       await page.key('f',2);await page.frames();
       await page.evaluate("(()=>{window.__hiddenMutations=0;window.__hiddenObserver=new MutationObserver(records=>window.__hiddenMutations+=records.length);for(const id of ['win','count','dev','status','scount','side'])window.__hiddenObserver.observe(document.getElementById(id),{subtree:true,childList:true,characterData:true,attributes:true});const input=document.getElementById('sq');input.value='hidden-final';input.dispatchEvent(new Event('input',{bubbles:true}));window.dispatchEvent(new MessageEvent('message',{data:{type:'batch',items:["+JSON.stringify(item('queued-before-hide'))+"]}}));"+(mode==='host'?"window.dispatchEvent(new MessageEvent('message',{data:{type:'visibility',visible:false}}));":"Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange')); ")+"})()");
       await page.post({type:'reset'});
-      await page.post({type:'devices',list:[{serial:'hidden-device',model:'Hidden latest'}],serial:'hidden-device'});
+      await page.post({type:'devices',list:[{serial:'hidden-device',model:'Hidden latest',state:'device'}],serial:'hidden-device'});
       await page.post({type:'status',text:'hidden status latest'});
       await page.post({type:'batch',items:[...Array.from({length:15},(_,i)=>({...item('hidden-'+i),pid:777,pkg:''})),item('hidden-final')]});
       await page.post({type:'pkgs',map:{777:'com.hidden.latest'}});

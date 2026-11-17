@@ -15,7 +15,8 @@ interface ExplorerSurface { setContext(serial: string | undefined, visible: bool
 
 export class RunningDeviceView implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  private serial?: string;
+  // 空串表示尚未发现默认设备；undefined 表示用户清空或设备断开，禁止自动切到其他设备。
+  private serial: string | undefined = '';
   private deviceViewMode: DeviceViewMode = 'mirror';
   // 派生旧投屏状态，不引入第二个模式源；tests/device-view-mode.test.js 断言三个视图与隐藏模式互斥。
   private get mirrorVisible() { return this.deviceViewMode === 'mirror'; }
@@ -313,13 +314,17 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.loop = setInterval(() => this.capture(), every);
   }
 
-  // 读取设备目录，展示全部连接状态并将失效选择通知日志侧，不在镜像侧回退；npm test 下拉及 device selection sync 断言断开清空。
+  // 查询全部设备并发布快照；初次发现选第一台在线设备，断开则清空并同步日志，已清空不自动回退。
+  // 无输入，查询失败向消息入口传播；npm test 的 device-selection-sync.test.js 断言重复展开查询、默认选择、断开和错误。
   private async refreshDevices() {
     const devs = await listDevices();
     if (this.serial && !devs.some((d) => d.serial === this.serial && d.state === 'device')) {
       this.serial = undefined; this.stop();
       await this.explorer?.setContext(undefined, false);
       await this.selectionChanged?.(undefined);
+    } else if (this.serial === '') {
+      const first = devs.find((d) => d.state === 'device');
+      if (first) { this.serial = first.serial; await this.selectionChanged?.(this.serial); }
     }
     this.post({ type: 'devices', devices: devs.map((d) => ({ serial: d.serial, label: d.name || d.avdName || d.model || d.serial, state: d.state, physical: !d.serial.startsWith('emulator-') })), serial: this.serial });
     this.skin = skinForAvd(devs.find((d) => d.serial === this.serial)?.avdName);
@@ -353,7 +358,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 分派 Webview 输入；wake 对当前设备发送只亮屏不切换电源的命令，失败交由消息入口报告。
   // 回归：npm test，无设备/三种模式/失败均由 tests/mirror-interaction.test.js 断言。
   // 处理下拉切换和空态入口；npm test 的下拉回归断言设备选择消息及 openDM 委托。
-  // 配置握手/保存回归见 mirror preference；双向选择及无设备日志入口见 device-selection-sync.test.js，npm test 严格断言消息与结果。
+  // 配置握手/保存回归见 mirror preference；设备展开走幂等恢复，刷新目录但不重启在线投屏。
+  // npm test 的 device-selection-sync.test.js 严格断言展开查询次数、默认/断开选择、双向同步及无设备日志入口。
   private async onMessage(m: any) {
     const s = this.serial;
     switch (m.type) {
@@ -366,6 +372,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
         if (typeof m.visible !== 'boolean') { throw new Error('Invalid mirror visibility'); }
         return this.setMirrorVisible(m.visible);
       case 'ready': this.postViewMode(); return this.restart();
+      case 'discoverDevices': return this.restart();
       case 'select': return this.select(m.serial ? { serial: m.serial } : undefined);
       case 'refresh': this.forced = undefined; return this.restart();
       case 'ext': if (s) { vscode.commands.executeCommand('android.extendedControls', { serial: s }); } return;
@@ -628,6 +635,9 @@ async function compose(m){
   send({type:'composed',data:c.toDataURL('image/png').split(',')[1]});
  }catch(e){send({type:'composed'})}
 }
+// 每次鼠标/触摸或键盘展开请求最新目录；device-selection-sync.test.js 执行真实绑定并断言查询消息。
+dev.onpointerdown=e=>{if(e.button===0)send({type:'discoverDevices'})};
+dev.onkeydown=e=>{if(['Enter',' ','ArrowDown','ArrowUp','F4'].includes(e.key))send({type:'discoverDevices'})};
 dev.onchange=()=>send({type:'select',serial:dev.value});
 document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>send({type:'key',code:b.dataset.k}));
 rec.onclick=()=>send({type:'record'});rotl.onclick=()=>send({type:'rotate',dir:-1});rotr.onclick=()=>send({type:'rotate',dir:1});shot.onclick=()=>send({type:'screenshot'});ref.onclick=()=>send({type:'reboot'});

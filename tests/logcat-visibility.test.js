@@ -79,7 +79,9 @@ test('Logcat visibility initializes hidden and resumes only while host is visibl
   f.requests[0].resolve([{ serial: 'phone', state: 'device' }, { serial: 'offline', state: 'offline' }]);
   await settled();
   assert.equal(f.streams.length, 1); assert.equal(f.streams[0].args[1], 'phone');
-  assert.equal(messages.findLast(m => m.type === 'devices').list.length, 1);
+  const catalog = messages.findLast(m => m.type === 'devices').list;
+  assert.equal(catalog.length, 2);
+  assert.equal(catalog[1].state, 'offline');
   assert.equal([...f.intervals.values()].filter(t => t.ms === 3000).length, 1);
   assert.equal([...f.intervals.values()].filter(t => t.ms === 60).length, 1);
   view.visible = false; view.visibilityChanged();

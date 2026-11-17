@@ -672,17 +672,21 @@
   // ---- header ----
   $('fmt').value = st.fmt;
   $('fmt').onchange = () => { st.fmt = $('fmt').value; save(); scheduleSearch(false, 0); render(); };
+  // 鼠标/触摸和键盘展开均查询目录；npm test 的 device-selection-sync.test.js 执行真实绑定，断言每次展开各发一次查询。
+  $('dev').onpointerdown = e => { if (e.button === 0) vs.postMessage({ type: 'discoverDevices' }); };
+  $('dev').onkeydown = e => { if (['Enter', ' ', 'ArrowDown', 'ArrowUp', 'F4'].includes(e.key)) vs.postMessage({ type: 'discoverDevices' }); };
   $('dev').onchange = () => { entries = []; rows = []; vs.postMessage({ type: 'select', serial: $('dev').value }); };
 
-  // 绘制设备与状态快照；无输入，输出当前可见头部，前提由 draw 保证可见，隐藏消息只更新模型。
-  // 回归：tests/logcat-browser.test.js 隐藏设备/状态消息零DOM更新及恢复后的最新值。
+  // 绘制全部设备与状态快照；无输入，在线设备可选，离线/未授权项标注状态并禁用，空选择保留占位。
+  // 前提由 draw 保证可见，隐藏消息只更新模型；device-selection-sync.test.js 执行渲染并断言状态、禁用项和空选项。
+  // 回归：npm test 的 device-selection-sync.test.js 断言断开且仍有设备时显示明确空选项；logcat-browser.test.js 断言隐藏零DOM更新和显示恢复。
   function drawHeader() {
     const end = $('b-end');
     end.classList.toggle('on', stick); end.setAttribute('aria-pressed', String(stick));
     const sel = $('dev'), sig = JSON.stringify(deviceList) + serial;
     if (sel.dataset.sig !== sig) {
       sel.dataset.sig = sig;
-      sel.innerHTML = deviceList.length ? deviceList.map((d) => `<option value="${esc(d.serial)}">${esc(d.name || d.avdName || d.model || d.serial)} (${esc(d.serial)})</option>`).join('') : '<option value="">No devices</option>';
+      sel.innerHTML = deviceList.length ? '<option value="">Select Device</option>' + deviceList.map((d) => `<option value="${esc(d.serial)}"${d.state === 'device' ? '' : ' disabled'}>${esc(d.name || d.avdName || d.model || d.serial)} (${esc(d.serial)})${d.state === 'device' ? '' : ' (' + esc(d.state) + ')'}</option>`).join('') : '<option value="">No devices</option>';
       sel.value = serial;
     }
     const status = $('status');
