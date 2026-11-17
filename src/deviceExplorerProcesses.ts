@@ -21,15 +21,58 @@ export function parseProcessSnapshot(output: string, pid: number): ProcessSnapsh
   return { pid, name, packageName, ...(userId === undefined ? {} : { userId }) };
 }
 
-// 将设备ABI和app_process位数映射为Android Studio式显示文本，只有设备报告的ABI才输出。
-function processAbi(executable: string, abi64: string, abi: string): string | undefined {
+// 仅将目标进程明确的app_process32/64与对应设备ABI映射为显示文本，未知位数或缺失ABI不猜测；回归见下方元数据共享映射。
+function processAbi(executable: string | undefined, abi64: string, abi: string): string | undefined {
+  if (!executable) { return undefined; }
   const values64 = abi64.split(',').map(value => value.trim()).filter(Boolean);
   const values = abi.split(',').map(value => value.trim()).filter(Boolean);
-  const is64 = /app_process64|64/.test(executable);
-  const value = (is64 ? values64[0] : values[0]) || values64[0] || values[0];
+  const bitness = /^app_process(32|64)$/.exec(executable.split('/').pop() || '');
+  if (!bitness) { return undefined; }
+  const is64 = bitness[1] === '64';
+  const value = is64 ? values64[0] : values[0];
   if (!value) { return undefined; }
   const label = value.replace(/-v8a$/, '').replace(/^arm64$/, 'arm64');
   return (is64 ? '64-bit' : '32-bit') + ' (' + label + ')';
+}
+
+// 元数据共享回归：Node>=22，node --test tests/device-explorer-processes.test.js；使用真实AdbSmartSocket与Duplex协议对端，无真实设备写操作。
+// HELO fallback shares one PID-specific snapshot验证单次shell、多PID exe/ABI隔离及VM未知；metadata EOF fallback preserves errors / metadata fallback cancellation releases sockets验证非零/取消与连接关闭。
+// watch fallback loads fresh metadata for new PIDs验证每批新增PID取新快照、stop回收；track snapshot and HELO metadata survive协议用例断言零shell回退。
+interface DeviceMetadata { ps: string; processes: Map<number, { executable?: string; vm?: string }>; abi64: string; abi: string; }
+
+// 解析设备查询分段与PID记录，exe/VM仅归属对应PID，缺失字段保持未知；回归见元数据共享映射。
+function parseDeviceMetadata(text: string): DeviceMetadata {
+  const exeMarker = '__DEX_EXE__';
+  const vmMarker = '__DEX_VM__';
+  const abi64Marker = '__DEX_ABI64__';
+  const abiMarker = '__DEX_ABI__';
+  const exeAt = text.indexOf(exeMarker);
+  const ps = exeAt < 0 ? text : text.slice(0, exeAt);
+  const exeEnd = exeAt < 0 ? -1 : text.indexOf(vmMarker, exeAt);
+  const vmAt = exeEnd < 0 ? -1 : exeEnd;
+  const vmEnd = vmAt < 0 ? -1 : text.indexOf(abi64Marker, vmAt);
+  const abi64At = text.indexOf(abi64Marker);
+  const abiAt = text.indexOf(abiMarker, abi64At < 0 ? 0 : abi64At + abi64Marker.length);
+  const processes = new Map<number, { executable?: string; vm?: string }>();
+  const add = (line: string, field: 'executable' | 'vm') => {
+    const match = /^\s*(\d+)\t(.*)\s*$/.exec(line);
+    if (!match) { return; }
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) { return; }
+    const record = processes.get(pid) || {};
+    const value = match[2].trim();
+    if (value) { record[field] = value; }
+    processes.set(pid, record);
+  };
+  if (exeAt >= 0) {
+    for (const line of text.slice(exeAt + exeMarker.length, exeEnd < 0 ? text.length : exeEnd).split(/\r?\n/)) { add(line, 'executable'); }
+  }
+  if (vmAt >= 0) {
+    for (const line of text.slice(vmAt + vmMarker.length, vmEnd < 0 ? text.length : vmEnd).split(/\r?\n/)) { add(line, 'vm'); }
+  }
+  const abi64 = abi64At < 0 ? '' : text.slice(abi64At + abi64Marker.length, abiAt < 0 ? text.length : abiAt).trim();
+  const abi = abiAt < 0 ? '' : text.slice(abiAt + abiMarker.length).trim();
+  return { ps, processes, abi64, abi };
 }
 
 // DDMS长度以UTF-16 code unit计数，所有可选字段只能整段缺省；协议回归覆盖surrogate和截断拒绝。
@@ -64,7 +107,7 @@ export class DeviceExplorerProcesses {
   private readonly adb: AdbSmartSocket;
   constructor(readonly serial: string, socketFactory?: SocketFactory) { this.adb = new AdbSmartSocket(socketFactory); }
 
-  // 首次tracker帧后关闭发现连接，再查询准确元数据；协议回归断言EOF/Abort不返回伪空集合。
+  // 首次tracker帧后关闭发现连接，同批HELO失败PID共享一次真实元数据查询；元数据共享回归验证零重复shell与EOF/Abort不返回伪空集合。
   async list(signal?: AbortSignal): Promise<ExplorerProcess[]> {
     let stop: (() => Promise<void>) | undefined;
     try {
@@ -74,14 +117,16 @@ export class DeviceExplorerProcesses {
     } finally { await stop?.(); }
   }
 
-  // tracker事件创建/释放真实PID资源，移除会取消查询；协议回归验证PID消失、相同PID重新出现和stop等待全部close。
+  // tracker事件创建/释放真实PID资源，每批新增PID共享当批快照而非整个watch的旧快照；移除会取消查询。
+  // 元数据共享回归的watch fallback loads fresh metadata for new PIDs断言新增PID重新查询，stop等待全部连接回收。
   watch(onUpdate: (rows: ExplorerProcess[]) => void, onError: (error: Error) => void, signal?: AbortSignal): () => Promise<void> {
     const controller = new AbortController(); const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) { abort(); }
     const records = new Map<number, { controller: AbortController; row: ExplorerProcess; done: Promise<void> }>();
-    const owned = new Set<Promise<void>>(); let metadata: Promise<string> | undefined;
+    const owned = new Set<Promise<void>>();
     const publish = () => { if (!controller.signal.aborted) { onUpdate([...records.values()].map(record => record.row)); } };
     const stopTracker = this.adb.trackJdwp(this.serial, pids => {
+      let metadata: Promise<string> | undefined;
       const active = new Set(pids);
       for (const [pid, record] of records) { if (!active.has(pid)) { record.controller.abort(); records.delete(pid); } }
       for (const pid of pids) {
@@ -97,7 +142,23 @@ export class DeviceExplorerProcesses {
     return async () => { controller.abort(); await stopTracker(); await Promise.allSettled([...owned]); records.clear(); signal?.removeEventListener('abort', abort); };
   }
 
-  // 请求DDMS HELO，不抢占外部调试器；失败时使用设备侧ps快照补齐可识别元数据。
+  /**
+   * 从所选设备读取一次进程快照，返回供 parseDeviceMetadata 解析的 UTF-8 文本。
+   * signal 取消由 shell v2 回收连接，非零退出向调用方传播；无权限的可选 /proc exe 保持缺失，不猜测 VM。
+   * 元数据共享回归分别模拟HELO失败、shell非零与取消，断言PID身份/单次查询/原始错误及全部连接关闭；可选exe权限拒绝不伪造VM。
+   */
+  private async loadDeviceMetadata(signal?: AbortSignal): Promise<string> {
+    const command = 'ps -A -o PID,USER,NAME,ARGS && { '
+      + "printf '__DEX_EXE__\n'; "
+      + 'for entry in /proc/[0-9]*/exe; do '
+      + 'if executable=$(readlink "$entry" 2>/dev/null); then '
+      + "pid=${entry#/proc/}; pid=${pid%/exe}; printf '%s\\t%s\\n' \"$pid\" \"$executable\"; fi; done; "
+      + "printf '__DEX_VM__\n__DEX_ABI64__\n'; "
+      + "getprop ro.product.cpu.abilist64 && printf '__DEX_ABI__\n' && getprop ro.product.cpu.abilist32; }";
+    return (await this.adb.shell(this.serial, command, signal)).toString('utf8');
+  }
+
+  // 请求DDMS HELO，失败时按PID读取共享设备快照且仍保留原始调试错误；元数据共享回归断言字段隔离、未知值和失败可见。
   private async describe(pid: number, signal?: AbortSignal, loadMetadata?: () => Promise<string>): Promise<ExplorerProcess> {
     let waiting = false;
     const request = Buffer.alloc(12); request.write('HELO', 0, 'ascii'); request.writeUInt32BE(4, 4); request.writeUInt32BE(1, 8);
@@ -115,12 +176,10 @@ export class DeviceExplorerProcesses {
       signal?.throwIfAborted();
       try {
         const text = await (loadMetadata ? loadMetadata() : this.loadDeviceMetadata(signal));
-        const ps = text.split('__DEX_EXE__')[0];
-        const executable = text.split('__DEX_EXE__')[1]?.split('__DEX_ABI64__')[0]?.trim() || '';
-        const abi64 = text.split('__DEX_ABI64__')[1]?.split('__DEX_ABI__')[0]?.trim() || '';
-        const abi = text.split('__DEX_ABI__')[1]?.trim() || '';
-        const row = parseProcessSnapshot(ps, pid);
-        return { ...row, abi: processAbi(executable, abi64, abi), vm: executable ? 'Dalvik v2.1.0' : undefined, debugger: 'error', error: String(error) };
+        const metadata = parseDeviceMetadata(text);
+        const process = metadata.processes.get(pid);
+        const row = parseProcessSnapshot(metadata.ps, pid);
+        return { ...row, abi: processAbi(process?.executable, metadata.abi64, metadata.abi), vm: process?.vm, debugger: 'error', error: String(error) };
       } catch (fallbackError) {
         signal?.throwIfAborted();
         return { pid, debugger: 'error', error: String(error) + '; metadata fallback: ' + String(fallbackError) };

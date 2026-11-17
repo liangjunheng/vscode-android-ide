@@ -47,10 +47,10 @@ function peer(options = {}) {
         if (options.fail) { feed(s, Buffer.concat([Buffer.from('FAIL'), frame('permission denied')])); return; }
         if (service === 'track-jdwp') { trackers.push(s); feed(s, Buffer.concat([Buffer.from('OKAY'), frame(options.pids === undefined ? '123\n456\n' : options.pids)])); }
         else if (service.startsWith('jdwp:')) { pid = Number(service.slice(5)); feed(s, Buffer.from('OKAY')); }
-        else if (service.startsWith('shell,v2,raw:')) { const bad = options.shellError; const value = service.includes('ps -A') ? (options.metadata || '') : bad || (service.includes('force-stop') ? '' : 'Success\n'); feed(s, Buffer.concat([Buffer.from('OKAY'), shellFrame(bad ? 2 : 1, value), shellFrame(3, Buffer.from([bad ? 1 : 0]))])); }
+        else if (service.startsWith('shell,v2,raw:')) { options.onShell?.(s, service); if (options.holdShell) return; const bad = options.shellError; const value = service.includes('ps -A') ? (typeof options.metadata === 'function' ? options.metadata() : options.metadata || '') : bad || (service.includes('force-stop') ? '' : 'Success\n'); feed(s, Buffer.concat([Buffer.from('OKAY'), shellFrame(bad ? 2 : 1, bad || value), shellFrame(3, Buffer.from([bad ? 1 : 0]))])); }
         else { throw Error('unexpected service ' + service); }
       } else if (data.equals(Buffer.from('JDWP-Handshake'))) { feed(s, data); }
-      else { packets.push(data); if (options.noAck) return; feed(s, reply(data[9] === 0xc7 ? helo(pid) : Buffer.alloc(0), data.readUInt32BE(4), options.jdwpError || 0)); }
+      else { packets.push(data); if (options.jdwpEof) { s.push(null); return; } if (options.noAck) return; feed(s, reply(data[9] === 0xc7 ? helo(pid) : Buffer.alloc(0), data.readUInt32BE(4), options.jdwpError || 0)); }
     }); sockets.push(socket); return socket;
   };
   return { factory, sockets, commands, trackers, packets, feed };
@@ -60,7 +60,98 @@ function peer(options = {}) {
 test('device ps snapshot restores process identity and user id',()=>{const row=parseProcessSnapshot('PID USER NAME ARGS\n18912 u0_a123 com.tcl.sdk.note.hd com.tcl.sdk.note.hd\n',18912);assert.equal(row.pid,18912);assert.equal(row.name,'com.tcl.sdk.note.hd');assert.equal(row.packageName,'com.tcl.sdk.note.hd');assert.equal(row.userId,0);});
 
 // HELO失败时设备侧快照仍恢复完整进程字段，调试错误保持显式。
-test('HELO failure falls back to device process metadata',async()=>{const metadata='PID USER NAME ARGS\n123 u0_a123 com.tcl.sdk.note.hd com.tcl.sdk.note.hd\n__DEX_EXE__\n/system/bin/app_process64\n__DEX_ABI64__\narm64-v8a\n__DEX_ABI__\narmeabi-v7a';const p=peer({metadata,jdwpError:1,split:false});const rows=await new DeviceExplorerProcesses('phone',p.factory).list();assert.equal(rows[0].name,'com.tcl.sdk.note.hd');assert.equal(rows[0].packageName,'com.tcl.sdk.note.hd');assert.equal(rows[0].userId,0);assert.equal(rows[0].abi,'64-bit (arm64)');assert.equal(rows[0].vm,'Dalvik v2.1.0');assert.equal(rows[0].debugger,'error');});
+test('HELO failure falls back to device process metadata', async () => {
+  const metadata = 'PID USER NAME ARGS\n123 u0_a123 com.tcl.sdk.note.hd com.tcl.sdk.note.hd\n__DEX_EXE__\n123\t/system/bin/app_process64\n__DEX_VM__\n__DEX_ABI64__\narm64-v8a\n__DEX_ABI__\narmeabi-v7a';
+  const p = peer({ metadata, jdwpError: 1, split: false });
+  const rows = await new DeviceExplorerProcesses('phone', p.factory).list();
+  assert.equal(rows[0].name, 'com.tcl.sdk.note.hd');
+  assert.equal(rows[0].packageName, 'com.tcl.sdk.note.hd');
+  assert.equal(rows[0].userId, 0);
+  assert.equal(rows[0].abi, '64-bit (arm64)');
+  assert.equal(rows[0].vm, undefined);
+  assert.equal(rows[1].abi, undefined);
+  assert.equal(rows[1].vm, undefined);
+  assert.equal(rows[0].debugger, 'error');
+  assert.match(rows[0].error, /JDWP error 1/);
+  const commands = p.commands.filter(c => c.startsWith('shell,v2,raw:'));
+  assert.equal(commands.length, 1);
+  assert.match(commands[0], /^shell,v2,raw:ps -A -o PID,USER,NAME,ARGS &&/);
+  assert.ok(commands[0].includes('readlink "$entry"'));
+  assert.ok(commands[0].includes('getprop ro.product.cpu.abilist32'));
+  assert.ok(p.sockets.every(s => s.destroyed));
+});
+
+
+// EOF 后恢复身份但保留原始错误；shell 失败时两个错误均可见，不返回伪成功。
+for (const shellError of [undefined, 'permission denied']) test('metadata EOF fallback preserves errors ' + (shellError || 'with identity'), async () => {
+  const p = peer({ pids: '123\n', jdwpEof: true, shellError, metadata: 'PID USER NAME ARGS\n123 u0_a123 com.example.app com.example.app\n' });
+  const [row] = await new DeviceExplorerProcesses('phone', p.factory).list();
+  assert.equal(row.debugger, 'error');
+  assert.match(row.error, /ADB socket EOF/);
+  if (shellError) {
+    assert.match(row.error, /metadata fallback: Error: permission denied/);
+    assert.equal(row.name, undefined);
+  } else {
+    assert.equal(row.packageName, 'com.example.app');
+    assert.equal(row.userId, 0);
+    assert.equal(row.abi, undefined);
+    assert.equal(row.vm, undefined);
+    assert.doesNotMatch(row.error, /metadata fallback|not a function/);
+  }
+  assert.ok(p.sockets.every(s => s.destroyed));
+});
+
+// 使用 shell 到达事件取消读取，无延时或轮询；断言取消传播且真实 socket 已关闭。
+test('metadata fallback cancellation releases sockets', { timeout: 2000 }, async () => {
+  let entered;
+  const shell = new Promise(resolve => { entered = resolve; });
+  const p = peer({ pids: '123\n', jdwpEof: true, holdShell: true, onShell: entered });
+  const controller = new AbortController();
+  const pending = new DeviceExplorerProcesses('phone', p.factory).list(controller.signal);
+  const rejected = assert.rejects(pending, /cancel|abort/i);
+  await shell;
+  controller.abort();
+  await rejected;
+  assert.ok(p.sockets.every(s => s.destroyed));
+});
+
+// watcher 的下一帧新增 PID 必须读当批快照，不能复用首次成功或失败的 Promise。
+for (const firstError of [false, true]) test('watch fallback loads fresh metadata for new PIDs ' + firstError, { timeout: 2000 }, async () => {
+  let snapshot = 'PID USER NAME ARGS\n123 u0_a123 com.example.first com.example.first\n';
+  const options = { pids: '123\n', jdwpEof: true, metadata: () => snapshot, shellError: firstError ? 'permission denied' : undefined };
+  const p = peer(options), errors = [];
+  let firstReady, secondReady;
+  const first = new Promise(resolve => { firstReady = resolve; });
+  const second = new Promise(resolve => { secondReady = resolve; });
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => {
+    if (rows.some(row => row.pid === 123 && row.error)) firstReady(rows);
+    if (rows.some(row => row.pid === 456 && row.name)) secondReady(rows);
+  }, error => errors.push(error));
+  try {
+    const initial = await first;
+    assert.equal(initial[0].name, firstError ? undefined : 'com.example.first');
+    options.shellError = undefined;
+    snapshot = 'PID USER NAME ARGS\n456 u10_a234 com.example.second com.example.second\n';
+    p.feed(p.trackers[0], frame('456\n'));
+    const rows = await second;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].packageName, 'com.example.second');
+    assert.equal(rows[0].userId, 10);
+    assert.equal(p.commands.filter(c => c.startsWith('shell,v2,raw:')).length, 2);
+    assert.deepEqual(errors, []);
+  } finally { await stop(); }
+  assert.ok(p.sockets.every(s => s.destroyed));
+});
+
+// 同批两个PID共享真实快照却保持位数/用户/包名隔离；不把缺失VM或未知exe伪装成正常字段。
+test('HELO fallback shares one PID-specific snapshot',async()=>{
+  const metadata='PID USER NAME ARGS\n123 u0_a1 com.example.first args\n456 u10_a2 com.example.second args\n__DEX_EXE__\n123\t/system/bin/app_process64\n456\t/system/bin/app_process32\n__DEX_VM__\n__DEX_ABI64__\narm64-v8a\n__DEX_ABI__\narmeabi-v7a';
+  const p=peer({metadata,jdwpError:1,split:false}),rows=await new DeviceExplorerProcesses('phone',p.factory).list();
+  assert.equal(rows[0].abi,'64-bit (arm64)');assert.equal(rows[1].abi,'32-bit (armeabi-v7a)');assert.equal(rows[1].userId,10);assert.equal(rows[0].packageName,'com.example.first');assert.equal(rows[1].packageName,'com.example.second');assert.ok(rows.every(r=>r.vm===undefined&&r.debugger==='error'));
+  assert.equal(p.commands.filter(c=>c.startsWith('shell,v2,raw:')).length,1);assert.ok(p.sockets.every(s=>s.destroyed));
+  const unknown=peer({pids:'123\n',metadata:metadata.replace('123\t/system/bin/app_process64','123\t/system/bin/unknown64'),jdwpError:1,split:false});
+  assert.equal((await new DeviceExplorerProcesses('phone',unknown.factory).list())[0].abi,undefined);assert.ok(unknown.sockets.every(s=>s.destroyed));
+});
 
 // HELO初始数值/双字符串长度/可选字段必须精确解析，损坏输入拒绝而非默默返回空字段。
 test('HELO decodes actual fields and rejects malformed optional segments', () => {
@@ -73,7 +164,7 @@ test('HELO decodes actual fields and rejects malformed optional segments', () =>
 // 分片和合包均运行真实list与HELO，全部连接在返回前关闭，元数据不是硬编码waiting。
 for (const split of [true, false]) test('track snapshot and HELO metadata survive ' + (split ? 'byte splits' : 'coalesced packets'), { timeout: 2000 }, async () => {
   const p = peer({ split }), controller = new AbortController();
-  try { const rows = await new DeviceExplorerProcesses('phone', p.factory).list(controller.signal); assert.deepEqual(Array.from(rows, r => r.pid), [123,456]); assert.equal(rows[0].packageName, 'com.example.app'); assert.equal(rows[0].debugger, 'default'); assert.equal(p.sockets.length, 3); assert.ok(p.sockets.every(s => s.destroyed)); assert.equal(p.packets[0].subarray(11,15).toString(), 'HELO'); }
+  try { const rows = await new DeviceExplorerProcesses('phone', p.factory).list(controller.signal); assert.deepEqual(Array.from(rows, r => r.pid), [123,456]); assert.equal(rows[0].packageName, 'com.example.app'); assert.equal(rows[0].debugger, 'default'); assert.equal(p.sockets.length, 3);assert.equal(p.commands.some(c=>c.startsWith('shell,v2,raw:')),false); assert.ok(p.sockets.every(s => s.destroyed)); assert.equal(p.packets[0].subarray(11,15).toString(), 'HELO'); }
   finally { controller.abort(); p.sockets.forEach(s => s.destroy()); }
 });
 
