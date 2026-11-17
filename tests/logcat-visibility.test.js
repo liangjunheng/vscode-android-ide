@@ -87,7 +87,7 @@ function binaryFrame({ pid = 11, tid = 21, sec = 1577836800, nsec = 0, priority 
 test('Logcat binary records preserve multiline messages and isolate old stream partials', async () => {
   const f = fixture(), host = f.resolve(); await f.provider.select('phone');
   const first = f.streams[0].proc;
-  assert.deepEqual(Array.from(f.streams[0].args), ['-s','phone','logcat','-B','-b','main','-b','system','-b','crash','-T','1000']);
+  assert.deepEqual(Array.from(f.streams[0].args), ['-s','phone','exec-out','logcat','-B','-b','main','-b','system','-b','crash','-T','1000']);
   const msg = 'row0)\nrow1)\n\nrow3)\n2026-01-01 00:00:00.000 11 21 I Tag: embedded\n';
   const bytes = Buffer.concat([binaryFrame({msg, priority:7,nsec:123456789}),binaryFrame({msg:'independent',priority:7,nsec:123456789})]);
   for (const byte of bytes) first.stdout.emit('data', Buffer.from([byte]));
@@ -103,6 +103,25 @@ test('Logcat binary records preserve multiline messages and isolate old stream p
   current.stdout.emit('data',binaryFrame({msg:'new record'})); f.provider.flush();
   assert.equal(host.messages.findLast(m=>m.type==='batch').items[0].msg,'new record');
   host.view.dispose();
+});
+
+// 无设备执行真实 start/parser/flush/close；raw exec-out 参数与头部 LF/CR、消息 CRLF 保持原值，正常结束释放 watcher。
+test('Logcat raw exec-out preserves binary header and message bytes', async () => {
+  const f = fixture(), host = f.resolve(); await f.provider.select('phone');
+  const { proc, args } = f.streams[0];
+  assert.deepEqual(Array.from(args), ['-s','phone','exec-out','logcat','-B','-b','main','-b','system','-b','crash','-T','1000']);
+  const msg = String.fromCharCode(10,13,10) + 'matrix' + String.fromCharCode(10);
+  const bytes = Buffer.concat([binaryFrame({pid:10,tid:13,sec:10,nsec:13,msg}), binaryFrame({pid:13,tid:10,msg:'next'})]);
+  for (let i = 0; i < bytes.length; i += 7) proc.stdout.emit('data', bytes.subarray(i, i + 7));
+  f.provider.flush();
+  const items = host.messages.findLast(m => m.type === 'batch').items;
+  assert.deepEqual(Array.from(items, r => [r.pid,r.tid,r.msg]), [[10,13,msg],[13,10,'next']]);
+  assert.equal(proc.killed, undefined);
+  assert.equal(host.messages.some(m => m.type === 'status'), false);
+  proc.emit('close', 0); await settled();
+  assert.equal(host.messages.findLast(m => m.type === 'status').text, 'Log stream ended');
+  assert.equal(f.provider.proc, undefined); assert.equal(f.watches[0].stops, 1);
+  assert.equal(f.intervals.size, 0); host.view.dispose();
 });
 
 // stderr/error 与坏帧/EOF 必须显示诊断，坏帧停止拥有的采集进程；已完成条目仍投递，不误报为成功。

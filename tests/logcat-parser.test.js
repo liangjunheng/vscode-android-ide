@@ -37,6 +37,21 @@ test('binary parser preserves records, embedded headers, multiline and trailing 
   assert.equal(result.records[1].message, 'row3');
 });
 
+// LF bytes 可位于头部或消息；真实 parser 必须保留原始字节并拒绝被文本通道插入 CR 的损坏帧，不做替换/重同步。
+test('binary parser preserves raw LF bytes and rejects text transport corruption', () => {
+  const message = 'a' + String.fromCharCode(10) + 'b' + String.fromCharCode(13,10);
+  const bytes = Buffer.concat([frame({pid:10,tid:13,sec:10,nsec:13,message}),frame({message:'next'})]);
+  const result = parse(bytes, [...bytes].map(n => Buffer.from([n])));
+  assert.deepEqual(result.statuses, []);
+  assert.deepEqual(result.records.map(r => [r.pid,r.tid,r.sec,r.nsec,r.message]), [[10,13,10,13,message],[7,8,0,123000000,'next']]);
+  const plain = frame({message});
+  const rewritten = Buffer.from([...plain].flatMap(value => value === 10 ? [13,10] : [value]));
+  const corrupt = parse(rewritten);
+  assert.equal(corrupt.records.length, 0);
+  assert.equal(corrupt.statuses.length, 1);
+  assert.match(corrupt.statuses[0], /NUL-terminated message/);
+});
+
 test('binary parser handles v1/v2/v3/v4 headers and identical fields independently', () => {
   for (const version of [1, 2, 3, 4]) {
     const a = frame({ version, message: 'same' }), b = frame({ version, message: 'same' });

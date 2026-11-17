@@ -41,12 +41,12 @@ export class LogcatView implements vscode.WebviewViewProvider {
   constructor(private extPath: string, private selectionChanged?: (serial?: string) => Promise<void> | void) {}
 
   /**
-   * 读取并校验 Logcat 内存上限；输入为 VS Code 配置，输出为 64 KiB 至 64 MiB 的整数。
+   * 读取 android-ide.logcat.maxBytes 并校验 Logcat 内存上限；输入为 VS Code 配置，输出为 64 KiB 至 64 MiB 的整数。
    * 前置条件是配置服务可用；默认值与 Android Studio 的 1 MiB 循环缓冲一致，避免无限增长。
    * 回归：tests/logcat-buffer.test.js 与 npm test 断言默认值、边界和初始化字段。
    */
   private maxBytes() {
-    const configured = Number(vscode.workspace.getConfiguration('android').get('logcat.maxBytes', DEFAULT_LOGCAT_MAX_BYTES));
+    const configured = Number(vscode.workspace.getConfiguration('android-ide').get('logcat.maxBytes', DEFAULT_LOGCAT_MAX_BYTES));
     const value = Number.isFinite(configured) ? Math.floor(configured) : DEFAULT_LOGCAT_MAX_BYTES;
     return Math.min(MAX_LOGCAT_MAX_BYTES, Math.max(MIN_LOGCAT_MAX_BYTES, value));
   }
@@ -60,11 +60,11 @@ export class LogcatView implements vscode.WebviewViewProvider {
   }
 
   // 初始化 Logcat Webview 的结构、资源和生命周期；输入为 VS Code 视图，输出为可交互的日志面板。
+  // 设备与Format用原生selectedcontent承载可省略标签，箭头为独立布局项；npm test Logcat device selector及LOGCAT_BROWSER=1 dropdown验证文字边界不侵入箭头槽、主题及键盘选择。
   // 设备选择保留原生 select；右侧 log-content 容纳搜索与日志，左侧工具栏不随搜索栏移动。
   // 前提为宿主提供真实 visible；生命周期事件输出 visibility.visible，隐藏释放采集，旧视图事件不得操作新视图。
   // 回归：npm test 中 logcat-visibility.test.js 模拟隐藏/销毁/替换；既有样式和选择同步测试分别断言结构与错误。
   // 下拉共享样式覆盖设备、格式、历史和补全；npm test dropdown 接线、LOGCAT_BROWSER=1 dropdown 断言主题/键盘/窄屏。
-  // 设备与Format用原生selectedcontent承载可省略标签，箭头为独立布局项；npm test Logcat device selector及LOGCAT_BROWSER=1 dropdown验证文字边界不侵入箭头槽、主题及键盘选择。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -101,7 +101,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
   // 回归：npm test，tests/device-selection-sync.test.js 断言无设备聚焦、选择保留和重复打开。
   async show(d?: { serial: string }) {
     if (d?.serial) { await this.select(d.serial); }
-    await vscode.commands.executeCommand('android.logcat.focus');
+    await vscode.commands.executeCommand('android-ide.logcat.focus');
     if (this.serial && !this.proc) { this.start(); }
     this.post({ type: 'devices', list: this.devices, serial: this.serial });
   }
@@ -144,8 +144,8 @@ export class LogcatView implements vscode.WebviewViewProvider {
       case 'select': await this.select(m.serial); break;
       case 'clear': if (this.serial) { await adb(this.serial, 'logcat', '-c').catch(() => {}); } break;
       case 'restart': this.start(); break;
-      case 'screenshot': if (this.serial) { vscode.commands.executeCommand('android.screenshot', { serial: this.serial }); } break;
-      case 'record': if (this.serial) { vscode.commands.executeCommand('android.screenRecord', { serial: this.serial }); } break;
+      case 'screenshot': if (this.serial) { vscode.commands.executeCommand('android-ide.screenshot', { serial: this.serial }); } break;
+      case 'record': if (this.serial) { vscode.commands.executeCommand('android-ide.screenRecord', { serial: this.serial }); } break;
       case 'copy': await vscode.env.clipboard.writeText(m.text); break;
     }
   }
@@ -207,7 +207,9 @@ export class LogcatView implements vscode.WebviewViewProvider {
 
   /**
    * 在当前可见设备上启动 Logcat 与项目进程追踪；输入为当前 serial，输出无，事件按接收顺序写入共享队列。
-   * 二进制默认只读 main/system/crash；parser 与当前 proc 闭包同寿命，旧回调由 proc 身份拒绝，close 在 stdout 结束后检查 EOF 并释放资源。
+   * 二进制通过 exec-out 原样读取 main/system/crash，避免 adb logcat 文本通道将 LF 改成 CRLF 而破坏帧头长度与消息终止符。
+   * parser 与当前 proc 闭包同寿命，旧回调由 proc 身份拒绝，close 在 stdout 结束后检查 EOF 并释放资源。
+   * 回归：tests/logcat-visibility.test.js 的 raw exec-out 与 tests/logcat-parser.test.js 的 LF bytes 无设备断言参数、头部 LF/CR、消息换行和坏帧拒绝；连接设备后用 exec-out logcat -B -d -t 1000 交给同一 parser，成功为零 status 且恰好 1000 条。
    * 进程归属由 ready 保存的项目包名决定；提前选设备时先保留快照，扫描完成再合成已知项目行，不新增进程轮询或 agent。
    * 回归：node --test tests/logcat-visibility.test.js tests/device-selection-sync.test.js 无硬件注入 Buffer，断言多行/尾换行、同头独立记录、FATAL、本地毫秒、stderr/error、坏帧/EOF 与旧 partial 隔离；同时覆盖隐藏和选择幂等。
    */
@@ -217,7 +219,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
     if (!serial || !this.view?.visible) { return; }
     this.pkgs.clear(); this.missing.clear(); this.lastPs = 0;
     this.post({ type: 'reset' });
-    const proc = spawn(adbPath(), ['-s', serial, 'logcat', '-B', '-b', 'main', '-b', 'system', '-b', 'crash', '-T', '1000'], { env: { ...process.env, ANDROID_HOME: sdkRoot() } });
+    const proc = spawn(adbPath(), ['-s', serial, 'exec-out', 'logcat', '-B', '-b', 'main', '-b', 'system', '-b', 'crash', '-T', '1000'], { env: { ...process.env, ANDROID_HOME: sdkRoot() } });
     this.proc = proc;
     let diagnostic = '';
     const parser = new BinaryLogcatParser(record => {
