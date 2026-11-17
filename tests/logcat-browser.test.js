@@ -190,6 +190,38 @@ async function browser(t, data, signal) {
   return {evaluate,frames,post,viewport,click,key,mouse,wheel,type,ime,format,search,screenshot,region};
 }
 
+// Device Tools browser 无ADB：读取真实模板/样式/渲染函数，断言主题、长标签、图标、刷新，以及设备/风味外框的鼠标hover、按下和展开颜色。
+test('Device Tools browser clips long device labels', {skip:!enabled,timeout:60000}, async t=>{
+  const c=new AbortController(),deadline=setTimeout(()=>c.abort(new Error('Device Tools browser deadline')),45000);t.after(()=>clearTimeout(deadline));
+  const data=await fixture(),page=await browser(t,data,c.signal),source=await fs.readFile(path.join(root,'src/runningDevices.ts'),'utf8');
+  const markup=source.slice(source.indexOf('<div id="tabs"'),source.indexOf('<section id="device-explorer"')).replace(/\$\{icons\['([^']+)'\]\}/g,(_,k)=>data.icons[k]);
+  const css=source.slice(source.indexOf('<style>')+7,source.indexOf('</style>'))+await fs.readFile(path.join(root,'media/build-panel.css'),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
+  const start=source.indexOf('function renderDevices(m){'),render=source.slice(start,source.indexOf("addEventListener('message'",start)).replace(/\$\{JSON.stringify\(icons\['([^']+)'\]\)\}/g,(_,k)=>JSON.stringify(data.icons[k]));
+  await page.evaluate('document.body.innerHTML='+JSON.stringify(markup+'<span id="msg"></span><img id="screen"><canvas id="cv"></canvas>')+';document.head.appendChild(Object.assign(document.createElement("style"),{textContent:'+JSON.stringify(css)+'}))');
+  for(const theme of ['dark','light'])for(const width of [240,283,480]){
+    await page.viewport(width);await page.evaluate('document.body.className='+JSON.stringify('vscode-'+theme)+';document.body.style.setProperty("--vscode-focusBorder","#007acc");document.body.style.setProperty("--vscode-dropdown-border","#555")');
+    for(const devices of [[{serial:'VKH6IFDMBUKJ8XXC',label:'Android development device with a long readable name',state:'device',physical:true}],[],[{serial:'emulator-5554',label:'Android development device with a long readable name',state:'device',physical:false}]]){
+      await page.evaluate('(()=>{const dev=document.getElementById("dev"),tdot=document.getElementById("tdot"),msg=document.getElementById("msg"),img=document.getElementById("screen"),cv=document.getElementById("cv"),ctx=cv.getContext("2d");'+render+';renderDevices('+JSON.stringify({devices,serial:devices[0]?.serial})+')})()');await page.frames();
+      const b=await page.evaluate('(()=>{const s=document.getElementById("dev"),l=s.querySelector("selectedcontent"),r=s.getBoundingClientRect(),t=l.getBoundingClientRect(),a=getComputedStyle(s,"::picker-icon"),c=getComputedStyle(s);return{count:s.querySelectorAll("selectedcontent").length,text:l.textContent,selected:s.selectedOptions[0].textContent,width:t.width,right:t.right,selectRight:r.right,tabRight:document.getElementById("tab").getBoundingClientRect().right,arrowLeft:r.right-parseFloat(c.paddingRight)-parseFloat(a.width),clip:getComputedStyle(l).overflow,ellipsis:getComputedStyle(l).textOverflow,scroll:l.scrollWidth,client:l.clientWidth}})()');
+      assert.equal(b.count,1);assert.equal(b.text,b.selected);assert.ok(b.width>0,JSON.stringify(b));assert.ok(b.selectRight<=b.tabRight,JSON.stringify(b));assert.ok(b.right+7<=b.arrowLeft,JSON.stringify(b));assert.equal(b.clip,'hidden');assert.equal(b.ellipsis,'ellipsis');
+      const icons=await page.evaluate('(()=>{const row=document.querySelector(".build-target-row"),tab=document.getElementById("tab"),target=row.querySelector(".codicon"),device=tab.querySelector(document.body.classList.contains("vscode-light")?"#tic-l":"#tic-d"),svg=device.querySelector("svg");return [target,device,svg].map(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return {width:r.width,height:r.height,padding:s.padding,left:r.left}}).concat([{targetInset:target.getBoundingClientRect().left-row.getBoundingClientRect().left,deviceInset:device.getBoundingClientRect().left-tab.getBoundingClientRect().left,targetGap:document.getElementById("build-target").getBoundingClientRect().left-target.getBoundingClientRect().right,deviceGap:document.querySelector("#tab selectedcontent").getBoundingClientRect().left-device.getBoundingClientRect().right}])})()');
+      for(const icon of icons.slice(0,3)){assert.equal(icon.width,16);assert.equal(icon.height,16);assert.equal(icon.padding,'0px');}
+      assert.equal(icons[3].deviceInset,icons[3].targetInset);assert.equal(icons[3].deviceGap,icons[3].targetGap,JSON.stringify(icons));
+      if(devices.length){assert.equal(b.text,devices[0].label+' ('+devices[0].serial+')');assert.ok(b.scroll>b.client,JSON.stringify(b));}
+    }
+    await page.screenshot('device-tools-label-'+theme+'-'+width);
+    for(const [id,outer] of [['dev','#tab'],['build-target','.build-target-row']]){
+      const p=await page.evaluate('(()=>{const r=document.getElementById('+JSON.stringify(id)+').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
+      const border='getComputedStyle(document.querySelector('+JSON.stringify(outer)+')).borderColor';
+      await page.evaluate('document.activeElement.blur()');await page.mouse('mouseMoved',width-1,700);await page.frames();assert.equal(await page.evaluate(border),'rgb(85, 85, 85)',id+' idle');
+      await page.mouse('mouseMoved',p.x,p.y);await page.frames();assert.equal(await page.evaluate(border),'rgb(0, 122, 204)',id+' hover');
+      await page.mouse('mousePressed',p.x,p.y);await page.frames();assert.equal(await page.evaluate(border),'rgb(0, 122, 204)',id+' pressed');
+      await page.mouse('mouseReleased',p.x,p.y);await page.frames();assert.equal(await page.evaluate('document.getElementById('+JSON.stringify(id)+').matches(":open")'),true);
+      assert.equal(await page.evaluate(border),'rgb(0, 122, 204)',id+' open');await page.key('Escape');
+    }
+  }
+});
+
 // 构造真实 batch 记录；同毫秒元数据复现独立首行与 msg 内换行边界。
 function item(msg) { return {ts:'2026-11-16 18:00:00.001',pid:123,tid:456,lv:'I',tag:'SharedTag',pkg:'com.browser.fixture',rx:1,msg}; }
 
@@ -788,6 +820,7 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
     const light=theme==='light'||theme==='high-contrast-light';
     const bg=light?'rgb(255, 255, 255)':'rgb(37, 37, 38)', fg=light?'rgb(32, 32, 32)':'rgb(204, 204, 204)';
     await page.viewport(width);
+    assert.equal(await page.evaluate("document.getElementById('dev').querySelectorAll('selectedcontent').length"),1);
     await page.evaluate(`(()=>{
       document.body.className='vscode-'+${JSON.stringify(theme)};
       for(const [key,value] of Object.entries({'menu-background':${JSON.stringify(bg)},'menu-foreground':${JSON.stringify(fg)},'dropdown-background':${JSON.stringify(bg)},'dropdown-foreground':${JSON.stringify(fg)},'descriptionForeground':${JSON.stringify(fg)},'focusBorder':'#007acc','menu-border':${JSON.stringify(light?'#b8b8b8':'#454545')},'list-hoverBackground':${JSON.stringify(light?'#e8e8e8':'#37373d')}}))document.body.style.setProperty('--vscode-'+key,value);
@@ -797,11 +830,16 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
       document.getElementById('dev').blur();
       document.getElementById('dev').value='dropdown-0';
       const dev=document.getElementById('dev');dev.focus();
+
     })()`);
     const rect=await page.evaluate("(()=>{const r=document.getElementById('dev').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,height:r.height}})()");
     assert.equal(rect.height,28);
-    const pointerFocus=await page.evaluate("(()=>{const dev=document.getElementById('dev');dev.focus();const s=getComputedStyle(dev);return {outline:s.outlineStyle,width:s.outlineWidth,shadow:s.boxShadow}})()");
-    assert.equal(pointerFocus.outline,'none');assert.equal(pointerFocus.width,'0px');assert.doesNotMatch(pointerFocus.shadow,/255, 165, 0/);
+    await page.mouse('mousePressed',rect.x,rect.y);await page.mouse('mouseReleased',rect.x,rect.y);await page.frames();
+    const pointerFocus=await page.evaluate("(()=>{const dev=document.getElementById('dev');const s=getComputedStyle(dev);return {open:dev.matches(':open'),outline:s.outlineStyle,width:s.outlineWidth,shadow:s.boxShadow}})()");
+    assert.equal(pointerFocus.open,true);assert.equal(pointerFocus.outline,'none');assert.doesNotMatch(pointerFocus.shadow,/255, 165, 0/);
+    await page.key('Escape');await page.key('Tab');await page.key('Tab',8);
+    const keyboardFocus=await page.evaluate("(()=>{const dev=document.getElementById('dev'),s=getComputedStyle(dev);return {focused:dev.matches(':focus'),visible:dev.matches(':focus-visible'),outline:s.outlineStyle,width:s.outlineWidth,shadow:s.boxShadow}})()");
+    assert.equal(keyboardFocus.focused,true);assert.equal(keyboardFocus.visible,true);assert.equal(keyboardFocus.outline,'none');assert.match(keyboardFocus.shadow,/0, 122, 204/);assert.doesNotMatch(keyboardFocus.shadow,/255, 165, 0/);
     assert.equal(await page.evaluate("document.getElementById('dev').querySelectorAll('selectedcontent').length"),1);
     // 箭头对齐回归：真实长设备名下，与Format逐属性和中心位置比较，不以CSS声明存在代替视觉几何。
     const arrowStyles=await page.evaluate("(()=>['dev','fmt'].map(id=>{const el=document.getElementById(id),s=getComputedStyle(el,'::picker-icon'),r=el.getBoundingClientRect();return {style:Object.fromEntries(['content','fontFamily','fontSize','color','width','height','position','insetInlineEnd','top','translate','pointerEvents'].map(k=>[k,s[k]])),padding:getComputedStyle(el).paddingInlineEnd,center:r.y+r.height/2,width:r.width,overlay:document.querySelectorAll('.device-select-arrow').length}}))()");

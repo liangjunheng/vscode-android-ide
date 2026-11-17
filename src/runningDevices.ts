@@ -493,14 +493,14 @@ function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<strin
 <link rel="stylesheet" href="${codicons}"><link rel="stylesheet" href="${art.processesStyle}"><style>
 body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--vscode-foreground);display:flex;flex-direction:column;align-items:center;gap:0;height:100vh;box-sizing:border-box}
 #tabs{display:flex;flex:none;width:100%;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box}
-#tab{position:relative;display:flex;align-items:center;gap:8px;padding:4px 10px;border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border,#444));background:var(--vscode-dropdown-background);border-radius:4px;width:100%;min-width:0;height:34px;box-sizing:border-box}
+#tab{position:relative;display:flex;align-items:center;gap:8px;padding:4px 9px;border:1px solid var(--vscode-dropdown-border,var(--vscode-input-border,var(--vscode-panel-border,#555)));background:var(--vscode-dropdown-background,var(--vscode-input-background));border-radius:6px;width:100%;min-width:0;height:34px;box-sizing:border-box}
 #tab svg{width:18px;height:18px}
-#tab .dot{position:absolute;left:24px;bottom:5px;width:6px;height:6px;border-radius:50%;background:#57965c}
+#tab .dot{display:none}
 #chev{display:block;pointer-events:none;font-size:14px;opacity:.8;flex:none}
 #tab.multi #chev{display:block}
 #tab.multi select{padding-right:0}
-#tab select{background:var(--vscode-dropdown-background);border:0;color:var(--vscode-dropdown-foreground);font:inherit;appearance:none;-webkit-appearance:none;cursor:pointer;padding:0 4px;text-overflow:ellipsis;min-width:0;width:100%;height:100%;border-radius:4px;transition:background-color .12s ease,box-shadow .12s ease}#tab select:hover{background:var(--vscode-list-hoverBackground)}
-#tab select:focus:not(:focus-visible){outline:0!important;box-shadow:none!important}#tab select:focus-visible{outline:1px solid var(--vscode-focusBorder)}
+#tab select{background:transparent;border:0;color:var(--vscode-dropdown-foreground,var(--vscode-input-foreground));font:inherit;appearance:none;-webkit-appearance:none;cursor:pointer;padding:0 4px;text-overflow:ellipsis;min-width:0;width:100%;height:100%;border-radius:0;transition:box-shadow .12s ease}#tab select:hover,#tab select:active{background:transparent}
+#tab select:focus:not(:focus-visible){outline:0!important;box-shadow:none!important}#tab select:focus-visible{outline:0;box-shadow:0 0 0 1px var(--vscode-focusBorder)}
 #tab select option{background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground)}
 .dk,.lt{display:none}body:not(.vscode-light) .dk{display:flex}body.vscode-light .lt{display:flex}
 #bar{display:flex;flex:none;justify-content:space-between;gap:4px;flex-wrap:nowrap;width:100%;height:43px;padding:6px 0;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box;align-items:center}
@@ -547,7 +547,7 @@ body.empty #empty{display:flex}
 <div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
 <div class="build-surface">
 <div class="build-target-row"><i class="codicon codicon-package" aria-hidden="true"></i><select id="build-target" aria-label="Module and build variant" title="Module and build variant"><option value="">No Android variants</option></select></div>
-<div class="build-device-row"><div id="tab"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
+<div class="build-device-row"><div id="tab"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><button type="button"><selectedcontent></selectedcontent></button><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
 <div class="build-actions"><button id="build-run" title="Build, install and run"><i id="build-run-icon" class="codicon codicon-play"></i><span id="build-run-label">Run</span></button><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-debug" title="Debug app" aria-label="Debug app"><i class="codicon codicon-debug-alt"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button></div>
 <div class="build-status" role="status" aria-live="polite"><i id="build-progress" class="codicon"></i><span id="build-status">No Gradle project</span></div>
 </div></div>
@@ -712,14 +712,14 @@ function onRgba(m){const d=m.data instanceof Uint8Array?m.data:new Uint8Array(m.
  const changed=fw!==m.w||fh!==m.h;if(cv.width!==m.w||cv.height!==m.h){cv.width=m.w;cv.height=m.h}const wasLand=fw>fh;fw=m.w;fh=m.h;if(changed)layout();if((fw>fh)!==wasLand)sendVp();
  ctx.putImageData(new ImageData(new Uint8ClampedArray(d.buffer,d.byteOffset,m.w*m.h*4),m.w,m.h),0,0);
  setPresentation('live');msg.textContent=fw+'×'+fh+' · emulator';send({type:'ack'})}
-// 输入设备快照，安全填充下拉并显示当前名称；npm test 执行此函数断言全部选项、状态、切换和空列表。
+// 输入设备快照，保留原生按钮并安全更新完整名称；device-manager-ui 的 device dropdown 回归断言选项/空态，LOGCAT_BROWSER=1 的 Device Tools browser 回归在深浅主题及窄屏断言标签省略、箭头分隔和刷新后结构。
 function renderDevices(m){
  const selected=m.devices.find(d=>d.serial===m.serial&&d.state==='device');
  document.body.classList.toggle('empty',!selected);
- dev.replaceChildren();
+ dev.replaceChildren(dev.querySelector('button'));
  const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent=m.devices.length?'Select Device':'No devices';dev.appendChild(placeholder);
- for(const d of m.devices){const option=document.createElement('option');option.value=d.serial;option.textContent=d.label+(d.state==='device'?'':' ('+d.state+')');option.disabled=d.state!=='device';option.title=d.serial;dev.appendChild(option)}
- dev.value=selected?selected.serial:'';dev.title=selected?selected.label:'Select Device';tdot.style.display=selected?'block':'none';
+ for(const d of m.devices){const option=document.createElement('option');option.value=d.serial;option.textContent=d.label+' ('+d.serial+')'+(d.state==='device'?'':' ('+d.state+')');option.disabled=d.state!=='device';option.title=d.serial;dev.appendChild(option)}
+ dev.value=selected?selected.serial:'';dev.title=selected?selected.label+' ('+selected.serial+')':'Select Device';tdot.style.display=selected?'block':'none';
  const physical=selected&&selected.physical;document.getElementById('tic-d').innerHTML=physical?${JSON.stringify(icons['physical-dark'])}:${JSON.stringify(icons['virtual-dark'])};document.getElementById('tic-l').innerHTML=physical?${JSON.stringify(icons['physical-light'])}:${JSON.stringify(icons['virtual-light'])};
  if(!selected){msg.textContent=m.devices.length?'Select a device.':'No devices connected.';img.removeAttribute('src');ctx.clearRect(0,0,cv.width,cv.height)}
 }

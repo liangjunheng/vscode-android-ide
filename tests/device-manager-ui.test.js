@@ -152,7 +152,8 @@ test('device dropdown renders all devices and selection bridge', () => {
   fn = fn.replace(/\$\{JSON.stringify\(icons\['([^']+)'\]\)\}/g, (_, key) => JSON.stringify(key));
   const options = [], sent = [];
   let empty, clears = 0;
-  const dev = { value: '', title: '', replaceChildren() { options.length = 0; }, appendChild(option) { options.push(option); }, onchange: null };
+  const labelButton = { tagName: 'BUTTON' };
+  const dev = { value: '', title: '', querySelector: () => labelButton, replaceChildren(button) { assert.equal(button, labelButton); options.length = 0; }, appendChild(option) { options.push(option); }, onchange: null };
   const nodes = { dev, 'tic-d': { innerHTML: '' }, 'tic-l': { innerHTML: '' }, tdot: { style: {} }, msg: { textContent: '' }, screen: { removeAttribute() {} } };
   const ctx = {
     document: {
@@ -169,10 +170,10 @@ test('device dropdown renders all devices and selection bridge', () => {
     { serial: 'emu', label: 'Pixel', state: 'device', physical: false },
   ] } };
   vm.runInNewContext(fn + '\nrenderDevices(input);', vmCtx);
-  assert.deepEqual(options.map(o => o.textContent), ['Select Device', 'Phone', 'Old Phone (offline)', 'Pixel']);
+  assert.deepEqual(options.map(o => o.textContent), ['Select Device', 'Phone (phone)', 'Old Phone (offline) (offline)', 'Pixel (emu)']);
   assert.equal(options[2].disabled, true);
   assert.equal(dev.value, 'phone');
-  assert.equal(dev.title, 'Phone');
+  assert.equal(dev.title, 'Phone (phone)');
   assert.equal(empty, false);
   assert.equal(nodes['tic-d'].innerHTML, 'physical-dark');
   const change = runningSource.match(/dev\.onchange=[^;]+;/)[0];
@@ -182,7 +183,7 @@ test('device dropdown renders all devices and selection bridge', () => {
   assert.equal(sent.at(-1).type, 'select');
   assert.equal(sent.at(-1).serial, 'emu');
   vm.runInNewContext(fn + '\nrenderDevices({...input, serial: \"emu\"});', vmCtx);
-  assert.equal(dev.title, 'Pixel');
+  assert.equal(dev.title, 'Pixel (emu)');
   assert.equal(nodes['tic-d'].innerHTML, 'virtual-dark');
   assert.match(runningSource, /dev\.onchange=\(\)=>send\(\{type:'select',serial:dev\.value\}\)/);
   vm.runInNewContext(fn + '\nrenderDevices({ devices: [], serial: undefined });', vmCtx);
@@ -205,7 +206,6 @@ test('dropdown selection messages switch the actual mirrored serial', async () =
   const started = [], messages = [];
   mirror.view = { visible: true, webview: { postMessage: m => messages.push(m) } };
   mirror.pickMode = () => 'screencap';
-  // 替身启动成功后持有活动循环，符合mirrorConnected契约；设备回归断言切换/清空与错误，不将已启动流伪装断开。
   mirror.startScreencap = () => { started.push(mirror.serial); mirror.loop = {}; };
   await mirror.onMessage({ type: 'select', serial: 'one' });
   await mirror.onMessage({ type: 'select', serial: 'two' });
