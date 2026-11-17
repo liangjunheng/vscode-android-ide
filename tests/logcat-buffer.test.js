@@ -10,7 +10,7 @@ const source = fs.readFileSync(path.join(__dirname, '../src/logcat.ts'), 'utf8')
 
 // 回归 Android Studio 默认容量和 VS Code 配置边界；npm test 无设备依赖，断言当前清单与后端初始化契约。
 test('Logcat uses a bounded configurable buffer matching Android Studio by default', () => {
-  const setting = packageJson.contributes.configuration.properties['android.logcat.maxBytes'];
+  const setting = packageJson.contributes.configuration.properties['android-ide.logcat.maxBytes'];
   assert.equal(setting.default, 1024 * 1024);
   assert.equal(setting.minimum, 64 * 1024);
   assert.equal(setting.maximum, 64 * 1024 * 1024);
@@ -27,8 +27,8 @@ test('backend clamps configuration to finite integer bounds', () => {
   assert.ok(start >= 0 && end > start);
   const method = source.slice(start, end).replace('private maxBytes()', 'function maxBytes()');
   const constants = source.slice(source.indexOf('const DEFAULT_LOGCAT_MAX_BYTES'), source.indexOf('interface Item'));
-  const ctx = vm.createContext({ configured: undefined });
-  vm.runInContext(constants + "const vscode = {workspace:{getConfiguration: () => ({get: (key, fallback) => configured === undefined ? fallback : configured})}};" + method, ctx);
+  const ctx = vm.createContext({ configured: undefined, assert });
+  vm.runInContext(constants + "const vscode = {workspace:{getConfiguration: section => { assert.equal(section, 'android-ide'); return ({get: (key, fallback) => configured === undefined ? fallback : configured}); }}};" + method, ctx);
   for (const [input, expected] of [[undefined, 1048576], [NaN, 1048576], [Infinity, 1048576], [-1, 65536], [0, 65536], [1e20, 67108864], [70000.9, 70000]]) {
     ctx.configured = input;
     assert.equal(vm.runInContext('maxBytes()', ctx), expected);
@@ -73,7 +73,17 @@ test('actual ingestion and paused queues remain bounded', () => {
   assert.equal(vm.runInContext('entries[0].lines[0].length', ctx), 11);
 });
 
-// npm test 回归接收到渲染的完整路径：相同毫秒/进程/Tag的独立消息不能误合并；只有消息内换行可省略元数据。
+// 终止换行只影响显示行，不改变原始消息；内部空行仍显示为续行，复制消息仍保留尾部换行。
+test('terminal newline does not render an extra blank Logcat row', () => {
+  const data = main.slice(main.indexOf('  const itemBytes ='), main.indexOf('  function recompile()'));
+  const ctx = vm.createContext({ LogcatBuffer, LogFilter: require('../media/logcat/filter.js') });
+  vm.runInContext("let entries=[],rows=[],maxBytes=10000,entriesBytes=0,pending=[],pendingBytes=0,pkgMap={}; const compiled={test:()=>true}; const S={dirty:false};\n" + data, ctx);
+  vm.runInContext("ingest([{msg: String.fromCharCode(111,110,101,10)}, {msg: String.fromCharCode(116,119,111,10,10,116,104,114,101,101,10)}])", ctx);
+  assert.equal(vm.runInContext('JSON.stringify(entries.map(e=>e.lines))', ctx), JSON.stringify([['one',''],['two','','three','']]));
+  assert.equal(vm.runInContext('JSON.stringify(rows.map(r=>r.e.lines[r.i]))', ctx), JSON.stringify(['one','two','','three']));
+});
+
+// npm test 回归接收到渲染的完整路径：相同毫秒/进程/Tag的独立消息不能误合并；只有消息内换行可省略元数据.
 test('identical headers stay independent through ingestion rendering and search', () => {
   const data = main.slice(main.indexOf('  const itemBytes ='), main.indexOf('  function recompile()'));
   const rendering = main.slice(main.indexOf('  function rowHtml(i) {'), main.indexOf('  function buildRe()'));

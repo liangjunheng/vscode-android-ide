@@ -97,6 +97,11 @@ test('Logcat rows use editor typography rather than bundled fonts', () => {
   assert.doesNotMatch(css, /JetBrains|@font-face|monospace/);
 });
 
+// npm test 无设备回归：等级颜色徽标使用直角，其他控件圆角不由该规则改变。
+test('Logcat level badges use square corners', () => {
+  assert.match(rule('.lvb'), /border-radius:0/);
+});
+
 // npm test 无设备回归：固定顶栏、计数槽和侧栏最小高度，覆盖计数位数变化不抢占设备/筛选框布局。
 test('Logcat toolbar reserves stable count space and cannot be squeezed by content', () => {
   assert.match(rule('#header'), /flex-shrink:0/);

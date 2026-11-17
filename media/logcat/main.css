@@ -51,7 +51,7 @@ body:not(.vscode-light) #hl .kv{color:transparent}
 .row{white-space:pre;display:block;padding:0 6px;color:var(--c);tab-size:4}
 .row>span{display:inline-block;overflow:hidden;text-overflow:ellipsis;vertical-align:top}
 .ts{width:23ch;color:var(--muted)}.pt{width:11ch;color:var(--muted)}.tg{width:23ch}.pk{width:30ch;color:var(--muted)}
-.lvb{width:3ch;text-align:center;border-radius:3px;margin:0 1ch;background:var(--b);color:var(--f)}
+.lvb{width:3ch;text-align:center;border-radius:0;margin:0 1ch;background:var(--b);color:var(--f)}
 .ctime{width:12ch;color:var(--muted)}
 .m{overflow:visible!important;flex:1 1 auto!important}
 /* 系统分隔行使用普通编辑器正文色；回归覆盖级别色隔离与窄屏换行。 */

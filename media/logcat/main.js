@@ -97,7 +97,13 @@
   // 系统分隔行与 Studio 一致无条件可见，普通记录执行过滤；buffer/browser 的 system 回归断言不匹配过滤仍保留分隔行。
   const visible = (e) => e.system || e.local || compiled.test(filterView(e));
 
-  function pushRows(e) { for (let i = 0; i < e.lines.length; i++) { rows.push({ e, i }); } }
+  // 将消息拆成可见行；输入为保留原文的日志记录，输出不渲染末尾终止换行产生的空行。
+  // 前置条件是 e.lines 由原始消息 split 得到；内部空行保留，复制仍读取完整 e.lines。
+  // 回归：tests/logcat-buffer.test.js 断言末尾换行不增加 rows、内部空行仍保留且 entries 原文不变。
+  function pushRows(e) {
+    const count = e.lines.length > 1 && e.lines.at(-1) === '' ? e.lines.length - 1 : e.lines.length;
+    for (let i = 0; i < count; i++) { rows.push({ e, i }); }
+  }
 
   // 按输入记录边界接收日志并维护 UTF-8 字节预算；输入为 ADB 日志项，输出更新后的有界 entries。
   // 前置条件是每项为独立日志记录且包含 msg；仅消息内部换行产生续行，不按相同时间或 Tag 合并。
