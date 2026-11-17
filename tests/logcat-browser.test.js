@@ -146,7 +146,7 @@ async function browser(t, data, signal) {
     await frames();
   }
   // CDP 设置宽窄屏 viewport，返回前等待页面布局。
-  async function viewport(width, deviceScaleFactor = 1) { await call('Emulation.setDeviceMetricsOverride', { width, height: 720, deviceScaleFactor, mobile: false }); await frames(); }
+  async function viewport(width, deviceScaleFactor = 1, height = 720) { await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile: false }); await frames(); }
   // 只点击公开 DOM 控件，输出为提交后的真实页面状态。
   async function click(id) { await evaluate(`document.getElementById(${JSON.stringify(id)}).click()`); await frames(); }
   // 用真实 CDP 键盘事件触发 Ctrl+F 和 Escape，并等待布局。
@@ -179,7 +179,7 @@ async function browser(t, data, signal) {
   // 截取同一CSS坐标区域的原生PNG，供相同日志内容逐像素比较，不缩放生产页面。
   async function region(clip) { return (await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...clip,scale:1}})).data; }
   await viewport(1440);
-  await post({type:'init',icons:data.icons,mine:[],maxBytes:1048576});
+  await post({type:'init',icons:data.icons,mine:['com.browser.fixture'],maxBytes:1048576});
   await post({type:'devices',list:[{serial:'browser-fixture',model:'Browser fixture',state:'device'}],serial:'browser-fixture'});
   await post({type:'reset'});
   return {evaluate,frames,post,viewport,click,key,mouse,format,search,screenshot,region};
@@ -349,6 +349,33 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
       assert.equal(after.mutations,0,JSON.stringify({wrap,after}));assert.equal(after.same,true);assert.equal(after.top,before.top);assert.equal(after.y,before.y);
       // 新匹配仍应显示，不能通过停止接收来使静止断言伪通过。
       await page.post({type:'batch',items:[{...item('new matching record'),tag:'Keep'}]});await atEnd(page,'new matching record');
+    }
+    await page.evaluate("(()=>{const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+  });
+
+  // 用户视频复现回归：package:mine 下后台不匹配项持续增长并触发真实 1MiB 淘汰；输入为两种 DPR/换行布局，输出为每帧几何和 glyph PNG 严格不变。
+  // 前置条件是 fixture 的 mine 包已初始化；成功判据同时要求 entries 计数继续变化、匹配 row DOM 身份保留、scrollTop/row top 连续帧恒定且截图字节完全一致。
+  await t.test('package mine keeps visible glyphs fixed while background buffer evicts',async()=>{
+    const background=Array.from({length:1600},(_,i)=>({...item(('background-'+String(i).padStart(4,'0')+' ').padEnd(650+(i%11)*17,'x')),tag:'Other',pkg:'com.other.fixture'}));
+    for(const dpr of [1,1.25]) for(const wrap of [false,true]){
+      await page.viewport(1600,dpr,480);await page.post({type:'reset'});
+      if(await page.evaluate("document.body.classList.contains('wrap')")!==wrap)await page.click('b-wrap');
+      await page.evaluate("(()=>{const q=document.getElementById('q');q.value='package:mine';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+      await page.post({type:'batch',items:background.slice(0,1400)});
+      await page.post({type:'batch',items:[item('KEEP-GLYPH-IDENTITY')]});
+      const baseline=await page.evaluate("(()=>{const sc=document.getElementById('sc'),row=document.querySelector('#win .row:last-child'),m=row.querySelector('.m'),r=m.getBoundingClientRect();window.__jitterRow=row;return{count:document.getElementById('count').textContent,top:row.getBoundingClientRect().top,scrollTop:sc.scrollTop,clip:{x:r.x,y:r.y,width:r.width,height:r.height}}})()");
+      const pixels=await page.region(baseline.clip);
+      let previousCount=baseline.count;
+      for(const batch of [background.slice(1400),background.slice(0,400)]){
+        await page.post({type:'batch',items:batch});
+        const samples=await page.evaluate("new Promise(resolve=>{const values=[];function frame(){const sc=document.getElementById('sc'),row=document.querySelector('#win .row:last-child');values.push({same:row===window.__jitterRow,top:row.getBoundingClientRect().top,scrollTop:sc.scrollTop,text:row.querySelector('.m').textContent});if(values.length===4)resolve(values);else requestAnimationFrame(frame)}requestAnimationFrame(frame)})");
+        const count=await page.evaluate("document.getElementById('count').textContent");
+        assert.notEqual(count,previousCount,JSON.stringify({dpr,wrap,count,previousCount}));previousCount=count;
+        assert.equal(await page.region(baseline.clip),pixels,JSON.stringify({dpr,wrap,count},null,2));
+        for(const sample of samples){assert.equal(sample.same,true,JSON.stringify({dpr,wrap,sample}));assert.equal(sample.text,'KEEP-GLYPH-IDENTITY');assert.equal(sample.top,baseline.top,JSON.stringify({dpr,wrap,sample,baseline}));assert.equal(sample.scrollTop,baseline.scrollTop,JSON.stringify({dpr,wrap,sample,baseline}));}
+      }
+      const retained=await page.evaluate("Number(document.getElementById('count').textContent.split('/')[1].trim())");
+      assert.ok(retained<3200&&retained>1000,JSON.stringify({dpr,wrap,retained}));
     }
     await page.evaluate("(()=>{const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
   });

@@ -401,9 +401,9 @@
   }
 
   // 在固定/可变行高模式共用虚拟窗口；无输入，输出测量后的 DOM、总高度和滚动位置。
-  // spacer拥有原生滚动范围，fixed文字层逐行使用视口局部坐标排版，避免大文档坐标与滚动分别取整导致1物理像素跳动。
-  // 本帧插入测量后统一定位，回归 tests/logcat-browser.test.js 同内容字形PNG严格一致及选区/滚动断言。
-  // 回归：tests/logcat-browser.test.js 覆盖换行、跟随、搜索、缩放和淘汰位置断言。
+  // 根因是原生 scrollTop 与 fixed 层行 top 各自被浏览器按 DPR 取整，分数行高会让同一 glyph 跨物理像素往返。
+  // 本帧将滚动坐标和视口绝对坐标统一量化到同一物理像素网格，避免双坐标模型产生约一录屏像素的抖动。
+  // 回归 tests/logcat-browser.test.js 的 package:mine/1MiB 淘汰测试记录每帧 row top、scrollTop 和 glyph PNG，并断言计数变化时可见内容不变。
   function draw() {
     if (!hostVisible || document.hidden) { return; }
     const selection = logSelection();
@@ -453,10 +453,16 @@
     if (spacer.style.width !== width) { spacer.style.width = width; }
     const left = -sc.scrollLeft + 'px';
     if (win.style.left !== left) { win.style.left = left; }
-    const scrollTop = Math.max(0, target);
+    // 输入为逻辑滚动目标和 fixed 层边界，输出为同一 DPR 物理网格上的滚动及行坐标；
+    // 前置条件是 box 已读取、offsets 对应当前 rows，结果避免原生滚动与行定位分别取整。
+    const dpr = window.devicePixelRatio || 1;
+    // 仅过滤视图固定可见层的物理栅格；未过滤日志保留编辑器原生分数基线。
+    const align = st.filter ? (value) => Math.round(value * dpr) / dpr : (value) => value;
+    const scrollTop = Math.max(0, align(target));
     if (sc.scrollTop !== scrollTop) { sc.scrollTop = scrollTop; }
     for (const node of win.children) {
-      const top = (offsets[+node.dataset.i] - sc.scrollTop) + 'px';
+      const absoluteTop = align(box.top + offsets[+node.dataset.i] - scrollTop);
+      const top = (absoluteTop - box.top) + 'px';
       if (node.style.top !== top) { node.style.top = top; }
     }
     requestedRow = null;
