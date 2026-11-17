@@ -28,8 +28,9 @@ export class DeviceExplorerController {
   private transition: Promise<void> = Promise.resolve();
   private disposed = false;
 
-  // 输入宿主消息投递器，不主动建立连接；controller 回归断言隐藏或未选择设备时无后端调用。
-  constructor(private post: (message: unknown) => void) {}
+  // 输入消息投递器及只读Build当前包名提供方，不主动连接；提供方缺失或返回undefined才读取工作区候选，过滤语义不变。
+  // 回归：Node>=22，node --test tests/device-explorer-controller.test.js；locateApp断言有目标零picker、缺目标候选单选/取消、目录结果及错误，生命周期断言隐藏无后端调用。
+  constructor(private post: (message: unknown) => void, private currentApplicationId?: () => string | undefined) {}
 
   // 设备/活动视图切换取消命令，独立连接按用户要求闲置60秒才释放；view-idle/controller回归验证复用、失效及设备归属。
   setContext(serial: string | undefined, visible: boolean, view: 'files' | 'processes' = 'files'): Promise<void> {
@@ -40,7 +41,7 @@ export class DeviceExplorerController {
     return task;
   }
 
-  // 同设备切回取消闲置计时并检查实际连接，断开才重建；设备变更立即关闭全部旧会话；view-idle回归覆盖边界和并发创建。
+  // 同设备切回复用连接，切换设备关闭旧会话，新会话读取 android 包过滤；输入设备与视图，无返回值。controller/view-idle 回归覆盖配置、生命周期和异常。
   private async changeContext(serial: string | undefined, visible: boolean, view: 'files' | 'processes'): Promise<void> {
     if (serial !== this.serial || this.disposed) { await this.closeScope(); this.serial = serial; }
     const active = visible && serial && !this.disposed ? serial : undefined;
@@ -108,7 +109,7 @@ export class DeviceExplorerController {
       capabilities: ProcessesController.capabilities() });
   }
 
-  // 命令归作用域所有，释放写入锁后才回ACK并保留设备/动作关联，错误不伪装成功；controller上传回归验证同步下一命令、最终写入失败及取消。
+  // 命令归作用域所有；设置入口使用 android.explorer，输入宿主消息，无返回值。controller 回归核验新命名空间和动作归属、失败及取消；locateApp的writer互斥/取消证据见定位共享回归映射。
   async handle(message: any): Promise<void> {
     if (!message || message.type !== 'explorer' || typeof message.action !== 'string') { throw new Error('Invalid Device Explorer message'); }
     if (message.action === 'ready') {
@@ -159,7 +160,7 @@ export class DeviceExplorerController {
     }
   }
 
-  // 展开只发一次list而不预先stat，仅权限拒绝时切身份/虚拟入口；父快照删除时失效子缓存；controller回归验证往返、run-as及刷新删除不查询旧子树。
+  // 展开只发一次list而不预先stat，仅权限拒绝时切身份/虚拟入口；父快照删除时失效子缓存；controller回归验证往返、run-as及刷新删除不查询旧子树；定位目录/链接与权限步骤见定位共享回归映射。
   private async list(scope: Scope, remote: string): Promise<void> {
     this.check(scope);
     let entries: ExplorerEntry[];
@@ -188,7 +189,8 @@ export class DeviceExplorerController {
     this.post({ type: 'explorerFiles', serial: scope.serial, path: remote, entries });
   }
 
-  // 从已生成结构化 APK 元数据和字面 applicationId 收集过滤项，不执行 Gradle 脚本；controller 回归覆盖无项目与合法ID。
+  // 从结构化APK metadata和字面applicationId收集过滤ID，不执行Gradle；输入活动scope并发布已验证ID，也供无当前Build目标时的定位候选复用。
+  // 回归：Node>=22，node --test tests/device-explorer-controller.test.js；过滤用例断言工作区ID，locateApp uses the current Build selection without scanning or picking 断言定位不再次扫描。
   private async readApplicationIds(scope: Scope): Promise<void> {
     const ids = new Set<string>();
     const files = await vscode.workspace.findFiles('**/{output-metadata.json,build.gradle,build.gradle.kts}', '**/{node_modules,.git,.gradle}/**');
@@ -202,6 +204,44 @@ export class DeviceExplorerController {
       }
     }
     this.check(scope); this.applicationIds = [...ids]; this.state();
+  }
+
+  // 输入活动Files作用域，优先定位Build当前项目/模块/变体ID；仅缺当前ID时扫描候选，0项报错/1项直达/多项单选，取消不定位，不接受前端包名/路径。
+  // 定位共享回归映射：Node>=22，node --test tests/device-explorer-controller.test.js，VM+工作区/ADB/provider替身。
+  // uses the current Build selection without scanning or picking：切换provider后仅查询对应包，零findFiles/QuickPick；reveals the selected Build application：四级快照先于reveal且忽略前端pkg/path。
+  // fallback handles zero one and multiple workspace IDs：无provider/undefined时0项error、1项直达、多项canPickMany:false及取消零list/reveal；fallback picker respects scope cancellation断言选择后检查旧scope与writer。
+  // rejects unavailable selection invalid IDs missing directories non-directories and backend failures：真实provider故障、非法ID及设备失败明确error且零reveal；tests/android-build.test.js的Build-to-Explorer fallback断言仅缺metadata回退，坏metadata不扫描。
+  // reuses virtual parents and run-as：权限拒绝使用虚拟父级/run-as且空目录成功；pending directory read respects scope cancellation：切设备/视图后零reveal，writer拒绝并发写。
+  // Files surface 与 initial automatic refresh 两项：Processes拒绝定位，初始根list挂起不阻塞定位独立目录链。Build metadata隔离与前置错误另见tests/android-build.test.js current application ID。
+  private async locateApp(scope: Scope): Promise<void> {
+    this.check(scope);
+    let packageName = this.currentApplicationId?.();
+    if (packageName === undefined) {
+      await this.readApplicationIds(scope);
+      this.check(scope);
+      if (!this.applicationIds.length) { throw new Error('No application ID found in workspace'); }
+      if (this.applicationIds.length === 1) { packageName = this.applicationIds[0]; }
+      else {
+        packageName = await vscode.window.showQuickPick(this.applicationIds, { title: 'Select application to locate', canPickMany: false });
+        this.check(scope);
+        if (packageName === undefined) { return; }
+      }
+    }
+    if (!PACKAGE.test(packageName)) { throw new Error('Invalid current application ID'); }
+
+    const appDirectory = '/data/data/' + packageName;
+    const parents = ['/', '/data', '/data/data', appDirectory];
+    for (let index = 0; index < parents.length; index++) {
+      const directory = parents[index];
+      await this.list(scope, directory);
+      if (index === parents.length - 1) { continue; }
+      const entries = scope.directories.get(directory) || [];
+      const next = parents[index + 1];
+      const child = entries.find(entry => entry.path === next);
+      if (!child || (child.kind !== 'directory' && !child.directoryLink)) { throw new Error('Required application parent is missing or not a directory: ' + next); }
+    }
+    this.check(scope);
+    this.post({ type: 'explorerReveal', serial: scope.serial, path: appDirectory });
   }
 
   // 共享区域只激活独立Processes模块；controller回归断言File视图不会启动tracker。
@@ -220,7 +260,8 @@ export class DeviceExplorerController {
     return [...new Set<string>(message.paths.map(remotePath))];
   }
 
-  // 文件与分块上传先检查活动Files视图，进程动作仅交给独立模块；controller回归验证旧设备/Processes视图消息不能创建上传句柄。
+  // 在活动作用域执行文件/进程动作，过滤偏好写入 android；输入作用域和消息，无返回值。定位Files限定步骤见定位共享回归映射。
+  // 五按钮共享映射：Node>=22 VM+后端替身，node --test tests/device-explorer-controller.test.js；toolbar file commands publish created uploaded deleted refreshed and downloaded results触发新建目录/上传/下载/删除/刷新，断言父快照、落地字节及完成状态；toolbar file commands preserve cancellation and surface operation failures断言对话框取消零写入、后端错误可见及无伪完成。
   private async execute(scope: Scope, message: any): Promise<void> {
     this.check(scope);
     if (message.action === 'tab') { throw new Error('Select a surface using the Device Tools view controls'); }
@@ -243,6 +284,7 @@ export class DeviceExplorerController {
       return;
     }
     if (message.action === 'list') { await this.list(scope, remotePath(message.path)); return; }
+    if (message.action === 'locateApp') { await this.locateApp(scope); return; }
     if (message.action === 'processes') { await this.processes(scope); return; }
     if (ProcessesController.handles(message.action)) { await scope.processes.handle(message, scope.controller.signal); return; }
     if (message.action === 'copyPath') { await vscode.env.clipboard.writeText(this.paths(message).join('\n')); return; }
@@ -278,7 +320,7 @@ export class DeviceExplorerController {
     return values.map(value => { const uri = vscode.Uri.parse(value); if (uri.scheme !== 'file') { throw new Error('Only local file uploads are supported'); } return uri; });
   }
 
-  // 下载或打开选中项，打开使用项目外缓存且不注册自动回写；controller 回归断言真实本地路径/取消和内容不会静默覆盖。
+  // 下载或打开选中项，下载目录读取 android 配置；输入活动作用域、远端路径和打开标志，无返回值。下载落地字节/完成状态、取消与错误步骤见execute五按钮共享映射。
   private async download(scope: Scope, paths: string[], open: boolean): Promise<void> {
     let directory: string | undefined;
     if (open) { directory = await this.cacheDirectory(); }

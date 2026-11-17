@@ -10,9 +10,8 @@
 .build-device-row{display:flex;align-items:center;gap:4px;min-width:0}
 #tab{height:28px;gap:5px;padding:2px 6px;flex:1}
 #tab svg{width:14px;height:14px}
-#build-wifi{flex:none;color:var(--vscode-icon-foreground)}
 .build-actions{display:flex;gap:3px;align-items:center;min-width:0;height:29px}
-.build-actions button,#build-wifi{width:26px;height:26px;border-radius:4px;flex:none}
+.build-actions button,.build-view-modes button{width:26px;height:26px;border-radius:4px;flex:none}
 .build-actions #build-run{width:auto;min-width:58px;flex:1;justify-content:flex-start;gap:6px;padding:0 8px;background:var(--vscode-button-secondaryBackground);font:inherit}
 #build-run .codicon{color:var(--vscode-testing-iconPassed,#73c991)}
 button:disabled{opacity:.4;cursor:default}
@@ -22,10 +21,14 @@ button:disabled{opacity:.4;cursor:default}
 .build-status>.codicon{flex:none}
 select:focus-visible,button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}
 @media(max-width:260px){#build-root-count{display:none}.build-actions{gap:1px}.build-actions button{width:23px}.build-actions #build-run{min-width:45px;padding:0 4px}}
-.build-actions{display:grid;grid-template-columns:minmax(44px,1fr) repeat(7,minmax(0,26px));gap:2px}
+.build-actions{display:grid;grid-template-columns:minmax(20px,1fr) repeat(6,minmax(16px,26px));gap:2px}
+.build-view-separator{height:18px;width:1px;flex:none;background:var(--vscode-panel-border,#555)}
+.build-view-modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;height:26px;min-width:0;flex:0 0 82px}
+.build-view-modes button[aria-pressed="true"]{background:var(--vscode-toolbar-activeBackground,var(--vscode-list-inactiveSelectionBackground))}
+#device-explorer[hidden]{display:none!important}
 .build-actions button,.build-actions #build-run{width:100%;min-width:0;box-sizing:border-box}
 .build-actions button svg{width:16px;height:16px}
 #build-mirror[aria-pressed="true"]{background:var(--vscode-toolbar-activeBackground,var(--vscode-list-inactiveSelectionBackground))}
 body.mirror-hidden #wrap,body.mirror-hidden #bar,body.mirror-hidden #msg,body.mirror-hidden #empty{display:none}
-@media(max-width:280px){.build-actions #build-run-label{display:none}.build-actions #build-run{justify-content:center;padding:0}}
+@media(max-width:300px){.build-actions #build-run-label{display:none}.build-actions #build-run{justify-content:center;padding:0}}
 #build-logcat svg{width:20px;height:20px;max-width:100%;flex:none}

@@ -12,10 +12,18 @@
   // D: upload input displays nested causes and clears old failures on success；输入嵌套读取错误后成功重传，断言完整原因与旧alert消失。
   // E: host context events clear hovered upload targets；拖入后发送设备/连接/状态消息，断言目标为null且类清除。
   // F: upload owns one batch and cancels pending ACK on view or device change / upload aborts owned FileReader before any stale chunk can be sent；断言切换中止且无旧分块。
-  const state = { serial: '', deviceName: '', tab: document.body.dataset?.deviceViewMode === 'processes' ? 'processes' : 'files', filter: false, capabilities: {}, busy: false, message: '', error: '', directories: new Map(), expanded: new Set(['/']), processes: [], selected: [], processSelected: null, sort: { key: 'packageName', asc: true }, menu: null, transfer: null, dragTarget: null };
-  // 一个视图复用排序器/日期格式器；目录回归断言选择和重复展开不重新构造或排序元数据。
+  const state = { serial: '', deviceName: '', tab: document.body.dataset?.deviceViewMode === 'processes' ? 'processes' : 'files', filter: false, capabilities: {}, busy: false, message: '', error: '', directories: new Map(), expanded: new Set(['/']), processes: [], selected: [], processSelected: null, sort: { key: 'packageName', asc: true }, menu: null, transfer: null, dragTarget: null, fileColumns: ['180px', 'max-content', 'max-content', '90px'] };
+  // 一个视图复用排序器；目录回归断言选择和重复展开不重新构造或排序元数据。
   const fileCollator = new Intl.Collator(undefined, { sensitivity: 'base' });
-  const fileDate = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  // 输入时间戳/日期字符串，输出本地YYYY-MM-DD HH:mm:ss；缺失/无效返回空白，不改变时区。
+  // Node>=22运行node --test tests/device-explorer-ui.test.js tests/device-explorer-layout.test.js；file dates use fixed local验证年/月/日补零、13点、午夜/无效，compact file columns验证真实字体19字符列宽。
+  function formatFileDate(value) {
+    if (value == null || value === '') return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const pad = number => String(number).padStart(2, '0');
+    return `${String(date.getFullYear()).padStart(4, '0')}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
   const escPath = (p) => p === '/' ? '/' : ('/' + String(p || '').split('/').filter(Boolean).join('/'));
   const parentOf = (p) => { const n = escPath(p); const i = n.lastIndexOf('/'); return i <= 0 ? '/' : n.slice(0, i); };
   const baseName = (p) => escPath(p).split('/').filter(Boolean).pop() || '/';
@@ -23,16 +31,36 @@
   const entryName = (entry) => { const value = typeof entry.name === 'string' ? entry.name.trim() : ''; return value || baseName(entry.path); };
   const icon = (name) => { const e = document.createElement('span'); e.className = 'codicon codicon-' + name; return e; };
   const button = (title, name, action) => { const b = document.createElement('button'); b.className = 'explorer-icon'; b.title = title; b.setAttribute('aria-label', title); b.appendChild(icon(name)); b.addEventListener('click', action); return b; };
-  const text = (tag, value, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = value == null ? '' : String(value); return e; };
+  // 六个文件工具栏按钮使用Android Studio原始SVG轮廓，保留统一尺寸、主题颜色与现有事件；Node>=22运行UI六按钮回归与layout图标mask/截图回归验证资源与交互。
+  function toolbarButton(title, name, handler) { const control = button(title, name, handler); control.children[0].className = 'explorer-toolbar-glyph explorer-glyph-' + name; return control; }
+  // 文本使用textContent安全呈现，表格名称/单元格同时保留完整悬停值；Node>=22的UI六按钮回归及layout长值裁剪回归断言title与内容相同。
+  const text = (tag, value, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = value == null ? '' : String(value); if (cls === 'cell' || cls === 'name') e.title = e.textContent; return e; };
   // 发送 Explorer 动作并附加当前设备，所有设备操作均经宿主校验。
   function action(name, extra) { if ((!state.serial || state.active === false) && name !== 'ready') return; post(Object.assign({ type: 'explorer', action: name }, extra || {})); }
   // 将远端路径规范化，避免本地路径和目录遍历污染协议。
   function safeRemote(p) { const parts = String(p || '').replaceAll('\\', '/').split('/'); const out=[]; for (const x of parts) { if (!x || x === '.') continue; if (x === '..') out.pop(); else out.push(x); } return '/' + out.join('/'); }
   // 格式化文件大小和时间，空值使用稳定占位符。
   function formatSize(n) { if (n == null || n === '') return ''; n = Number(n); if (!Number.isFinite(n)) return ''; const u=['B','KB','MB','GB']; let i=0; while(n>=1024&&i<3){n/=1024;i++;} return (i ? n.toFixed(n>=10?0:1) : n.toString())+' '+u[i]; }
-  // 文件行以textContent呈现并复用日期格式器，绑定单击选择/目录展开、文件双击打开及独立拖放目标；回归A/B验证名称、选中属性和目标类，目录缓存回归验证格式器复用。
-  function fileRow(entry, depth) { const row=document.createElement('div'); row.className='file-row'; row.dataset.path=entry.path; row.style.setProperty('--depth', depth); if(state.selected.includes(entry.path)) row.classList.add('selected'); row.setAttribute('aria-selected', String(state.selected.includes(entry.path))); if(state.dragTarget===entry.path) row.classList.add('drop-target');
-    const lead=document.createElement('div'); lead.className='file-name'; const dir=entry.kind==='directory'||entry.directoryLink; const open=state.expanded.has(entry.path); const toggle=document.createElement('button'); toggle.className='twisty'; toggle.title=dir?(open?'Collapse':'Expand'):''; toggle.appendChild(icon(dir?(open?'chevron-down':'chevron-right'):'blank')); toggle.disabled=!dir; toggle.addEventListener('click',(e)=>{e.stopPropagation();toggleDir(entry);}); lead.appendChild(toggle); lead.appendChild(icon(dir?'folder':entry.kind==='symlink'?'file-symlink-file':'file')); lead.appendChild(text('span',entryName(entry),'name')); row.appendChild(lead); row.appendChild(text('div',entry.permissions || '','cell')); row.appendChild(text('div',entry.modified ? fileDate.format(new Date(entry.modified)) : '','cell')); row.appendChild(text('div',entry.kind==='directory'?'':formatSize(entry.size),'cell')); row.addEventListener('click',(e)=>selectFile(entry,e)); row.addEventListener('dblclick',()=>{if(!(entry.kind==='directory'||entry.directoryLink)) action('open',{paths:[entry.path]});}); row.addEventListener('dragover',(e)=>{e.preventDefault();selectDragTarget(entry);}); row.addEventListener('contextmenu',(e)=>{e.preventDefault(); if(!state.selected.includes(entry.path)) selectFile(entry,e); openMenu(e.clientX,e.clientY);}); return row; }
+  // 按路径复用文件行外壳，输入条目/深度，输出保留身份与事件的行；日期用固定本地格式，tooltip保留全文。
+  // Node>=22执行UI的file dates use fixed local与stable file tree DOM，layout的compact file columns和resize/anchor回归严格验证文本、10px缩进、180px Name、四列及滚动。
+  function fileRow(entry, depth, row = document.createElement('div')) {
+    row.className = 'file-row'; row.replaceChildren(); row.dataset.path = entry.path;
+    row.style.setProperty('--file-columns', state.fileColumns.join(' ')); row.style.setProperty('--depth', depth);
+    const selected = state.selected.includes(entry.path);
+    row.classList.toggle('selected', selected); row.setAttribute('aria-selected', String(selected)); row.classList.toggle('drop-target', state.dragTarget === entry.path);
+    const lead = document.createElement('div'); lead.className = 'file-name';
+    const dir = entry.kind === 'directory' || entry.directoryLink, open = state.expanded.has(entry.path);
+    const toggle = document.createElement('button'); toggle.className = 'twisty'; toggle.title = dir ? (open ? 'Collapse' : 'Expand') : ''; toggle.disabled = !dir;
+    toggle.appendChild(icon(dir ? (open ? 'chevron-down' : 'chevron-right') : 'blank'));
+    toggle.onclick = event => { event.stopPropagation(); toggleDir(entry); };
+    lead.appendChild(toggle); lead.appendChild(icon(dir ? 'folder' : entry.kind === 'symlink' ? 'file-symlink-file' : 'file')); lead.appendChild(text('span', entryName(entry), 'name'));
+    row.appendChild(lead); row.appendChild(text('div', entry.permissions || '', 'cell')); row.appendChild(text('div', formatFileDate(entry.modified), 'cell')); row.appendChild(text('div', entry.kind === 'directory' ? '' : formatSize(entry.size), 'cell'));
+    row.onclick = event => selectFile(entry, event);
+    row.ondblclick = () => { if (!dir) action('open', { paths: [entry.path] }); };
+    row.ondragover = event => { event.preventDefault(); selectDragTarget(entry); };
+    row.oncontextmenu = event => { event.preventDefault(); if (!state.selected.includes(entry.path)) selectFile(entry, event); openMenu(event.clientX, event.clientY); };
+    return row;
+  }
   // 已完成目录快照直接重用，未加载才查询；UI回归验证重复展开零查询及收起后迟到回复不重新展开。
   function toggleDir(entry) {
     const p = safeRemote(entry.path);
@@ -80,57 +108,81 @@
     if (!entry) throw new Error('Upload target is no longer available');
     return entry.kind === 'directory' || entry.directoryLink ? remote : parentOf(remote);
   }
-  // 构造文件输入和文件列表，上传期间禁用新操作，错误作为alert保留且不替代文件行；回归C/D验证错误可见、列表仍可选和成功清错，原file table回归验证表头与空态。
-function filesView() {
-  const wrap = document.createElement("div");
+  // 同设备复用Files面板、滚动列表和表头，按路径增删/更新行而不重建滚动容器；设备改变重新建立所有权。六按钮回归保持禁用与错误区契约。
+  // 回归：Node>=22运行node --test tests/device-explorer-ui.test.js tests/device-explorer-layout.test.js；stable file tree DOM与file tree expansion keeps selected viewport anchor断言展开/回复/进度/定位后节点身份、scrollTop/Left和选中行坐标保持。
+  // 回归：Node>=22执行node --test tests/device-explorer-ui.test.js；Explorer toolbar exposes six working actions逐按钮点击断言消息/上传ACK，toolbar disabled states验证禁用；C/D覆盖错误区。
+// 复用输入面板与表头，以隐藏字体样本和共享父grid输出四列；空目录/字体改变同样按intrinsic宽度布局，compact file columns回归验证2px留白和无裁剪。
+function filesView(previous) {
+  const wrap = previous?.className === "files-view" && previous.dataset.serial === state.serial ? previous : document.createElement("div");
+  wrap.dataset.serial = state.serial;
   wrap.className = "files-view";
   const bar = document.createElement("div");
   bar.className = "toolbar";
   const disabled = !state.serial || state.active === false || state.busy || !!state.transfer;
-  bar.appendChild(button("New Directory", "new-folder", () => action("newDirectory", { paths: state.selected, parent: targetDirectory() })));
-  bar.appendChild(button("Download", "cloud-download", () => action("download", { paths: state.selected })));
+  bar.appendChild(toolbarButton("New Directory", "new-folder", () => action("newDirectory", { paths: state.selected, parent: targetDirectory() })));
+  bar.appendChild(toolbarButton("Download", "download", () => action("download", { paths: state.selected })));
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
   input.hidden = true;
   bar.appendChild(input);
-  bar.appendChild(button("Upload", "cloud-upload", () => { input.dataset.target = targetDirectory(); input.click(); }));
+  bar.appendChild(toolbarButton("Upload", "upload", () => { input.dataset.target = targetDirectory(); input.click(); }));
   input.addEventListener("change", () => uploadFiles([...input.files], input.dataset.target || targetDirectory()).catch(showUploadError));
-  bar.appendChild(button("Delete", "trash", () => action("delete", { paths: state.selected })));
-  bar.appendChild(button("Refresh", "refresh", () => action("refresh")));
-  const filter = document.createElement("button");
-  filter.className = "filter-toggle";
-  filter.title = "Package filter"; filter.disabled = state.active === false;
-  filter.setAttribute("aria-pressed", String(state.filter));
-  filter.appendChild(icon("filter"));
-  filter.addEventListener("click", () => {
-    state.filter = !state.filter;
-    action("filter", { enabled: state.filter });
-    render();
-  });
-  bar.appendChild(filter);
-  for (const b of bar.querySelectorAll("button")) if (disabled && b !== filter) b.disabled = true;
-  wrap.appendChild(bar);
+  bar.appendChild(toolbarButton("Delete", "delete", () => action("delete", { paths: state.selected })));
+  bar.appendChild(toolbarButton("Refresh", "refresh", () => action("refresh")));
+  bar.appendChild(toolbarButton("Locate App Data", "locate", () => action("locateApp")));
+  for (const b of bar.querySelectorAll("button")) b.disabled = disabled || (!state.selected.length && (b.title === "Download" || b.title === "Delete"));
+  if (wrap.children[0]) wrap.replaceChild(bar, wrap.children[0]); else wrap.appendChild(bar);
   const pathbar = document.createElement("div");
   pathbar.className = "pathbar";
   pathbar.textContent = state.serial ? state.deviceName || state.serial : "No device selected";
-  wrap.appendChild(pathbar);
-  const head = document.createElement("div");
-  head.className = "file-head";
-  for (const h of ["Name", "Permissions", "Date", "Size"]) head.appendChild(text("div", h, "cell"));
-  const list = document.createElement("div");
-  list.className = "file-list";
-  list.appendChild(head);
-  if (state.error) { const error = text('div', state.error, 'state error'); error.setAttribute('role', 'alert'); list.appendChild(error); }
-  if (!state.serial) list.appendChild(text("div", "No device selected", "state"));
+  if (wrap.children[1]) wrap.replaceChild(pathbar, wrap.children[1]); else wrap.appendChild(pathbar);
+  const list = wrap.children[2] || document.createElement('div'); list.className = 'file-list';
+  const existing = new Map(Array.from(list.querySelectorAll('.file-row'), row => [row.dataset.path, row]));
+  const head = list.children[0] || document.createElement('div'); head.className = 'file-head';
+  list.style.setProperty('--file-columns', state.fileColumns.join(' '));
+  head.style.setProperty('--file-columns', state.fileColumns.join(' '));
+  if (!head.children.length) for (const [index, label] of ['Name', 'Permissions', 'Date', 'Size'].entries()) {
+    const cell = text('div', label, 'cell'); cell.dataset.column = String(index);
+    // 隐藏样本只参与真实字体intrinsic列宽，空目录也稳定；layout紧凑列回归断言宽度与2px留白。
+    if (index === 1 || index === 2) { const sample = text('span', index === 1 ? 'drwxrwxrwx' : '2000-00-00 00:00:00', 'column-sample'); sample.setAttribute('aria-hidden', 'true'); cell.appendChild(sample); }
+    const grip = document.createElement('span'); grip.className = 'column-grip'; grip.title = 'Resize column';
+    grip.addEventListener('pointerdown', event => resizeColumn(event, index, head)); cell.appendChild(grip); head.appendChild(cell);
+  }
+  const children = [head];
+  if (state.error) { const error = text('div', state.error, 'state error'); error.setAttribute('role', 'alert'); children.push(error); }
+  if (!state.serial) children.push(text('div', 'No device selected', 'state'));
   else {
     const rows = visibleEntries();
-    if (!rows.length && !state.busy) list.appendChild(text("div", "Empty directory", "state"));
-    for (const e of rows) list.appendChild(fileRow(e, e.depth));
+    if (!rows.length && !state.busy) children.push(text('div', 'Empty directory', 'state'));
+    for (const entry of rows) children.push(fileRow(entry, entry.depth, existing.get(entry.path)));
   }
-  wrap.appendChild(list);
+  for (let index = 0; index < children.length; index++) if (list.children[index] !== children[index]) list.insertBefore(children[index], list.children[index] || null);
+  const retained = new Set(children);
+  for (const child of Array.from(list.children)) if (!retained.has(child)) list.removeChild(child);
+  if (!wrap.children[2]) wrap.appendChild(list);
   return wrap;
 }
+  // 从实际表头像素宽度开始拖动当前列，捕获指针保证离开手柄仍能完成；同时更新表头/所有文件行，结束或取消即释放监听。
+  // 回归：Node>=22及EXPLORER_PLAYWRIGHT/EXPLORER_BROWSER，node --test tests/device-explorer-layout.test.js；file columns resize from measured widths用真实指针拖出手柄，断言列宽变化、行对齐、重绘保持与停止后不变；完整布局矩阵断言表头容纳/双向滚动/顶部固定。
+  function resizeColumn(event, index, head) {
+    event.preventDefault();
+    const grip = event.currentTarget, start = event.clientX;
+    const values = Array.from(head.children, cell => cell.getBoundingClientRect().width);
+    const minimum = [120, 100, 150, 60];
+    const move = current => {
+      state.fileColumns = values.map((width, column) => (column === index ? Math.max(minimum[column], width + current.clientX - start) : width) + 'px');
+      head.parentNode.style.setProperty('--file-columns', state.fileColumns.join(' '));
+      for (const row of [head, ...root.querySelectorAll('.file-row')]) row.style.setProperty('--file-columns', state.fileColumns.join(' '));
+    };
+    const stop = () => {
+      grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', stop); grip.removeEventListener('pointercancel', stop); grip.removeEventListener('lostpointercapture', stop);
+      if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+    };
+    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', stop); grip.addEventListener('pointercancel', stop); grip.addEventListener('lostpointercapture', stop);
+    grip.setPointerCapture(event.pointerId);
+  }
+
   // 菜单新建与上传共用真实目标目录，其他命令保持选择路径；UI新建回归验证文件父目录，layout回归验证八项文字及边界。
   function openMenu(x, y) {
     closeMenu();
@@ -300,7 +352,26 @@ function filesView() {
     if (message.serial !== job.serial || message.action !== pending.action) { pending.reject(new Error('Upload acknowledgement does not match the pending command')); return; }
     message.error ? pending.reject(new Error(message.error)) : pending.resolve();
   }
-  // 处理宿主状态/进度/ACK消息，切换上下文清理目标，进度错误保留具体原因；回归B/C/E/F验证切换、progress错误和取消，原目录缓存回归验证快照所有权。
+  // 根据宿主真实快照展开并选中应用目录，按表头实测高度滚动置顶；尾部留足视口空间使最后一项也能置顶，不改变目录排序。
+  // 回归：Node>=22运行node --test tests/device-explorer-ui.test.js，app directory reveal expands ancestors and preserves ownership投递快照/reveal，断言祖先、行选择、滚动和无额外list；跨设备/非活动/缺失目录不定位。
+  function revealAppDirectory(message) {
+    if (message.serial !== state.serial || state.active === false || state.tab !== 'files' || root.hidden) return;
+    const remote = safeRemote(message.path);
+    const entry = (state.directories.get(parentOf(remote)) || []).find(item => item.path === remote);
+    if (!entry || !(entry.kind === 'directory' || entry.directoryLink) || !state.directories.has(remote)) { showUploadError(new Error('Application data directory is no longer available')); return; }
+    state.error = ''; state.selected = [remote];
+    for (let current = remote; current !== '/'; current = parentOf(current)) state.expanded.add(current);
+    state.expanded.add('/'); render();
+    const row = Array.from(root.querySelectorAll('.file-row')).find(item => item.dataset.path === remote);
+    if (row) {
+      const list = root.querySelector('.file-list'), head = list.querySelector('.file-head');
+      const headerHeight = head.getBoundingClientRect().height;
+      list.style.setProperty('padding-bottom', Math.max(0, list.clientHeight - headerHeight - row.getBoundingClientRect().height) + 'px');
+      list.style.setProperty('scroll-padding-top', headerHeight + 'px');
+      row.scrollIntoView({ block: 'start', inline: 'nearest' });
+    }
+  }
+  // 处理宿主状态/进度/ACK和应用定位消息；回归B/C/E/F覆盖状态与取消，app directory reveal回归覆盖定位接线。
   function receive(m) {
     if (['devices', 'deviceViewMode', 'explorerConnection', 'explorerState'].includes(m.type)) selectDragTarget(null);
     if (state.transfer && ((m.type === 'deviceViewMode' && m.mode !== 'explorer') || (m.type === 'devices' && m.serial !== state.transfer.serial) || (m.type === 'explorerState' && (m.active === false || m.serial !== state.transfer.serial || (m.tab && m.tab !== 'files'))))) cancelUpload();
@@ -320,13 +391,26 @@ function filesView() {
       if (m.serial !== state.serial) { state.directories.clear(); state.expanded = new Set(['/']); state.selected = []; state.processes = []; state.processSelected = null; }
       if (m.tab !== state.tab || m.serial !== state.serial) { closeMenu(); state.error = ''; state.message = ''; state.busy = false; }
       Object.assign(state, m); state.capabilities = m.capabilities || {}; state.tab = m.tab || state.tab; render();
-    } else if (m.type === 'explorerFiles') { state.error = m.error || ''; if (!m.error) updateDirectory(m); render(); }
+    } else if (m.type === 'explorerReveal') { revealAppDirectory(m); }
+    else if (m.type === 'explorerFiles') { state.error = m.error || ''; if (!m.error) updateDirectory(m); render(); }
     else if (m.type === 'explorerProcesses') { state.error = m.error || ''; state.processes = m.processes || []; render(); }
     else if (m.type === 'explorerProgress') { state.busy = !!m.busy; state.message = m.message || ''; if(m.error) state.error = m.error; render(); }
     else if (m.type === 'explorerUploadAck') uploadAck(m);
   }
-  // 独立入口渲染对应标题和唯一内容，不再提供内部标签页；UI回归断言三个视图互斥与无tab动作。
-  function render(){root.replaceChildren();const label=state.tab==='processes'?'Processes':'Device Explorer';root.setAttribute('aria-label',label);const title=document.createElement('div'); title.className='explorer-title'; title.appendChild(text('span',state.deviceName?label+' - '+state.deviceName:label)); if(state.tab==='processes'){const refresh=button('Refresh','refresh',()=>action('refresh')); refresh.disabled=!state.serial||state.active===false; title.appendChild(refresh);} root.appendChild(title);root.appendChild(state.tab==='files'?filesView():window.DeviceProcessesView.render({state,action,renderParent:render,button,text}));if(state.busy)root.appendChild(text('div',state.message||'Busy','progress'));}
+  // 原位更新标题与活动内容，Files原有面板不从root移除，进度独立增删；stable file tree DOM及浏览器anchor回归覆盖展开/异步快照/定位后的稳定位置，原surface回归保持视图互斥。
+  function render() {
+    const label = state.tab === 'processes' ? 'Processes' : 'Device Explorer'; root.setAttribute('aria-label', label);
+    let title = root.children[0];
+    if (!title) { title = document.createElement('div'); title.className = 'explorer-title'; root.appendChild(title); }
+    title.replaceChildren(text('span', state.deviceName ? label + ' - ' + state.deviceName : label));
+    if (state.tab === 'processes') { const refresh = button('Refresh', 'refresh', () => action('refresh')); refresh.disabled = !state.serial || state.active === false; title.appendChild(refresh); }
+    const previous = root.children[1];
+    const surface = state.tab === 'files' ? filesView(previous) : window.DeviceProcessesView.render({ state, action, renderParent: render, button, text });
+    if (!previous) root.appendChild(surface); else if (previous !== surface) root.replaceChild(surface, previous);
+    const progress = root.querySelector('.progress');
+    if (state.busy) { if (progress) progress.textContent = state.message || 'Busy'; else root.appendChild(text('div', state.message || 'Busy', 'progress')); }
+    else progress?.remove();
+  }
   // 键盘导航支持上下左右、Enter、进程复制和菜单取消，保持固定行选择。
   function keyboard(e){if(root.hidden)return;if(e.key==='Escape'){closeMenu();return;}if(window.DeviceProcessesView.handleKeyboard(state,e))return;if(state.tab!=='files'||!state.selected.length)return;const all=visibleEntries(),i=all.findIndex(x=>x.path===state.selected[0]),cur=all[i];if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const n=Math.max(0,Math.min(all.length-1,i+(e.key==='ArrowDown'?1:-1)));state.selected=[all[n].path];render();}else if(e.key==='ArrowRight'&&cur&&(cur.kind==='directory'||cur.directoryLink)){e.preventDefault();if(!state.expanded.has(cur.path))toggleDir(cur);}else if(e.key==='ArrowLeft'&&cur){e.preventDefault();if(state.expanded.has(cur.path))state.expanded.delete(cur.path);else state.selected=[parentOf(cur.path)];render();}else if(e.key==='Enter'&&cur){e.preventDefault();cur.kind==='directory'?toggleDir(cur):action('open',{paths:[cur.path]});}}
   // 根拖放事件解析行目标，内部移动保留、移到空白/外部或结束清理；回归B/C/E验证类与选择路径及drop失败。

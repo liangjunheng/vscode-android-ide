@@ -7,12 +7,12 @@ const { transformSync } = require('esbuild');
 const pkg = require('../package.json');
 const runningSource = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
 
-// 在现有 Node 运行器中转译实际 TS 模块；只替换宿主/设备依赖，不新增生产导出。
+// 转译真实TS，注入宿主AbortController与计时器供连接所有权使用，仅替换宿主/设备依赖；node --test tests/device-manager-ui.test.js验证设备切换、清理、标题栏配对和激活接线，不引入调试器。
 function load(name, dependencies) {
   const src = fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8');
   const module = { exports: {} };
   vm.runInNewContext(transformSync(src, { loader: 'ts', format: 'cjs' }).code, {
-    module, exports: module.exports, Buffer, console, process, setInterval, clearInterval,
+    module, exports: module.exports, Buffer, console, process, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
     require: (id) => Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
   });
   return module.exports;
@@ -28,7 +28,8 @@ test('mirror selection clears previous frames and never falls back to another ph
   let stopped = 0;
   mirror.view = { visible: true, webview: { postMessage: (m) => messages.push(m) } };
   mirror.pickMode = () => 'screencap';
-  mirror.startScreencap = () => started.push(mirror.serial);
+  // 替身启动成功后持有活动循环，符合mirrorConnected契约；设备回归断言切换/清空与错误，不将已启动流伪装断开。
+  mirror.startScreencap = () => { started.push(mirror.serial); mirror.loop = {}; };
   mirror.session = { stop: () => stopped++ };
   await mirror.select({ serial: 'phone' });
   assert.equal(stopped, 1);
@@ -72,9 +73,9 @@ test('title selector replaces device list and registers only the mirror view', a
   assert.match(runningSource, /id=\"open-dm\"/);
   assert.match(runningSource, /send\(\{type:'openDM'\}\)/);
   const handlers = {}, views = [], errors = [];
-  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) } };
+  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
-  load('extension', { './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
   assert.deepEqual(views, ['android.runningDevice', 'android.logcat']);
   await handlers['android.refresh']();
   assert.match(errors[0], /adb unavailable/);
@@ -204,7 +205,8 @@ test('dropdown selection messages switch the actual mirrored serial', async () =
   const started = [], messages = [];
   mirror.view = { visible: true, webview: { postMessage: m => messages.push(m) } };
   mirror.pickMode = () => 'screencap';
-  mirror.startScreencap = () => started.push(mirror.serial);
+  // 替身启动成功后持有活动循环，符合mirrorConnected契约；设备回归断言切换/清空与错误，不将已启动流伪装断开。
+  mirror.startScreencap = () => { started.push(mirror.serial); mirror.loop = {}; };
   await mirror.onMessage({ type: 'select', serial: 'one' });
   await mirror.onMessage({ type: 'select', serial: 'two' });
   assert.deepEqual(started, ['one', 'two']);

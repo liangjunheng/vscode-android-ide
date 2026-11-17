@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs/promises';
 import { createReadStream, createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
-import { Readable, Writable } from 'stream';
+import { Readable, Writable, Transform } from 'stream';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { adbPath, sdkRoot } from './sdk';
@@ -20,48 +20,99 @@ function safeName(value: string): void { if (!value || value === '.' || value ==
 // 结构化本地存在检查只将ENOENT当缺失，权限失败必须传播；文件回归断言拒绝覆盖及只读目录。
 async function exists(value: string): Promise<boolean> { try { await fs.lstat(value); return true; } catch (error: any) { if (error.code === 'ENOENT') { return false; } throw error; } }
 
+// 原始输入按3字节跨块编码，只保留不足3字节尾部；进度回调接收编码前字节，流错误交由run回收。
+// 编解码共享回归：tests/device-explorer-files.test.js，Node>=22 VM+原生流/CLI文本转换替身，node --test tests/device-explorer-files.test.js。
+// binary shell transport preserves all byte values across arbitrary chunks and text-mode CLI验证单向字节/跨块/计数；strict base64 output rejects invalid padding truncated and noncanonical data验证非法输入拒绝。
+function encodeBase64(count: (data: Buffer) => void): Transform {
+  let tail = Buffer.alloc(0);
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      try {
+        count(chunk);
+        const data = Buffer.concat([tail, chunk]), end = data.length - data.length % 3;
+        tail = Buffer.from(data.subarray(end));
+        callback(null, data.subarray(0, end).toString('base64'));
+      } catch (error) { callback(error instanceof Error ? error : new Error(String(error))); }
+    },
+    flush(callback) { callback(null, tail.toString('base64')); }
+  });
+}
+
+// 输出只接受标准base64和CR/LF折行，跨块保留不足4字符尾部并验证规范padding位；禁止Buffer.from的宽松容错，回归见编解码共享映射。
+function decodeBase64(count: (data: Buffer) => void): Transform {
+  let tail = '', padded = false;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      try {
+        const text = chunk.toString('latin1').replace(/[\r\n]/g, '');
+        if (/[^A-Za-z0-9+/=]/.test(text) || (padded && text.length)) { throw new Error('Invalid device base64 output'); }
+        const data = tail + text, end = data.length - data.length % 4, complete = data.slice(0, end);
+        const padding = complete.indexOf('='), last = complete.slice(-4);
+        if (padding !== -1 && (padding < complete.length - 2 || !/^[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]=|==)$/.test(last) || end !== data.length)) { throw new Error('Invalid device base64 padding'); }
+        if (padding !== -1 && Buffer.from(last, 'base64').toString('base64') !== last) { throw new Error('Noncanonical device base64 padding'); }
+        const decoded = Buffer.from(complete, 'base64');
+        tail = data.slice(end); padded ||= complete.endsWith('=');
+        count(decoded); callback(null, decoded);
+      } catch (error) { callback(error instanceof Error ? error : new Error(String(error))); }
+    },
+    flush(callback) { callback(tail.length ? new Error('Truncated device base64 output') : undefined); }
+  });
+}
+
 // 设备文件操作由实例固定串号和访问身份，所有命令流/子进程/临时项都有明确所有权。
-// 回归：npm test tests/device-explorer-files.test.js 与隔离目录真机二进制传输核对。
+// 全部经run的stat/list/create/remove/listPackages/pull/push调用共享其编码/错误/回收回归映射；Node>=22，node --test tests/device-explorer-files.test.js。
 export class DeviceExplorerFiles {
+  // 同一设备访问身份内缓存find能力，后续目录展开跳过重复能力探测；连接/实例重建时自然重新确认。
+  private listingMode?: 'find' | 'stat';
+
   // 不自动root或绕过权限；run-as只接受合法包名，回归验证访问上下文和拒绝注入。
   constructor(readonly serial: string, readonly access: Access = {}) {
     if (!serial || serial.includes('\0')) { throw new Error('Invalid device serial'); }
     if (access.runAs && !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(access.runAs)) { throw new Error('Invalid run-as package'); }
   }
 
-  // ADB shell -T保持二进制及shell v2退出码，脚本作为唯一远端参数；回归断言正确身份与shell边界。
+  // 把完整base64管线放入固定run-as/su身份，shell -T仅保证无PTY，二进制由run编码边界保护；run-as and su apply verified access identity to remote scripts及run共享回归验证身份/错误语义。
   private script(script: string): string {
     return this.access.runAs ? 'run-as ' + quote(this.access.runAs) + ' sh -c ' + quote(script) : this.access.su ? 'su 0 sh -c ' + quote(script) : script;
   }
 
-  // 先注册close/error再输送流，取消等待close及pipeline完成；回归断言磁盘写完前不返回和错误清理。
+  // 输入远端脚本及流，统一ASCII base64边界消除ADB文本转换；pipefail保留shell v2退出码/独立stderr，身份包裹整个管线。
+  // run共享回归：编解码共享映射；shell transport preserves remote errors metadata limits and cancellation验证错误/16MiB解码上限/取消等待close及流回收。
+  // large binary streams honor backpressure and failed transfers clean staging without replacing targets验证1MiB跨块慢写/原字节计数、下载损坏不覆盖原目标、上传失败清stage不执行mv。
+  // opt-in device toolbar transfers preserve independent byte counts hashes and refresh results在EXPLORER_ADB/EXPLORER_DEVICE可用时验证独立单向哈希、已知下载字节、list/remove及隔离目录清理。
   private async run(script: string, options: { signal?: AbortSignal; input?: Readable; output?: Writable; progress?: (bytes: number) => void } = {}): Promise<Buffer> {
     options.signal?.throwIfAborted();
-    const command = this.script(script); if (command.includes('\0')) { throw new Error('NUL is not permitted in adb arguments'); }
+    const command = this.script('set -o pipefail; ' + (options.input ? 'base64 -d | ' : '') + '{\n' + script + '\n} | base64');
+    if (command.includes('\0')) { throw new Error('NUL is not permitted in adb arguments'); }
     const child = spawn(adbPath(), ['-s', this.serial, 'shell', '-T', command], { env: { ...process.env, ANDROID_HOME: sdkRoot(), ANDROID_SDK_ROOT: sdkRoot() }, shell: false, windowsHide: true });
     let failure: Error | undefined, stderr = '', bytes = 0, size = 0; const chunks: Buffer[] = [];
     const closed = new Promise<number | null>(resolve => child.once('close', resolve));
-    const failed = (error: Error) => { failure ??= error; child.kill(); };
+    const stopStreams = () => { options.input?.destroy(); options.output?.destroy(); child.stdin.destroy(); child.stdout.destroy(); };
+    const failed = (error: Error) => { failure ??= error; child.kill(); stopStreams(); };
     child.once('error', error => { failure ??= error; });
-    const abort = () => child.kill(); options.signal?.addEventListener('abort', abort, { once: true });
+    const abort = () => { child.kill(); stopStreams(); }; options.signal?.addEventListener('abort', abort, { once: true });
     child.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-65536); });
-    // 进度来自实际流字节，metadata正文有界保留；回归断言二进制零字节及大块背压。
-    const count = (data: Buffer) => { bytes += data.length; try { options.progress?.(bytes); } catch (error) { failed(error instanceof Error ? error : new Error(String(error))); } };
-    if (!options.input) { child.stdout.on('data', count); }
-    let output: Promise<void> | undefined, input: Promise<void> | undefined;
-    if (options.output) { output = pipeline(child.stdout, options.output).catch(error => failed(error)); }
-    else { child.stdout.on('data', data => { size += data.length; if (size > 16 * 1024 * 1024) { failed(new Error('Device metadata exceeds output limit')); } else { chunks.push(Buffer.from(data)); } }); }
-    if (options.input) { options.input.on('data', count); input = pipeline(options.input, child.stdin).catch(error => failed(error)); } else { child.stdin.end(); }
+    const count = (data: Buffer) => { bytes += data.length; options.progress?.(bytes); };
+    const decoded = decodeBase64(data => { if (!options.input) { count(data); } });
+    const destination = options.output || new Writable({ write(data: Buffer, _encoding, callback) {
+      size += data.length;
+      if (size > 16 * 1024 * 1024) { callback(new Error('Device metadata exceeds output limit')); }
+      else { chunks.push(Buffer.from(data)); callback(); }
+    } });
+    const output = pipeline(child.stdout, decoded, destination).catch(failed);
+    const input = options.input ? pipeline(options.input, encodeBase64(count), child.stdin).catch(failed) : undefined;
+    if (!options.input) { child.stdin.end(); }
     if (options.signal?.aborted) { abort(); }
     try {
       const code = await closed;
-      if (code !== 0 || options.signal?.aborted || failure) { options.input?.destroy(); options.output?.destroy(); }
+      if (code !== 0) { failure ??= new Error(stderr.trim() || 'ADB shell exited ' + code); }
+      if (code !== 0 || options.signal?.aborted || failure) { stopStreams(); }
       await Promise.all([input, output]);
       options.signal?.throwIfAborted();
+      if (code !== 0 && stderr.trim()) { throw new Error(stderr.trim()); }
       if (failure) { throw failure; }
-      if (code !== 0) { throw new Error(stderr.trim() || 'ADB shell exited ' + code); }
       return Buffer.concat(chunks);
-    } finally { options.signal?.removeEventListener('abort', abort); options.input?.off('data', count); child.stdout.off('data', count); }
+    } finally { options.signal?.removeEventListener('abort', abort); }
   }
 
   // 兼容分支每128路径一次stat，按参数顺序解码纯数字/权限并整批printf，链接后缀标记保留末尾换行；files与真机回归验证完整字段。
@@ -126,15 +177,17 @@ __ANDROID_STAT_FIELDS__
     if (entries.length !== 1 || entries[0].path !== file) { throw new Error('Invalid stat response'); } return entries[0];
   }
 
-  // 支持find -printf时原生批量读取直接子项和链接，否则用128项stat兼容分支；同一ADB命令检测能力，不重试真实失败；files/真机回归验证完整字段与耗时。
+  // 每次保留目录存在/权限检查，只缓存find -printf能力选择；支持原生批量读取或128项stat兼容分支，失败不伪装空目录；files/真机回归验证字段、缓存和耗时。
   async list(value: string, signal?: AbortSignal): Promise<ExplorerEntry[]> {
     const directory = remote(value), base = quote(directory === '/' ? '' : directory);
     const check = '[ -d ' + quote(directory) + ' ] && [ -r ' + quote(directory) + ' ] && [ -x ' + quote(directory) + ' ] || { printf ' + quote('Permission denied or not a directory: ' + directory) + ' >&2; exit 1; }; ';
     const batch = this.metadata() + '; set --; for p in ' + base + '/* ' + base + '/.[!.]* ' + base + '/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; set -- "$@" "$p"; if [ "$#" -eq 128 ]; then emit_metadata "$@" || exit; set --; fi; done; if [ "$#" -gt 0 ]; then emit_metadata "$@"; fi';
     const fast = 'printf ' + quote(String.raw`F\0`) + '; find -H ' + quote(directory) + ' -mindepth 1 -maxdepth 1 -printf ' + quote(String.raw`%p\0%M\0%s\0%T@\0%l\0`) + ' || exit; set --; for p in ' + base + '/* ' + base + '/.[!.]* ' + base + '/..?*; do if [ -L "$p" ] && [ -d "$p" ]; then set -- "$@" "$p"; fi; done; printf ' + quote(String.raw`\0`) + '; if [ "$#" -gt 0 ]; then printf ' + quote(String.raw`%s\0`) + ' "$@"; fi';
-    const script = check + "if find / -maxdepth 0 -printf '' >/dev/null 2>&1; then " + fast + '; else printf ' + quote(String.raw`B\0`) + '; ' + batch + '; fi';
+    const listing = this.listingMode === 'find' ? fast : this.listingMode === 'stat' ? 'printf ' + quote(String.raw`B\0`) + '; ' + batch : "if find / -maxdepth 0 -printf '' >/dev/null 2>&1; then " + fast + '; else printf ' + quote(String.raw`B\0`) + '; ' + batch + '; fi';
+    const script = check + listing;
     const data = await this.run(script, { signal });
     if (data[1] !== 0 || (data[0] !== 70 && data[0] !== 66)) { throw new Error('Invalid device listing format'); }
+    this.listingMode = data[0] === 70 ? 'find' : 'stat';
     const entries = data[0] === 70 ? this.parseListing(data.subarray(2)) : this.parse(data.subarray(2));
     if (entries.some(entry => path.posix.dirname(entry.path) !== directory)) { throw new Error('Device listing escaped parent directory'); }
     return entries;
@@ -171,7 +224,7 @@ __ANDROID_STAT_FIELDS__
     await walk(remote(value), ''); return plan;
   }
 
-  // 二进制流先写拥有的本地stage，全部完成才提交目标，取消/错误清理；回归及真机哈希验证避免截断伪成功。
+  // 解码后的原字节先写拥有的本地stage，全部完成才提交目标，取消/错误清理；字节/背压/保留原目标及真机单向断言见run共享回归映射。
   async pull(value: string, local: string, options: TransferOptions = {}): Promise<void> {
     options.signal?.throwIfAborted(); const destination = path.resolve(local); safeName(path.basename(destination));
     if (await exists(destination) && !options.overwrite) { throw new Error('Destination exists; overwrite confirmation required'); }
@@ -202,7 +255,7 @@ __ANDROID_STAT_FIELDS__
     await walk(path.resolve(local), ''); return plan;
   }
 
-  // 上传流进入同目录唯一远端stage，mv完成且stage消失才报成功；回归覆盖run-as身份、覆盖、失败清理和真实字节。
+  // 编码流在远端同一身份解码到唯一stage，mv完成且stage消失才报成功；原字节进度、错误清理及独立remote stat/wc/sha256见run共享回归映射。
   async push(local: string, value: string, options: TransferOptions = {}): Promise<void> {
     options.signal?.throwIfAborted(); const destination = remote(value); if (destination === '/') { throw new Error('Cannot replace device root'); }
     const plan = await this.planPush(local), staging = path.posix.join(path.posix.dirname(destination), '.device-explorer-' + randomUUID());

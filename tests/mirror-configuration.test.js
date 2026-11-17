@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-// 执行真实 activate 配置接线，模拟 VS Code 有效值及更新目标；npm test 回归断言重启恢复、工作区优先和资源释放。
+// 执行真实activate配置及Build/Explorer接线；Node>=22 VM回归断言恢复、工作区优先、资源归属和provider延迟取值/undefined/错误传播，保留HEAD配置命名空间。
 function fixture() {
   const f = { value: false, workspaceValue: undefined, workspaceMode: undefined, globalMode: undefined, writes: [], applied: [], errors: [], instances: [], subscriptions: [], fail: false };
   const listener = { disposed: false, dispose() { this.disposed = true; } };
@@ -25,7 +25,17 @@ function fixture() {
     constructor(ext, action, preference) { this.preference = preference; f.instances.push(this); }
     async applyDeviceViewMode(visible) { if (f.rejectApply) throw new Error('stream failed'); f.applied.push(visible); }
   }
-  const deps = { './deviceExplorer': { DeviceExplorerController: class { async dispose() {} } }, vscode, './runningDevices': { RunningDeviceView: Running }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './logcat': { LogcatView: class {} }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} };
+  const deps = { './deviceExplorer': { DeviceExplorerController: class {
+    // 保存provider但激活时不读取；真实activate闭包回归验证Build尚未构造时无访问。
+    constructor(post, currentApplicationId) { this.currentApplicationId = currentApplicationId; f.explorer = this; }
+    async dispose() {}
+  } }, vscode, './runningDevices': { RunningDeviceView: Running }, './androidBuild': { AndroidBuildController: class {
+    // 记录Build实例与读取次数，闭包回归断言取值不缓存且缺失状态可传播。
+    constructor() { f.build = this; this.reads = 0; this.applicationId = 'com.example.app'; }
+    // 返回当前包名/undefined或真实错误；wiring回归断言读取次数与原异常。
+    currentApplicationId() { this.reads++; if (this.error) throw this.error; return this.applicationId; }
+    dispose() {}
+  } }, './logcat': { LogcatView: class {} }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
   f.activate = () => module.exports.activate({ extensionPath: '', subscriptions: f.subscriptions });
@@ -84,4 +94,18 @@ test('Processes mode persists across activation and respects live workspace conf
   f.activate();assert.equal(f.instances.at(-1).preference.mode,'processes');
   const writes=f.writes.length;f.workspaceMode='hidden';f.listener({affectsConfiguration:key=>key==='android.deviceViewMode'});assert.deepEqual(f.applied,['hidden']);assert.equal(f.writes.length,writes);
   f.fail=true;await assert.rejects(f.instances.at(-1).preference.saveMode('mirror'),/read-only/);assert.equal(f.workspaceMode,'hidden');
+});
+
+// Node>=22执行真实activate：不在构造阶段访问Build，Explorer读取当前ID及缺失undefined，真实metadata故障仍原样传播。
+test('extension wires current Build application ID lazily and follows selection changes', () => {
+  const f = fixture(); f.activate();
+  assert.equal(f.build.reads, 0); assert.equal(typeof f.explorer.currentApplicationId, 'function');
+  assert.equal(f.explorer.currentApplicationId(), 'com.example.app');
+  f.build.applicationId = 'com.other.release';
+  assert.equal(f.explorer.currentApplicationId(), 'com.other.release'); assert.equal(f.build.reads, 2);
+  f.build.applicationId = undefined;
+  assert.equal(f.explorer.currentApplicationId(), undefined); assert.equal(f.build.reads, 3);
+  f.build.error = new Error('Invalid applicationId in metadata');
+  assert.throws(() => f.explorer.currentApplicationId(), error => error === f.build.error);
+  assert.ok(f.subscriptions.includes(f.build)); assert.ok(f.subscriptions.includes(f.explorer));
 });

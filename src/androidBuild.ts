@@ -35,9 +35,11 @@ function buildTargets(tasks: string[]): Target[] {
   return [...found.values()].filter(t => t.assemble && t.install).sort((a, b) => a.id.localeCompare(b.id));
 }
 
-// 从所选模块 APK metadata 读取包名，不扫描其他模块；npm test run/metadata 断言模块隔离、坏 JSON 和缺失。
-function packageFor(project: Project, target: Target): string {
+// 只解析所选项目/模块/变体的APK metadata；匹配缺失返回undefined，坏JSON/非法ID及IO故障原样抛错，不扫描其他模块。
+// 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言隔离、切换及缺失/损坏区别，metadata and launcher failures断言run/debug仍拒绝缺失。
+function applicationIdFor(project: Project, target: Target): string | undefined {
   const base = path.join(project.root, ...target.module.split(':'), 'build', 'outputs', 'apk');
+  // 递归收集所选模块APK目录内metadata路径；目录不存在为空，其他IO异常不吞，current application ID回归覆盖缺失与多变体。
   const visit = (dir: string): string[] => {
     if (!fs.existsSync(dir)) return [];
     return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
@@ -51,7 +53,15 @@ function packageFor(project: Project, target: Target): string {
     if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(meta.applicationId || '')) throw new Error('Invalid applicationId in ' + file);
     return meta.applicationId;
   }
-  throw new Error('No APK metadata for ' + target.label);
+  return undefined;
+}
+
+// 构建运行/调试要求已有所选目标metadata，缺失必须抛错；输入项目/目标，输出唯一包名，不将缺失伪装成功。
+// 回归：Node>=22，node --test tests/android-build.test.js；metadata and launcher failures验证run/debug缺失报错，run installs selected package验证所选包名及顺序。
+function packageFor(project: Project, target: Target): string {
+  const applicationId = applicationIdFor(project, target);
+  if (applicationId === undefined) throw new Error('No APK metadata for ' + target.label);
+  return applicationId;
 }
 
 // 管理单一操作、定向安装及输出资源；npm test android-build 回归执行所有动作及生命周期。
@@ -70,6 +80,17 @@ export class AndroidBuildController implements vscode.Disposable {
 
   // 保存状态出口并创建输出；npm test output 回归断言显示、截断及释放。
   constructor(private post: (message: any) => void) { this.output = vscode.window.createOutputChannel('Android Build'); }
+
+  // 只读取得当前项目/模块/变体的APK applicationId；无有效选择/对应metadata返回undefined供Explorer候选fallback，释放/不可信/坏metadata仍抛错。
+  // 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言多根/模块/变体隔离、切换、零副作用、缺失undefined及真实故障抛错。
+  currentApplicationId(): string | undefined {
+    if (this.disposed) throw new Error('Android build controller is disposed');
+    if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
+    const project = this.projects.find(p => p.id === this.projectId);
+    const target = buildTargets(project?.tasks || []).find(t => t.id === this.targetId);
+    if (!project || !target) return undefined;
+    return applicationIdFor(project, target);
+  }
 
   // 发布后端拥有的完整快照；npm test refresh/install/run/error 断言选择和状态。
   private state(status: string, error?: string): void {

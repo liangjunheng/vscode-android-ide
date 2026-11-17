@@ -3,7 +3,8 @@
 .process-filter,.process-sort{width:100%;min-width:0;height:26px;margin:0;padding:2px 6px;font:inherit;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--vscode-panel-border,#444));border-radius:3px;color:var(--vscode-input-foreground,var(--vscode-foreground))}
 .process-sort{appearance:none;-webkit-appearance:none;background-color:var(--vscode-dropdown-background,var(--vscode-input-background));color:var(--vscode-dropdown-foreground,var(--vscode-input-foreground));border-color:var(--vscode-dropdown-border,var(--vscode-input-border,var(--vscode-panel-border,#444)));padding-inline:9px 28px;border-radius:6px;cursor:pointer}.process-sort:hover{border-color:var(--vscode-focusBorder)}.process-sort:focus-visible{outline:0;border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px var(--vscode-focusBorder)}.process-sort option{background:var(--vscode-dropdown-background,var(--vscode-editorWidget-background));color:var(--vscode-dropdown-foreground,var(--vscode-foreground))}
 .process-sort-direction{width:26px;height:26px}
-.process-list{overflow:auto;flex:1;min-height:0;min-width:0;padding:2px;scrollbar-gutter:stable}
+/* 两侧对称预留滚动条空间，避免仅右侧gutter造成卡片偏移；layout深浅色240/320/728px矩阵断言左右间距相等且无横向溢出。 */
+.process-list{overflow:auto;flex:1;min-height:0;min-width:0;padding:2px;scrollbar-gutter:stable both-edges}
 .process-card{display:flex;flex-direction:column;width:100%;min-width:0;margin:0 0 10px;padding:5px;border:1px solid var(--vscode-panel-border,#444);border-radius:4px;background:var(--vscode-editorWidget-background,var(--vscode-editor-background));cursor:pointer}
 .process-card:last-child{margin-bottom:0}
 .process-card:hover{background:var(--vscode-list-hoverBackground)}

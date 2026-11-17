@@ -7,7 +7,7 @@ const { transformSync } = require('esbuild');
 const js = fs.readFileSync(path.join(__dirname, '../media/build-panel.js'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'utf8');
 
-// 执行面板完整脚本并记录真实 DOM 状态与宿主消息；npm test 回归涵盖按钮、状态、选择及空列表。
+// 执行完整面板脚本，输入初始可见状态并记录DOM/消息；node --test tests/build-panel-ui.test.js断言三模式互斥、宿主确认、按钮状态和空列表，不伪造旧Wi-Fi控件绑定。
 function fixture(initialVisible = true) {
   const nodes = {}, sent = [];
   let receive;
@@ -37,13 +37,14 @@ test('build panel UI renders safe options and routes all commands', () => {
   get('build-logcat').onclick();
   assert.equal(f.sent.at(-1).type, 'logcat');
   get('build-mirror').onclick();
-  assert.equal(f.sent.at(-1).type, 'setMirrorVisibility');
-  assert.equal(f.sent.at(-1).visible, false);
+  assert.equal(f.sent.at(-1).type, 'setDeviceViewMode');
+  assert.equal(f.sent.at(-1).mode, 'hidden');
   f.receive({ type: 'mirrorVisibility', visible: false });
   assert.equal(get('build-mirror')['aria-pressed'], 'false');
   assert.equal(get('build-mirror').title, 'Show mirroring');
   get('build-mirror').onclick();
-  assert.equal(f.sent.at(-1).visible, true);
+  assert.equal(f.sent.at(-1).type, 'setDeviceViewMode');
+  assert.equal(f.sent.at(-1).mode, 'mirror');
   f.receive({ type: 'mirrorVisibility', visible: true });
   assert.equal(get('build-mirror')['aria-pressed'], 'true');
   get('build-project').onchange();
@@ -51,8 +52,20 @@ test('build panel UI renders safe options and routes all commands', () => {
   get('build-target').onchange();
   assert.equal(f.sent.at(-1).action, 'target');
   for (const action of ['run', 'build', 'install', 'debug', 'refresh', 'output']) { get('build-' + action).onclick(); assert.equal(f.sent.at(-1).action, action); }
-  get('build-wifi').onclick();
-  assert.equal(f.sent.at(-1).type, 'pairDevice');
+  for (const mode of ['explorer', 'processes', 'mirror']) {
+    get('build-' + mode).onclick();
+    assert.equal(f.sent.at(-1).type, 'setDeviceViewMode');
+    assert.equal(f.sent.at(-1).mode, mode);
+    f.receive({ type: 'deviceViewMode', mode });
+    for (const candidate of ['mirror', 'explorer', 'processes']) assert.equal(get('build-' + candidate)['aria-pressed'], String(candidate === mode));
+    assert.equal(get('device-explorer').hidden, mode === 'mirror');
+    get('build-' + mode).onclick(); assert.equal(f.sent.at(-1).mode, 'hidden');
+    f.receive({ type: 'deviceViewMode', mode: 'hidden' });
+    for (const candidate of ['mirror', 'explorer', 'processes']) assert.equal(get('build-' + candidate)['aria-pressed'], 'false');
+    assert.equal(get('device-explorer').hidden, true);
+  }
+  assert.equal(get('build-wifi').onclick, undefined);
+  assert.equal(f.sent.some(message => message.type === 'pairDevice'), false);
   f.receive({ ...state, busy: true, status: 'Gradle :app:installDebug' });
   assert.equal(get('build-run-label').textContent, 'Stop');
   assert.equal(get('build-run').disabled, false);
@@ -95,10 +108,17 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.equal(calls.at(-1).status, 'Ready');
   for (const id of ['build-project', 'build-target', 'build-run', 'build-install', 'build-debug', 'build-status']) assert.ok(webview.html.includes('id="' + id + '"'));
   assert.ok(webview.html.includes('build-panel.js'));
-  const output = webview.html.indexOf('id="build-output"'), logcat = webview.html.indexOf('id="build-logcat"'), mirror = webview.html.indexOf('id="build-mirror"');
-  assert.ok(output < logcat && logcat < mirror);
+  const rowStart = webview.html.indexOf('<div class="build-device-row">'), actionsStart = webview.html.indexOf('<div class="build-actions">');
+  assert.ok(rowStart >= 0 && actionsStart > rowStart);
+  const row = webview.html.slice(rowStart, actionsStart), actions = webview.html.slice(actionsStart, webview.html.indexOf('id="build-status"'));
+  const positions = ['dev', 'build-mirror', 'build-explorer', 'build-processes'].map(id => row.indexOf('id="' + id + '"'));
+  assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])));
+  assert.equal(row.includes('id="build-output"'), false); assert.equal(row.includes('id="build-logcat"'), false);
+  assert.ok(actions.indexOf('id="build-output"') >= 0 && actions.indexOf('id="build-logcat"') > actions.indexOf('id="build-output"'));
+  assert.equal(actions.includes('id="build-mirror"'), false); assert.equal(webview.html.includes('id="build-wifi"'), false);
   assert.ok(css.includes('body.mirror-hidden #wrap'));
-  assert.ok(css.includes('repeat(7,minmax(0,26px))'));
+  assert.ok(css.includes('repeat(6,minmax(16px,26px))'));
+  assert.ok(css.includes('.build-view-modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))'));
   assert.ok(webview.html.indexOf('build-panel.css') > webview.html.indexOf('</style>'));
   assert.ok(css.includes('min-width:0'));
   assert.ok(css.includes('@media(max-width:260px)'));
@@ -109,7 +129,7 @@ test('build panel integration owns controller and connects both directions', asy
   let running, build;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
   class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } dispose() {} }
-  const deps = { vscode: { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {} } }, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {} };
+  const deps = { vscode: { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {} } }, './deviceExplorer': { DeviceExplorerController: class { async dispose() {} } }, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {} };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
   module.exports.activate({ extensionPath: '', subscriptions });

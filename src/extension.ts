@@ -32,7 +32,8 @@ export function activate(ctx: vscode.ExtensionContext) {
     },
   };
   // 提供方同串号幂等阻止回传循环；device-selection-sync回归验证双方选择、隐藏和无设备日志入口。
-  const explorer = new DeviceExplorerController(message => running.publishBuildState(message));
+  // 定位时才读取Build当前包名；缺目标返回undefined交Explorer候选选择，不缓存或吞错。mirror-configuration的wiring回归验证取值时序、切换和错误传播。
+  const explorer = new DeviceExplorerController(message => running.publishBuildState(message), () => build.currentApplicationId());
   const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer);
   const build = new AndroidBuildController(message => running.publishBuildState(message));
   const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined));

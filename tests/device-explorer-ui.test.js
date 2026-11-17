@@ -2,9 +2,9 @@ const test=require('node:test');const assert=require('node:assert/strict');const
 const os=require('node:os');
 const processesCss=fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.css'),'utf8');
 // 执行真实前端并记录DOM/消息，注入的FileReader与同步ACK仅控制外部事件；上传回归不改写生产函数。
-function boot(options={}){const sent=[];const nodes={};const created=[];function el(tag){return {tagName:tag,children:[],style:{setProperty(){}},dataset:{},classList:{add(name){this._names=this._names||new Set();this._names.add(name)},remove(name){if(this._names)this._names.delete(name)},toggle(name,force){const next=force===undefined?!this.contains(name):force;if(next)this.add(name);else this.remove(name);return next},contains(name){return !!(this._names&&this._names.has(name))}},className:'',textContent:'',appendChild(x){this.children.push(x);return x},replaceChildren(...x){this.children=x},addEventListener(type,fn){this['on'+type]=fn},setAttribute(key,value){this[key]=value;},remove(){},querySelectorAll(selector){const found=[];const visit=node=>{for(const child of node.children||[]){if(child.className===selector.slice(1))found.push(child);visit(child);}};visit(this);return found},contains(node){return node===this||this.children.some(child=>child.contains(node))},querySelector(){return null},getBoundingClientRect(){return {width:0,height:0}},select(){},click(){this.onclick?.()}}}const doc={getElementById:id=>nodes[id]||(nodes[id]=el('div')),createElement:tag=>{const node=el(tag);created.push(node);return node;},body:el('body'),addEventListener(){}};nodes['device-explorer']=el('section');const ctx={document:doc,window:{send:m=>sent.push(m),addEventListener(type,fn){if(type==='message')this.message=fn}},navigator:{clipboard:{writeText:async v=>{ctx.copied=v}}},send:m=>{sent.push(m);options.onSend?.(m,ctx);},AbortController,Intl:options.Intl||Intl,FileReader:options.FileReader||UploadReader,innerWidth:1000,innerHeight:800,console,Math,Date,Set,Map,Promise,Uint8Array,ArrayBuffer,btoa:s=>Buffer.from(s,'binary').toString('base64'),setTimeout,clearTimeout};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.js'),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.js'),'utf8'),ctx);return {ctx,sent,created,api:ctx.window.__deviceExplorer,root:nodes['device-explorer']}}
+function boot(options={}){const sent=[];const nodes={};const created=[];function el(tag){return {tagName:tag,children:[],style:{setProperty(){}},dataset:{},classList:{add(name){this._names=this._names||new Set();this._names.add(name)},remove(name){if(this._names)this._names.delete(name)},toggle(name,force){const next=force===undefined?!this.contains(name):force;if(next)this.add(name);else this.remove(name);return next},contains(name){return !!(this._names&&this._names.has(name))}},className:'',textContent:'',appendChild(x){return this.insertBefore(x,null)},insertBefore(x,before){if(x.parentNode)x.parentNode.removeChild(x);const index=before?this.children.indexOf(before):this.children.length;this.children.splice(index,0,x);x.parentNode=this;return x},removeChild(x){const index=this.children.indexOf(x);if(index>=0)this.children.splice(index,1);x.parentNode=null;return x},replaceChild(x,previous){const index=this.children.indexOf(previous);this.removeChild(previous);if(x.parentNode)x.parentNode.removeChild(x);this.children.splice(index,0,x);x.parentNode=this;return previous},replaceChildren(...x){for(const child of this.children)child.parentNode=null;this.children=[];for(const child of x)this.appendChild(child)},addEventListener(type,fn){this['on'+type]=fn},setAttribute(key,value){this[key]=value;},remove(){this.parentNode?.removeChild(this)},querySelectorAll(selector){const found=[];const visit=node=>{for(const child of node.children||[]){if(selector.startsWith('.')?child.className===selector.slice(1):child.tagName===selector)found.push(child);visit(child);}};visit(this);return found},contains(node){return node===this||this.children.some(child=>child.contains(node))},querySelector(selector){return this.querySelectorAll(selector)[0]||null},clientHeight:0,getBoundingClientRect(){return {width:0,height:0}},scrollIntoView(options){this.scrolled=options},select(){},click(){if(!this.disabled)return this.onclick?.()}}}const doc={getElementById:id=>nodes[id]||(nodes[id]=el('div')),createElement:tag=>{const node=el(tag);created.push(node);return node;},body:el('body'),addEventListener(){}};nodes['device-explorer']=el('section');const ctx={document:doc,window:{send:m=>sent.push(m),addEventListener(type,fn){if(type==='message')this.message=fn}},navigator:{clipboard:{writeText:async v=>{ctx.copied=v}}},send:m=>{sent.push(m);options.onSend?.(m,ctx);},AbortController,Intl:options.Intl||Intl,FileReader:options.FileReader||UploadReader,innerWidth:1000,innerHeight:800,console,Math,Date,Set,Map,Promise,Uint8Array,ArrayBuffer,btoa:s=>Buffer.from(s,'binary').toString('base64'),setTimeout,clearTimeout};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.js'),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.js'),'utf8'),ctx);return {ctx,sent,created,api:ctx.window.__deviceExplorer,root:nodes['device-explorer']}}
 // CSS回归直接读取独立Processes资源，验证窄面板左右padding和卡片间距不会只依赖浏览器矩阵。
-test('Processes CSS keeps compact balanced list spacing',()=>{assert.match(processesCss,/\.process-list\{[^}]*padding:2px[^}]*scrollbar-gutter:stable\}/);assert.match(processesCss,/\.process-card\{[^}]*margin:0 0 10px;padding:5px/);});
+test('Processes CSS keeps compact balanced list spacing',()=>{assert.match(processesCss,/\.process-list\{[^}]*padding:2px[^}]*scrollbar-gutter:stable both-edges\}/);assert.match(processesCss,/\.process-card\{[^}]*margin:0 0 10px;padding:5px/);});
 
 test('Explorer sends ready and preserves expanded tree while safely rendering names',()=>{const b=boot();assert.equal(b.sent[0].type,'explorer');assert.equal(b.sent[0].action,'ready');b.api.receive({type:'explorerState',serial:'s',deviceName:'<Phone>',tab:'files'});b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/A',name:'A',kind:'directory'},{path:'/z<bad>',name:'<bad>',kind:'file'}]});b.api.state.expanded.add('/A');b.api.receive({type:'explorerFiles',path:'/A',entries:[{path:'/A/x',name:'x',kind:'file'}]});assert.equal(b.api.state.expanded.has('/A'),true);assert.equal(b.root.children[0].children[0].textContent.includes('<Phone>'),true);assert.equal(b.root.children[0].children.length,1)});
 test('Explorer protocol exposes tab and process selection ordering',()=>{const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'processes'});b.api.receive({type:'explorerProcesses',processes:[{pid:2,name:'z'},{pid:1,name:'A'}]});assert.equal(b.api.state.processes[0].pid,2);assert.equal(b.root.children.length>0,true);b.api.state.processSelected=1;b.ctx.document.dispatchEvent?.({})});
@@ -108,6 +108,65 @@ test('host context events clear hovered upload targets',()=>{
     assert.equal(b.api.state.dragTarget,'/a'); assert.equal(row.classList.contains('drop-target'),true);
     b.api.receive(message);assert.equal(b.api.state.dragTarget,null);assert.equal(row.classList.contains('drop-target'),false);
   }
+});
+
+// 六按钮逐项经过真实事件，验证名称/图标/消息路径以及上传输入与最终ACK，不把“存在按钮”视为功能通过。
+test('Explorer toolbar exposes six working actions',async()=>{
+  const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});
+  b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/file',name:'file',kind:'file'}]});
+  b.root.children[1].children[2].children[1].onclick({});
+  const bar=b.root.children[1].children[0], buttons=bar.children.filter(n=>n.tagName==='button');
+  assert.deepEqual(buttons.map(n=>n.title),['New Directory','Download','Upload','Delete','Refresh','Locate App Data']);
+  assert.deepEqual(buttons.map(n=>n['aria-label']),buttons.map(n=>n.title));
+  assert.deepEqual(buttons.map(n=>n.children[0].className),['explorer-toolbar-glyph explorer-glyph-new-folder','explorer-toolbar-glyph explorer-glyph-download','explorer-toolbar-glyph explorer-glyph-upload','explorer-toolbar-glyph explorer-glyph-delete','explorer-toolbar-glyph explorer-glyph-refresh','explorer-toolbar-glyph explorer-glyph-locate']);
+  for(const [index,action] of [[0,'newDirectory'],[1,'download'],[3,'delete'],[4,'refresh'],[5,'locateApp']]){
+    const before=b.sent.length;buttons[index].click();assert.equal(b.sent.length,before+1);assert.equal(b.sent.at(-1).action,action);
+    if(index===0)assert.equal(b.sent.at(-1).parent,'/');if(index===1||index===3)assert.deepEqual(Array.from(b.sent.at(-1).paths),['/file']);
+  }
+  const input=bar.children.find(n=>n.type==='file');let opened=0;input.onclick=()=>opened++;
+  buttons[2].click();assert.equal(opened,1);assert.equal(input.dataset.target,'/');
+  input.files=[uploadFile(0)];await input.onchange();assert.equal(b.sent.filter(m=>m.action==='uploadEnd').length,1);
+  assert.equal(b.api.state.transfer,null);assert.equal(b.sent.some(m=>m.action==='filter'),false);
+});
+// DOM替身遵守原生disabled点击规则；覆盖空设备、无选择、忙碌、传输与非活动视图的每一个按钮。
+test('toolbar disabled states prevent all unavailable actions',()=>{
+  const b=boot(),buttons=()=>b.root.children[1].children[0].children.filter(n=>n.tagName==='button');
+  const noClick=()=>{const before=b.sent.length;for(const button of buttons())button.click();assert.equal(b.sent.length,before);};
+  assert.ok(buttons().every(n=>n.disabled));noClick();
+  b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  assert.deepEqual(buttons().map(n=>n.disabled),[false,true,false,true,false,false]);
+  for(const patch of [{busy:true},{busy:false,active:false},{active:true,transfer:{}}]){
+    b.api.receive({type:'explorerState',serial:'s',tab:'files',...patch});assert.ok(buttons().every(n=>n.disabled));noClick();
+  }
+  b.api.state.transfer=null;
+});
+// 宿主成功定位只使用已加载的真实快照；展开/选中/滚动原子完成，无额外list；旧设备和非活动消息不得越界。
+test('app directory reveal expands ancestors and preserves ownership',()=>{
+  const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  const chain=['/','/data','/data/data','/data/data/com.example.app'];
+  for(let i=0;i<chain.length;i++)b.api.receive({type:'explorerFiles',path:chain[i],entries:i+1<chain.length?[{path:chain[i+1],name:chain[i+1].split('/').pop(),kind:'directory'}]:[]});
+  const before=b.sent.length;b.api.receive({type:'explorerReveal',serial:'s',path:chain[3]});
+  assert.deepEqual(Array.from(b.api.state.selected),[chain[3]]);for(const p of chain)assert.ok(b.api.state.expanded.has(p));
+  const row=b.root.querySelectorAll('.file-row').find(n=>n.dataset.path===chain[3]);
+  assert.ok(row.classList.contains('selected'));assert.equal(row['aria-selected'],'true');assert.equal(row.scrolled.block,'start');assert.equal(b.sent.length,before);
+  b.api.receive({type:'explorerReveal',serial:'other',path:'/data'});assert.equal(b.api.state.selected[0],chain[3]);
+  b.api.receive({type:'explorerState',serial:'s',tab:'files',active:false});b.api.receive({type:'explorerReveal',serial:'s',path:'/data'});assert.equal(b.api.state.selected[0],chain[3]);
+  b.api.receive({type:'explorerState',serial:'s',tab:'processes',active:true});b.api.receive({type:'explorerReveal',serial:'s',path:'/data'});assert.equal(b.api.state.selected[0],chain[3]);
+  b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});b.root.hidden=true;b.api.receive({type:'explorerReveal',serial:'s',path:'/data'});assert.equal(b.api.state.selected[0],chain[3]);b.root.hidden=false;
+  b.api.receive({type:'explorerReveal',serial:'s',path:'/missing'});
+  assert.match(b.api.state.error,/no longer available/);assert.equal(b.api.state.selected[0],chain[3]);
+});
+
+// 稳定DOM必须由真实生产render维持，而不是测试替身恢复scrollTop；覆盖行元数据更新、展开、异步子快照、进度和设备切换。
+test('stable file tree DOM preserves scroll owners and keyed selected rows',()=>{
+  const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/folder',name:'folder',kind:'directory'}]});
+  const surface=b.root.children[1],list=surface.children[2],head=list.children[0],row=list.children[1];list.scrollTop=120;list.scrollLeft=40;
+  row.onclick({});b.api.receive({type:'explorerFiles',path:'/folder',entries:[{path:'/folder/a',name:'a',kind:'file'}]});
+  assert.equal(b.root.children[1],surface);assert.equal(surface.children[2],list);assert.equal(list.children[0],head);assert.equal(list.children[1],row);assert.equal(row['aria-selected'],'true');assert.equal(list.scrollTop,120);assert.equal(list.scrollLeft,40);
+  b.api.receive({type:'explorerProgress',busy:true,message:'Reading directory'});b.api.receive({type:'explorerProgress',busy:false});assert.equal(surface.children[2],list);assert.equal(list.children[1],row);
+  b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/folder',name:'renamed',kind:'directory',permissions:'drwx'}]});assert.equal(list.children[1],row);assert.equal(row.children[0].children[2].textContent,'renamed');assert.equal(row.children[1].textContent,'drwx');
+  b.api.receive({type:'explorerState',serial:'other',tab:'files',active:true});assert.notEqual(b.root.children[1],surface);assert.notEqual(b.root.children[1].children[2],list);
 });
 
 // 标准FileReader测试替身保留异步load/error/abort行为，不替换生产分块逻辑。
@@ -275,7 +334,7 @@ test('upload browser input uses real FileReader and waits for final device ACK',
         }else window.ack(message);
       };
     });
-    for(const file of ['processes.js','main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../media/device-explorer',file),'utf8')});
+    for(const file of ['device-processes/processes.js','device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../media',file),'utf8')});
     await page.evaluate(()=>window.deliver({type:'explorerState',serial:'s',tab:'files'}));
     await page.setInputFiles('input[type=file]',[{name:'large.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(256*1024+7,42)},{name:'empty.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(0)}]);
     await page.evaluate(()=>window.firstEnd);
@@ -363,7 +422,7 @@ test('native browser directory drop preserves empty folders and actual bytes at 
     // FileSystemEntry需要非opaque origin；route只供应测试页面，保留原生目录API及本地文件读取权限检查。
     await page.route('http://explorer.test/',route=>route.fulfill({contentType:'text/html',body:'<body data-device-view-mode="explorer"><section id="device-explorer"></section></body>'}));await page.goto('http://explorer.test/');
     await page.evaluate(()=>{const deliver=data=>window.dispatchEvent(new MessageEvent('message',{data}));window.messages=[];let completed;window.completed=new Promise(resolve=>{completed=resolve;});window.deliver=deliver;window.send=message=>{window.messages.push(message);if(message.transferId){deliver({type:'explorerUploadAck',serial:message.serial,action:message.action,transferId:message.transferId});if(message.action==='uploadEnd')completed();}};document.addEventListener('drop',event=>{window.dropped={types:[...event.dataTransfer.types],files:[...event.dataTransfer.files].map(file=>file.name),entries:[...event.dataTransfer.items].map(item=>{const e=item.webkitGetAsEntry();return e?{name:e.name,directory:e.isDirectory}:null;})};},true);const observer=new MutationObserver(()=>{if(document.querySelector('.state.error')){observer.disconnect();completed();}});observer.observe(document.getElementById('device-explorer'),{subtree:true,childList:true});});
-    for(const file of ['processes.js','main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../media/device-explorer',file),'utf8')});
+    for(const file of ['device-processes/processes.js','device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../media',file),'utf8')});
     await page.evaluate(()=>{window.deliver({type:'explorerState',serial:'s',tab:'files',active:true});window.deliver({type:'explorerFiles',path:'/',entries:[{path:'/destination',name:'destination',kind:'directory'}]});});
     const box=await page.locator('.file-row').boundingBox();assert.ok(box);const cdp=await page.context().newCDPSession(page),data={items:[],files:[folder],dragOperationsMask:1},position={x:box.x+box.width/2,y:box.y+box.height/2};
     for(const type of ['dragEnter','dragOver','drop'])await cdp.send('Input.dispatchDragEvent',{type,...position,data});const native=await page.evaluate(()=>window.dropped);assert.deepEqual(native.types,['Files']);assert.deepEqual(native.entries,[{name:'bundle',directory:true}]);await page.evaluate(()=>window.completed);assert.equal(await page.locator('.state.error').count(),0);
@@ -383,7 +442,7 @@ test('directory snapshots reopen without requests or repeated sorting and refres
   b.api.receive({type:'explorerFiles',path:'/A',entries:[{path:'/A/z',name:'z',kind:'file',modified:1700000000000},{path:'/A/a',name:'a',kind:'file'}]});const sorted=comparisons;
   list=b.root.children[1].children[2];assert.deepEqual(Array.from(list.children.slice(1),row=>row.dataset.path),['/A','/A/a','/A/z']);
   for(let i=0;i<4;i++){list=b.root.children[1].children[2];list.children[1].children[0].children[0].onclick({stopPropagation(){}});}
-  assert.equal(b.sent.filter(m=>m.action==='list').length,1);assert.equal(comparisons,sorted);assert.equal(dateFormats,1);
+  assert.equal(b.sent.filter(m=>m.action==='list').length,1);assert.equal(comparisons,sorted);assert.equal(dateFormats,0);
   b.api.receive({type:'explorerFiles',path:'/A',entries:[]});assert.equal(b.root.children[1].children[2].children.length,2);
   b.api.receive({type:'explorerFiles',path:'/',entries:[]});assert.equal(b.api.state.directories.has('/A'),false);assert.equal(b.root.children[1].children[2].children[1].textContent,'Empty directory');
 });
@@ -398,4 +457,15 @@ test('directory replies preserve collapse and cache ownership across errors and 
   b.api.receive({type:'explorerConnection',serial:'s',view:'files',connected:false});assert.equal(b.api.state.directories.size,0);
   b.api.receive({type:'deviceViewMode',mode:'explorer'});b.api.receive({type:'explorerFiles',path:'/',entries:[]});
   b.api.receive({type:'explorerState',serial:'next',tab:'files'});assert.equal(b.api.state.directories.size,0);assert.deepEqual(Array.from(b.api.state.expanded),['/']);
+});
+
+// 生产fileRow的日期列回归：本地构造时间保证沿用时区，补零、13点、午夜、缺失/无效均严格比较文本与tooltip。
+test('file dates use fixed local 24-hour padded timestamps and blank invalid values',()=>{
+  const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files'});
+  const early=new Date(0);early.setFullYear(9,0,2);early.setHours(3,4,5,0);
+  const cases=[[early.getTime(),'0009-01-02 03:04:05'],[new Date(2024,0,2,3,4,5).getTime(),'2024-01-02 03:04:05'],[new Date(2024,8,9,13,4,5).getTime(),'2024-09-09 13:04:05'],[new Date(2024,0,2,0,0,0).getTime(),'2024-01-02 00:00:00'],[undefined,''],[null,''],['',''],['invalid',''],[NaN,'']];
+  b.api.receive({type:'explorerFiles',path:'/',entries:cases.map(([modified],i)=>({path:'/date-'+i,kind:'file',modified}))});
+  const rows=b.root.children[1].children[2].children.slice(1);
+  for(let i=0;i<cases.length;i++){assert.equal(rows[i].children[2].textContent,cases[i][1]);assert.equal(rows[i].children[2].title,cases[i][1]);}
+  assert.deepEqual(Array.from(b.api.state.fileColumns),['180px','max-content','max-content','90px']);
 });

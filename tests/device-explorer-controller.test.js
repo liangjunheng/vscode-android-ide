@@ -9,7 +9,7 @@ const { transformSync } = require('esbuild');
 
 const source = fs.readFileSync(path.join(__dirname, '../src/deviceExplorer.ts'), 'utf8');
 
-// 创建真实临时目录与可记录后端，push/onPost可模拟提交失败/同步下一命令；上传回归断言ACK释放锁及异常清理。
+// 创建真实临时目录与可记录后端；workspaceFiles/provider/picker替身支持定位与fallback回归，文件操作hooks支持工具栏结果/取消/故障断言，保留HEAD调试器依赖和配置语义。
 async function fixture(options = {}) {
   const temp = await fsp.mkdtemp(path.join(os.tmpdir(), 'device-explorer-controller-test-'));
   const posts = [], calls = [], updates = [];
@@ -18,22 +18,22 @@ async function fixture(options = {}) {
   const files = {
     serial: 'phone',
     async stat(remote) { calls.push(['stat', remote]); if (options.permission?.includes(remote)) throw new Error('Permission denied'); if (options.statError?.includes(remote)) throw new Error('adb unavailable'); return { path: remote, name: path.posix.basename(remote) || '/', kind: remote.endsWith('/') ? 'directory' : 'file', permissions: '644', size: 0, modified: 0 }; },
-    async list(remote) { calls.push(['list', remote, this.runAs]); if (options.listUnavailable?.includes(remote)) throw new Error('adb unavailable'); if (options.listPermission?.includes(remote) && !this.runAs) throw new Error('Permission denied'); if (options.listError?.includes(remote)) throw new Error('Permission denied'); if(options.directoryEntries)return options.directoryEntries(remote); return [{ path: remote + (remote === '/' ? '' : '/') + 'child.txt', name: 'child.txt', kind: 'file', permissions: '644', size: 3, modified: 0 }]; },
+    async list(remote, signal) { calls.push(['list', remote, this.runAs]); if (options.listUnavailable?.includes(remote)) throw new Error('adb unavailable'); if (options.listPermission?.includes(remote) && !this.runAs) throw new Error('Permission denied'); if (options.listError?.includes(remote)) throw new Error('Permission denied'); if(options.directoryEntries)return options.directoryEntries(remote, signal); return [{ path: remote + (remote === '/' ? '' : '/') + 'child.txt', name: 'child.txt', kind: 'file', permissions: '644', size: 3, modified: 0 }]; },
     async listPackages() { calls.push(['packages']); return ['com.example.app', 'com.example.other']; },
     async create(remote, directory, signal) { calls.push(['create', remote, directory]); await options.create?.(remote, directory, signal); },
-    async remove(remote) { calls.push(['remove', remote]); },
+    async remove(remote) { calls.push(['remove', remote]); await options.remove?.(remote); },
     async push(local, remote, transfer) { calls.push(['push', local, remote]); await options.push?.(local, remote, transfer); await fsp.copyFile(local, path.join(temp, path.posix.basename(remote))); },
-    async pull(remote, local) { calls.push(['pull', remote, local]); await fsp.writeFile(local, 'downloaded'); },
+    async pull(remote, local, transfer) { calls.push(['pull', remote, local]); await options.pull?.(remote, local, transfer); await fsp.writeFile(local, 'downloaded'); },
   };
   const processState = { rows: [], async watch(onUpdate, onError) { calls.push(['watch']); processState.onUpdate = onUpdate; processState.onError = onError; return async () => { stopCount++; calls.push(['stopWatch']); }; }, async kill(pid) { calls.push(['kill', pid]); }, async forceStop(pkg, uid) { calls.push(['forceStop', pkg, uid]); }, async clearData(pkg, uid) { calls.push(['clearData', pkg, uid]); }, async uninstall(pkg) { calls.push(['uninstall', pkg]); } };
   const vscode = {
     extensions: { all: config.debuggerExtensions },
-    workspace: { isTrusted: true, workspaceFolders: [{}], fs: { readFile: async uri => fsp.readFile(uri.fsPath) }, findFiles: async () => [], getConfiguration: section => ({ get: (key, fallback) => section === 'launch' ? config.launch : key === 'explorer.downloadLocation' ? config.downloadLocation : config.filter, update: async (key, value) => { if (key === 'explorer.packageFilter') config.filter = value; } }) },
+    workspace: { isTrusted: true, workspaceFolders: [{}], fs: { readFile: async uri => options.workspaceFiles && Object.hasOwn(options.workspaceFiles, uri.path) ? Buffer.from(options.workspaceFiles[uri.path]) : fsp.readFile(uri.fsPath) }, findFiles: async pattern => { options.onFindFiles?.(pattern); return pattern === '**/{output-metadata.json,build.gradle,build.gradle.kts}' ? Object.keys(options.workspaceFiles || {}).map(p => vscode.Uri.file(p)) : []; }, getConfiguration: section => ({ get: (key, fallback) => section === 'launch' ? config.launch : key === 'explorer.downloadLocation' ? config.downloadLocation : config.filter, update: async (key, value) => { if (key === 'explorer.packageFilter') config.filter = value; } }) },
     ConfigurationTarget: { Global: 1 },
     Uri: { file: p => ({ scheme: 'file', fsPath: p, path: p }), parse: value => ({ scheme: value.split(':')[0], fsPath: (value.split('://')[1] || value), path: (value.split('://')[1] || value) }) },
     commands: { executeCommand: async (...args) => calls.push(['command', ...args]) },
     env: { clipboard: { writeText: async value => calls.push(['clipboard', value]) } },
-    window: { showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async list => list[0] },
+    window: { showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async (list, settings) => { calls.push(['picker', Array.from(list), settings]); return options.quickPick ? options.quickPick(list, settings) : list[0]; } },
     debug: { startDebugging: async (...args) => { calls.push(['debug', ...args]); return options.debugResult ?? true; } },
   };
   const deps = { vscode, './deviceExplorerFiles': { DeviceExplorerFiles: class { constructor(serial,access) { Object.assign(this, files); this.runAs=access?.runAs; } } }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { constructor() { Object.assign(this, processState); } } } };
@@ -43,7 +43,7 @@ async function fixture(options = {}) {
   const module = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id), Buffer, console, process, AbortController, Promise, Set, Map, URL, URLSearchParams, setTimeout, clearTimeout });
   const Controller = module.exports.DeviceExplorerController;
-  const controller = new Controller(message => { posts.push(message); options.onPost?.(message, controller); });
+  const controller = new Controller(message => { posts.push(message); options.onPost?.(message, controller); }, Object.hasOwn(options, 'currentApplicationId') ? options.currentApplicationId : () => 'com.example.app');
   return { controller, posts, calls, processState, config, temp, get stopCount() { return stopCount; }, async close() { await controller.dispose(); await fsp.rm(temp, { recursive: true, force: true }); } };
 }
 
@@ -289,6 +289,238 @@ test('directory expansion avoids preliminary stat and retains run-as permission 
     assert.deepEqual(f.calls.filter(c=>c[0]==='list'),[['list','/data/data/com.example.app',undefined],['list','/data/data/com.example.app','com.example.app']]);assert.equal(f.calls.some(c=>c[0]==='stat'),false);
     f.calls.length=0;await f.controller.handle({type:'explorer',action:'list',path:'/broken'});assert.match(f.posts.at(-1).error,/adb unavailable/);assert.equal(f.calls.filter(c=>c[0]==='list').length,1);
   }finally{await f.close();}
+});
+
+// 构造定位链的真实父快照；空应用目录仍可定位，只有父快照声明存在的目录/目录链接才可下钻。
+function applicationTree(packages = ['com.example.app']) {
+  return remote => {
+    const paths = remote === '/' ? ['/data'] : remote === '/data' ? ['/data/data'] : remote === '/data/data' ? packages.map(pkg => '/data/data/' + pkg) : [];
+    return paths.map(p => ({ path: p, name: path.posix.basename(p), kind: p === '/data/data' ? 'link' : 'directory', directoryLink: p === '/data/data', permissions: '755', size: 0, modified: 0 }));
+  };
+}
+
+// Node>=22 的 VM 与后端替身：使用Build provider唯一ID，断言祖先/目标查询顺序和最终reveal，不接受消息中的pkg/path。
+test('locateApp reveals the selected Build application after listing every ancestor and target', async () => {
+  const f = await fixture({ workspaceFiles: { '/app/output-metadata.json': JSON.stringify({ applicationId: 'com.example.app' }) }, directoryEntries: applicationTree() });
+  try {
+    await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0; f.posts.length = 0;
+    await f.controller.handle({ type: 'explorer', action: 'locateApp', pkg: 'com.evil.app', path: '/sdcard' });
+    assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/data', '/data/data', '/data/data/com.example.app']);
+    assert.equal(f.calls.some(c => c[0] === 'stat' || c[0] === 'picker'), false);
+    assert.deepEqual(f.posts.filter(m => m.type === 'explorerFiles').map(m => m.path), ['/', '/data', '/data/data', '/data/data/com.example.app']);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.posts.at(-1))), { type: 'explorerReveal', serial: 'phone', path: '/data/data/com.example.app' });
+    assert.equal(f.controller.scope.writer, undefined);
+  } finally { await f.close(); }
+});
+
+// 工作区含无关包和变体ID时仍只按Build当前选择定位；下一次点击取新选择，且不再次扫描、不弹QuickPick、不改变过滤器ID集合。
+test('locateApp uses the current Build selection without scanning or picking', async () => {
+  let selected = 'com.example.other', scans = 0;
+  const f = await fixture({ currentApplicationId: () => selected, onFindFiles: () => { scans++; }, workspaceFiles: { '/app/build.gradle': 'applicationId "com.example.app"', '/other/output-metadata.json': '{"applicationId":"com.other.release"}' }, directoryEntries: applicationTree(['com.example.app', 'com.example.other']) });
+  try {
+    await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]);
+    const initialScans = scans, filterIds = Array.from(f.controller.applicationIds);
+    assert.ok(initialScans > 0); assert.deepEqual(filterIds, ['com.example.app', 'com.other.release']);
+    for (const expected of ['com.example.other', 'com.example.app']) {
+      selected = expected; f.calls.length = 0; f.posts.length = 0;
+      await f.controller.handle({ type: 'explorer', action: 'locateApp', pkg: 'com.evil.app' });
+      assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/data', '/data/data', '/data/data/' + expected]);
+      assert.equal(f.posts.at(-1).type, 'explorerReveal'); assert.equal(f.posts.at(-1).path, '/data/data/' + expected);
+      assert.equal(f.calls.some(c => c[0] === 'picker'), false); assert.equal(scans, initialScans);
+      assert.deepEqual(Array.from(f.controller.applicationIds), filterIds);
+    }
+  } finally { await f.close(); }
+});
+
+// provider缺失/返回undefined时复用工作区字面ID及metadata候选；0项报错，1项直达，多项单选第二项或取消，取消零list/reveal。
+test('locateApp fallback handles zero one and multiple workspace IDs with single selection and cancellation', async () => {
+  for (const provider of [undefined, () => undefined]) for (const count of [0, 1, 2]) for (const cancel of count === 2 ? [false, true] : [false]) {
+    let scans = 0;
+    const workspaceFiles = count === 0 ? {} : { '/app/build.gradle': 'applicationId "com.example.app"', ...(count === 2 ? { '/other/output-metadata.json': '{"applicationId":"com.example.other"}' } : {}) };
+    const f = await fixture({ currentApplicationId: provider, workspaceFiles, onFindFiles: () => { scans++; }, directoryEntries: applicationTree(['com.example.app', 'com.example.other']), quickPick: items => cancel ? undefined : items[1] });
+    try {
+      await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]);
+      const before = scans; f.calls.length = 0; f.posts.length = 0;
+      await f.controller.handle({ type: 'explorer', action: 'locateApp', pkg: 'com.evil.app', path: '/sdcard' });
+      assert.equal(scans, before + 1);
+      const picks = f.calls.filter(c => c[0] === 'picker'); assert.equal(picks.length, count === 2 ? 1 : 0);
+      if (count === 2) { assert.deepEqual(picks[0][1], ['com.example.app', 'com.example.other']); assert.equal(picks[0][2].canPickMany, false); }
+      if (!count || cancel) {
+        assert.equal(f.calls.some(c => c[0] === 'list'), false); assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+        if (!count) assert.match(f.posts.at(-1).error, /No application ID found/);
+        else assert.equal(f.posts.some(m => m.error), false);
+      } else {
+        const expected = count === 1 ? 'com.example.app' : 'com.example.other';
+        assert.equal(f.posts.at(-1).type, 'explorerReveal'); assert.equal(f.posts.at(-1).path, '/data/data/' + expected);
+        assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/data', '/data/data', '/data/data/' + expected]);
+      }
+      assert.equal(f.controller.scope.writer, undefined);
+    } finally { await f.close(); }
+  }
+});
+
+// fallback单选挂起时切设备/视图必须先取消旧signal；选择返回后零定位list/reveal，且等待期间writer仍拒绝另一写操作。
+test('locateApp fallback picker respects scope cancellation and writer exclusion', async () => {
+  for (const view of ['files', 'processes']) {
+    let entered, release; const started = new Promise(resolve => { entered = resolve; }), picked = new Promise(resolve => { release = resolve; });
+    const f = await fixture({ currentApplicationId: () => undefined, workspaceFiles: { '/app/build.gradle': 'applicationId "com.example.app" applicationId "com.example.other"' }, directoryEntries: applicationTree(), quickPick: () => { entered(); return picked; } });
+    try {
+      await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0; f.posts.length = 0;
+      const locate = f.controller.handle({ type: 'explorer', action: 'locateApp' }); await started;
+      assert.equal(f.calls.find(c => c[0] === 'picker')[2].canPickMany, false);
+      await f.controller.handle({ type: 'explorer', action: 'newDirectory', parent: '/' });
+      assert.match(f.posts.at(-1).error, /already running/); assert.equal(f.calls.some(c => c[0] === 'create'), false);
+      const old = f.controller.scope, aborted = new Promise(resolve => old.controller.signal.addEventListener('abort', resolve, { once: true }));
+      const change = f.controller.setContext(view === 'files' ? 'other' : 'phone', true, view); await aborted;
+      release('com.example.app'); await locate;
+      assert.equal(f.calls.some(c => c[0] === 'list'), false); assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+      await change; await Promise.all([...f.controller.scope.tasks]);
+      assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+    } finally { release(); await f.close(); }
+  }
+});
+
+// 无provider且零候选明确失败；disposed/trust/坏JSON等真实provider故障与非法ID不得fallback，目录/ADB/run-as错误不伪造成功。
+test('locateApp rejects unavailable selection invalid IDs missing directories non-directories and backend failures', async () => {
+  const app = '/data/data/com.example.app', workspaceFiles = { '/app/output-metadata.json': '{"applicationId":"com.example.app"}' };
+  const scenarios = [
+    [{ currentApplicationId: undefined }, /No application ID found/],
+    [{ workspaceFiles, currentApplicationId: () => { throw new Error('Android build controller is disposed'); } }, /disposed/],
+    [{ workspaceFiles, currentApplicationId: () => { throw new Error('Workspace is not trusted'); } }, /not trusted/],
+    [{ workspaceFiles, currentApplicationId: () => { throw new SyntaxError('Invalid JSON metadata'); } }, /Invalid JSON metadata/],
+    [{ currentApplicationId: () => '../evil' }, /Invalid current application ID/],
+    [{ workspaceFiles, directoryEntries: applicationTree([]) }, /missing or not a directory: \/data\/data\/com.example.app/],
+    [{ workspaceFiles, directoryEntries: remote => remote === '/' ? [{ path: '/data', kind: 'file' }] : [] }, /missing or not a directory: \/data/],
+    [{ workspaceFiles, directoryEntries: applicationTree(), listUnavailable: ['/data'] }, /adb unavailable/],
+    [{ workspaceFiles, directoryEntries: applicationTree(), listError: [app] }, /Permission denied/],
+  ];
+  for (const [options, error] of scenarios) {
+    const f = await fixture(options);
+    try {
+      await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.posts.length = 0;
+      await f.controller.handle({ type: 'explorer', action: 'locateApp' });
+      assert.match(f.posts.at(-1).error, error);
+      assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+    } finally { await f.close(); }
+  }
+});
+
+// 父目录仅权限拒绝时复用虚拟入口，目标仅权限拒绝时run-as；空目标目录是合法成功结果。
+test('locateApp reuses virtual parents and run-as without masking permission errors', async () => {
+  const app = '/data/data/com.example.app';
+  const f = await fixture({ workspaceFiles: { '/app/output-metadata.json': '{"applicationId":"com.example.app"}' }, directoryEntries: applicationTree(), listPermission: [app], listError: ['/data', '/data/data'] });
+  try {
+    await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0;
+    await f.controller.handle({ type: 'explorer', action: 'locateApp' });
+    assert.deepEqual(f.calls.filter(c => c[0] === 'list'), [['list', '/', undefined], ['list', '/data', undefined], ['list', '/data/data', undefined], ['list', app, undefined], ['list', app, 'com.example.app']]);
+    assert.equal(f.calls.filter(c => c[0] === 'packages').length, 1);
+    assert.equal(f.posts.at(-1).type, 'explorerReveal');
+    assert.equal(f.posts.at(-1).path, app);
+  } finally { await f.close(); }
+});
+
+// 目录读取挂起时切设备/视图先取消旧signal；释放读取后不继续目录链或投递旧定位，writer阻止另一写操作，且无QuickPick。
+test('locateApp pending directory read respects scope cancellation and existing writer exclusion', async () => {
+  for (const view of ['files', 'processes']) {
+    let entered, release; const started = new Promise(resolve => { entered = resolve; }), pendingRead = new Promise(resolve => { release = resolve; });
+    const tree = applicationTree();
+    const f = await fixture({ directoryEntries: async remote => { if (remote === '/data') { entered(); await pendingRead; } return tree(remote); } });
+    try {
+      await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0; f.posts.length = 0;
+      const locate = f.controller.handle({ type: 'explorer', action: 'locateApp' }); await started;
+      await f.controller.handle({ type: 'explorer', action: 'newDirectory', parent: '/' });
+      assert.match(f.posts.at(-1).error, /already running/);
+      assert.equal(f.calls.some(c => c[0] === 'create'), false);
+      const old = f.controller.scope, aborted = new Promise(resolve => old.controller.signal.addEventListener('abort', resolve, { once: true }));
+      const change = f.controller.setContext(view === 'files' ? 'other' : 'phone', true, view); await aborted;
+      const before = f.calls.filter(c => c[0] === 'list').length; release(); await locate;
+      assert.equal(f.calls.some(c => c[0] === 'picker'), false);
+      assert.equal(f.calls.filter(c => c[0] === 'list').length, before);
+      assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+      await change; await Promise.all([...f.controller.scope.tasks]);
+      assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+    } finally { release(); await f.close(); }
+  }
+});
+
+// 初始自动刷新是独立读取：阻塞第一次根list后定位仍能执行，不通过扩大串行化规避并发。
+test('locateApp works while the initial automatic refresh is pending', async () => {
+  let entered, release, rootReads = 0; const started = new Promise(resolve => { entered = resolve; }), firstRoot = new Promise(resolve => { release = resolve; }), tree = applicationTree();
+  const f = await fixture({ workspaceFiles: { '/app/output-metadata.json': '{"applicationId":"com.example.app"}' }, directoryEntries: async remote => { if (remote === '/' && ++rootReads === 1) { entered(); await firstRoot; } return tree(remote); } });
+  try {
+    await f.controller.setContext('phone', true); await started;
+    assert.equal(f.controller.scope.writer, undefined);
+    await f.controller.handle({ type: 'explorer', action: 'locateApp' });
+    assert.equal(f.posts.at(-1).type, 'explorerReveal');
+    assert.equal(f.posts.at(-1).path, '/data/data/com.example.app');
+    assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/', '/data', '/data/data', '/data/data/com.example.app']);
+    release(); await Promise.all([...f.controller.scope.tasks]);
+    assert.equal(f.posts.filter(m => m.type === 'explorerReveal').length, 1);
+    assert.equal(f.controller.scope.directories.has('/data/data/com.example.app'), true);
+  } finally { release(); await f.close(); }
+});
+
+// 迟到的Files工具栏消息不得在Processes读取工作区或设备目录。
+test('locateApp is restricted to the Files surface', async () => {
+  const f = await fixture();
+  try {
+    await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0;
+    await f.controller.handle({ type: 'explorer', action: 'locateApp' });
+    assert.match(f.posts.at(-1).error, /files view is not active/);
+    assert.equal(f.calls.some(c => c[0] === 'picker' || c[0] === 'list'), false);
+    assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
+  } finally { await f.close(); }
+});
+
+// 保留五个按钮的结果回归：创建/上传/删除改变父快照，下载验证真实文件字节与完成状态，刷新发布新内容。
+test('toolbar file commands publish created uploaded deleted refreshed and downloaded results', async () => {
+  const entries = new Set(['/keep.txt']);
+  const options = { input: 'new directory', confirm: 'Delete', directoryEntries: remote => remote === '/' ? [...entries].map(p => ({ path: p, name: p.slice(1), kind: p === '/new directory' ? 'directory' : 'file' })) : [], create: async remote => { entries.add(remote); }, remove: async remote => { entries.delete(remote); }, push: async (local, remote) => { entries.add(remote); } };
+  const f = await fixture(options);
+  try {
+    await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]);
+    await f.controller.handle({ type: 'explorer', action: 'newDirectory', parent: '/' });
+    assert.equal(f.posts.findLast(m => m.type === 'explorerFiles').entries.some(e => e.path === '/new directory' && e.kind === 'directory'), true);
+    const sourceDirectory = path.join(f.temp, 'source'); await fsp.mkdir(sourceDirectory);
+    const upload = path.join(sourceDirectory, 'local.txt'); await fsp.writeFile(upload, 'uploaded bytes'); options.openDialog = [{ scheme: 'file', fsPath: upload }];
+    await f.controller.handle({ type: 'explorer', action: 'upload', target: '/' });
+    assert.equal(await fsp.readFile(path.join(f.temp, 'local.txt'), 'utf8'), 'uploaded bytes');
+    assert.equal(f.posts.findLast(m => m.type === 'explorerFiles').entries.some(e => e.path === '/local.txt'), true);
+    assert.equal(f.posts.some(m => m.message === 'Upload complete' && m.busy === false), true);
+    options.openDialog = [{ scheme: 'file', fsPath: f.temp }];
+    await f.controller.handle({ type: 'explorer', action: 'download', paths: ['/keep.txt'] });
+    assert.equal(await fsp.readFile(path.join(f.temp, 'keep.txt'), 'utf8'), 'downloaded');
+    assert.equal(f.posts.at(-1).message, 'Download complete'); assert.equal(f.posts.at(-1).busy, false);
+    await f.controller.handle({ type: 'explorer', action: 'delete', paths: ['/keep.txt'] });
+    assert.equal(f.posts.findLast(m => m.type === 'explorerFiles').entries.some(e => e.path === '/keep.txt'), false);
+    entries.add('/external.txt');
+    await f.controller.handle({ type: 'explorer', action: 'refresh' });
+    assert.equal(f.posts.findLast(m => m.type === 'explorerFiles').entries.some(e => e.path === '/external.txt'), true);
+  } finally { await f.close(); }
+});
+
+// 取消各原生对话框时无落地/远端更改；后端失败必须可见且无下载/上传伪完成，刷新不伪造快照。
+test('toolbar file commands preserve cancellation and surface operation failures', async () => {
+  const cancel = await fixture({ openDialog: null, confirm: 'Cancel' });
+  try {
+    await cancel.controller.setContext('phone', true); await Promise.all([...cancel.controller.scope.tasks]); cancel.calls.length = 0; cancel.posts.length = 0;
+    for (const message of [{ action: 'newDirectory', parent: '/' }, { action: 'upload', target: '/' }, { action: 'download', paths: ['/x'] }, { action: 'delete', paths: ['/x'] }]) { await cancel.controller.handle({ type: 'explorer', ...message }); }
+    assert.equal(cancel.calls.some(c => ['create', 'push', 'pull', 'remove'].includes(c[0])), false);
+    assert.equal(cancel.posts.some(m => /complete/.test(m.message || '')), false);
+  } finally { await cancel.close(); }
+  const actions = ['newDirectory', 'upload', 'download', 'delete', 'refresh'];
+  for (const action of actions) {
+    const options = { input: 'new', confirm: 'Delete', create: async () => { throw new Error('create failed'); }, push: async () => { throw new Error('push failed'); }, pull: async () => { throw new Error('pull failed'); }, remove: async () => { throw new Error('remove failed'); } };
+    const f = await fixture(options);
+    try {
+      await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.posts.length = 0;
+      if (action === 'refresh') { options.listUnavailable = ['/']; }
+      await f.controller.handle({ type: 'explorer', action, parent: '/', target: '/', paths: ['/x'] });
+      assert.match(f.posts.at(-1).error, /failed|adb unavailable/);
+      assert.equal(f.posts.some(m => m.message === 'Upload complete' || m.message === 'Download complete' || m.type === 'explorerFiles'), false);
+      if (action === 'download') { await assert.rejects(fsp.stat(path.join(f.temp, 'x')), { code: 'ENOENT' }); }
+    } finally { await f.close(); }
+  }
 });
 
 // 刷新父目录发现子目录已删除后，不能再查询/重放删除的旧缓存，也不能让空目录回复恢复旧行。

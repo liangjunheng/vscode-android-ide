@@ -9,7 +9,7 @@ const { transformSync } = require('esbuild');
 const source = fs.readFileSync(path.join(__dirname, '../src/androidBuild.ts'), 'utf8');
 const tasks = 'app:assembleDebug - APK\n:app:installDebug - install\napp:assembleRelease\napp:installRelease\nassemble - aggregate\napp:test - tests\n';
 
-// 创建临时工程及真实 EventEmitter 子进程替身；npm test 覆盖关闭、失败、取消和多监听器语义，不执行用户 Gradle。
+// 创建临时工程及真实EventEmitter子进程替身；可配置tasks供当前ID隔离回归，保留HEAD原debug配置行为，不执行用户Gradle。
 function fixture(t, platform = 'linux') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'device-tools-build-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -19,7 +19,7 @@ function fixture(t, platform = 'linux') {
   fs.mkdirSync(metaDir, { recursive: true });
   const metadata = path.join(metaDir, 'output-metadata.json');
   fs.writeFileSync(metadata, JSON.stringify({ variantName: 'debug', applicationId: 'com.example.app', elements: [{ outputFile: 'app.apk' }] }));
-  const f = { root, metadata, calls: [], messages: [], configs: [], debugCalls: [], hold: false, closeOnKill: true, fail: null, offline: false, launchOutput: '', debugResult: true, choose: true, roots: [root] };
+  const f = { root, metadata, calls: [], messages: [], configs: [], debugCalls: [], hold: false, closeOnKill: true, fail: null, offline: false, launchOutput: '', debugResult: true, choose: true, roots: [root], tasks };
   const channel = { text: '', shown: 0, disposed: false, replace(s) { this.text = s; }, show() { this.shown++; }, dispose() { this.disposed = true; } };
   f.channel = channel;
   const cp = { spawn(command, args, options) {
@@ -33,7 +33,7 @@ function fixture(t, platform = 'linux') {
     } else if (f.hold) { f.held = child; }
     else queueMicrotask(() => {
       if (f.fail) { const failure = f.fail; f.fail = null; child.stderr.emit('data', Buffer.from(failure)); child.finish(1); return; }
-      let output = args.includes('get-state') ? (f.offline ? 'offline' : 'device') : args.some(a => String(a).includes('tasks')) ? tasks : args.includes('monkey') ? f.launchOutput : '';
+      let output = args.includes('get-state') ? (f.offline ? 'offline' : 'device') : args.some(a => String(a).includes('tasks')) ? f.tasks : args.includes('monkey') ? f.launchOutput : '';
       child.stdout.emit('data', Buffer.from(output)); child.finish();
     });
     return child;
@@ -132,13 +132,15 @@ test('android-build run installs selected package and stop owns original serial'
   await f.controller.dispose();
 });
 
-// npm test：metadata 损坏/缺失和启动器失败均不发布 Running 成功。
+// npm test：metadata损坏/缺失和启动器失败均不发布Running；run/debug严格要求metadata，定位resolver才允许undefined。
 test('android-build metadata and launcher failures remain visible', async t => {
   const f = fixture(t); await f.action('refresh');
   fs.writeFileSync(f.metadata, '{broken');
   await assert.rejects(f.action('run', undefined, 'phone'), /JSON|Unexpected|property/i);
   fs.unlinkSync(f.metadata);
   await assert.rejects(f.action('run', undefined, 'phone'), /No APK metadata/);
+  f.configs = [{ name: 'Metadata debug', type: 'adapter', request: 'launch' }];
+  await assert.rejects(f.action('debug', undefined, 'phone'), /No APK metadata/);
   fs.writeFileSync(f.metadata, JSON.stringify({ variantName: 'debug', applicationId: 'com.example.app' }));
   f.launchOutput = 'No activities found'; await assert.rejects(f.action('run', undefined, 'phone'), /No activities/);
   assert.equal(f.last().running, false);
@@ -221,4 +223,98 @@ test('android-build real Windows wrapper executes in a path with spaces', { skip
   assert.match(channel.text, /EXECUTED :app:assembleDebug --console=plain/);
   assert.equal(states.at(-1).status, 'Build succeeded');
   await controller.dispose();
+});
+
+// Node>=22 VM+临时APK metadata：多根/多模块/多变体均复用真实选择入口；断言唯一ID、切换生效且只读查询零命令/状态修改。
+test('android-build current application ID isolates projects modules variants and follows selection changes', async t => {
+  const f = fixture(t);
+  f.tasks += 'feature:assembleDebug\nfeature:installDebug\n';
+  const other = path.join(f.root, 'other-project');
+  fs.mkdirSync(other); for (const name of ['gradlew', 'gradlew.bat']) fs.writeFileSync(path.join(other, name), '');
+  // 为给定项目/模块/变体写真实metadata；本测试以不同ID断言跨作用域不串包。
+  const metadata = (root, module, variant, applicationId) => {
+    const dir = path.join(root, module, 'build', 'outputs', 'apk', variant); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'output-metadata.json'), JSON.stringify({ variantName: variant, applicationId }));
+  };
+  metadata(f.root, 'app', 'release', 'com.example.release');
+  metadata(f.root, 'feature', 'debug', 'com.example.feature');
+  metadata(other, 'app', 'debug', 'com.other.debug');
+  metadata(other, 'feature', 'debug', 'com.other.feature');
+  f.roots = [f.root, other]; await f.action('refresh');
+  // 查询前后命令数与状态引用保持不变，证明所选ID读取无构建和发布副作用。
+  const assertId = expected => {
+    const calls = f.calls.length, messages = f.messages.length, state = f.last();
+    assert.equal(f.controller.currentApplicationId(), expected);
+    assert.equal(f.calls.length, calls); assert.equal(f.messages.length, messages); assert.equal(f.last(), state);
+  };
+  assertId('com.example.app');
+  await f.action('target', ':app:Release'); assertId('com.example.release');
+  await f.action('target', ':feature:Debug'); assertId('com.example.feature');
+  await f.action('project', other); assertId('com.other.feature');
+  await f.action('target', ':app:Debug'); assertId('com.other.debug');
+  await f.action('project', f.root); assertId('com.example.app');
+  await f.controller.dispose();
+});
+
+// 无选择/目标及缺所选变体metadata返回undefined供定位fallback；信任撤销、释放、坏JSON/非法ID仍抛错，不借用其他变体包名。
+test('android-build current application ID distinguishes unavailable selection from invalid metadata', async t => {
+  const f = fixture(t);
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  await f.action('refresh'); await f.action('target', ':app:Release');
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  await f.action('target', ':app:Debug');
+  fs.writeFileSync(f.metadata, '{broken'); assert.throws(() => f.controller.currentApplicationId(), /JSON|Unexpected|property/i);
+  fs.writeFileSync(f.metadata, JSON.stringify({ variantName: 'debug', applicationId: '../evil' }));
+  assert.throws(() => f.controller.currentApplicationId(), /Invalid applicationId/);
+  fs.unlinkSync(f.metadata); assert.equal(f.controller.currentApplicationId(), undefined);
+  f.vscode.workspace.isTrusted = false; assert.throws(() => f.controller.currentApplicationId(), /not trusted/);
+  f.vscode.workspace.isTrusted = true; f.tasks = ''; await f.action('refresh');
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  await f.controller.dispose(); assert.throws(() => f.controller.currentApplicationId(), /disposed/);
+});
+
+// Node>=22真实Build与Explorer经provider联动：所选Release缺metadata才选择候选，坏JSON/非法ID不得扫描/picker，且无额外构建命令。
+test('Build-to-Explorer fallback occurs only for missing selected metadata and never for corrupt metadata', async t => {
+  const f = fixture(t); await f.action('refresh'); await f.action('target', ':app:Release');
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  let scans = 0, picks = 0; const posts = [], lists = [], commands = f.calls.length;
+  f.vscode.workspace.findFiles = async () => { scans++; return [{ path: '/fallback/build.gradle' }]; };
+  f.vscode.workspace.fs = { readFile: async () => Buffer.from('applicationId "com.example.app" applicationId "com.example.other"') };
+  f.vscode.window.showQuickPick = async (items, options) => { picks++; assert.equal(options.canPickMany, false); return items[1]; };
+  class Files {
+    // 定位回归只提供真实父快照及空目标目录；记录list以断言损坏metadata时没有设备查询。
+    async list(remote) {
+      lists.push(remote);
+      const paths = remote === '/' ? ['/data'] : remote === '/data' ? ['/data/data'] : remote === '/data/data' ? ['/data/data/com.example.app', '/data/data/com.example.other'] : [];
+      return paths.map(p => ({ path: p, name: path.posix.basename(p), kind: 'directory' }));
+    }
+  }
+  class Processes {
+    // Files定位仅查询静态能力，不启动进程资源；本回归通过dispose验证Explorer正常清理。
+    static capabilities() { return {}; }
+    // 本回归没有进程动作，明确返回false保证消息沿真实Explorer文件分支执行。
+    static handles() { return false; }
+    async dispose() {}
+  }
+  const explorerModule = { exports: {} };
+  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/deviceExplorer.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, {
+    module: explorerModule, exports: explorerModule.exports, Buffer, AbortController, process, setTimeout, clearTimeout,
+    require: id => id === 'vscode' ? f.vscode : id === './deviceExplorerFiles' ? { DeviceExplorerFiles: Files } : id === './processes' ? { ProcessesController: Processes } : require(id),
+  });
+  const explorer = new explorerModule.exports.DeviceExplorerController(m => posts.push(m), () => f.controller.currentApplicationId());
+  try {
+    await explorer.setContext('phone', true); await Promise.all([...explorer.scope.tasks]); scans = 0; lists.length = 0; posts.length = 0;
+    await explorer.handle({ type: 'explorer', action: 'locateApp' });
+    assert.equal(scans, 1); assert.equal(picks, 1);
+    assert.equal(posts.at(-1).type, 'explorerReveal'); assert.equal(posts.at(-1).path, '/data/data/com.example.other');
+    const release = path.join(f.root, 'app', 'build', 'outputs', 'apk', 'release'); fs.mkdirSync(release, { recursive: true });
+    for (const invalid of ['{broken', JSON.stringify({ variantName: 'release', applicationId: '../evil' })]) {
+      fs.writeFileSync(path.join(release, 'output-metadata.json'), invalid); scans = 0; picks = 0; lists.length = 0; posts.length = 0;
+      await explorer.handle({ type: 'explorer', action: 'locateApp' });
+      assert.match(posts.at(-1).error, /JSON|Unexpected|property|Invalid applicationId/i);
+      assert.equal(scans, 0); assert.equal(picks, 0); assert.equal(lists.length, 0);
+      assert.equal(posts.some(m => m.type === 'explorerReveal'), false);
+    }
+    assert.equal(f.calls.length, commands);
+  } finally { await explorer.dispose(); await f.controller.dispose(); }
 });
