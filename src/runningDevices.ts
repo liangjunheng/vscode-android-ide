@@ -500,7 +500,7 @@ body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--
 #tab.multi #chev{display:block}
 #tab.multi select{padding-right:0}
 #tab select{background:var(--vscode-dropdown-background);border:0;color:var(--vscode-dropdown-foreground);font:inherit;appearance:none;-webkit-appearance:none;cursor:pointer;padding:0 4px;text-overflow:ellipsis;min-width:0;width:100%;height:100%;border-radius:4px;transition:background-color .12s ease,box-shadow .12s ease}#tab select:hover{background:var(--vscode-list-hoverBackground)}
-#tab select:focus-visible{outline:1px solid var(--vscode-focusBorder)}
+#tab select:focus:not(:focus-visible){outline:0!important;box-shadow:none!important}#tab select:focus-visible{outline:1px solid var(--vscode-focusBorder)}
 #tab select option{background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground)}
 .dk,.lt{display:none}body:not(.vscode-light) .dk{display:flex}body.vscode-light .lt{display:flex}
 #bar{display:flex;flex:none;justify-content:space-between;gap:4px;flex-wrap:nowrap;width:100%;height:43px;padding:6px 0;border-bottom:1px solid var(--vscode-panel-border,#444);box-sizing:border-box;align-items:center}

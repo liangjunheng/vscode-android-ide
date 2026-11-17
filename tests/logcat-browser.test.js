@@ -793,11 +793,16 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
       for(const [key,value] of Object.entries({'menu-background':${JSON.stringify(bg)},'menu-foreground':${JSON.stringify(fg)},'dropdown-background':${JSON.stringify(bg)},'dropdown-foreground':${JSON.stringify(fg)},'descriptionForeground':${JSON.stringify(fg)},'focusBorder':'#007acc','menu-border':${JSON.stringify(light?'#b8b8b8':'#454545')},'list-hoverBackground':${JSON.stringify(light?'#e8e8e8':'#37373d')}}))document.body.style.setProperty('--vscode-'+key,value);
       document.body.style.backgroundColor=${JSON.stringify(bg)};document.body.style.color=${JSON.stringify(fg)};
       document.body.style.setProperty('--vscode-editor-background',${JSON.stringify(bg)});
+      document.body.appendChild(Object.assign(document.createElement('style'),{textContent:'*:focus{outline:1px solid rgb(255,165,0)}'}));
+      document.getElementById('dev').blur();
       document.getElementById('dev').value='dropdown-0';
       const dev=document.getElementById('dev');dev.focus();
     })()`);
     const rect=await page.evaluate("(()=>{const r=document.getElementById('dev').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,height:r.height}})()");
     assert.equal(rect.height,28);
+    const pointerFocus=await page.evaluate("(()=>{const dev=document.getElementById('dev');dev.focus();const s=getComputedStyle(dev);return {outline:s.outlineStyle,width:s.outlineWidth,shadow:s.boxShadow}})()");
+    assert.equal(pointerFocus.outline,'none');assert.equal(pointerFocus.width,'0px');assert.doesNotMatch(pointerFocus.shadow,/255, 165, 0/);
+    assert.equal(await page.evaluate("document.getElementById('dev').querySelectorAll('selectedcontent').length"),1);
     // 箭头对齐回归：真实长设备名下，与Format逐属性和中心位置比较，不以CSS声明存在代替视觉几何。
     const arrowStyles=await page.evaluate("(()=>['dev','fmt'].map(id=>{const el=document.getElementById(id),s=getComputedStyle(el,'::picker-icon'),r=el.getBoundingClientRect();return {style:Object.fromEntries(['content','fontFamily','fontSize','color','width','height','position','insetInlineEnd','top','translate','pointerEvents'].map(k=>[k,s[k]])),padding:getComputedStyle(el).paddingInlineEnd,center:r.y+r.height/2,width:r.width,overlay:document.querySelectorAll('.device-select-arrow').length}}))()");
     assert.deepEqual(arrowStyles[0].style,arrowStyles[1].style);

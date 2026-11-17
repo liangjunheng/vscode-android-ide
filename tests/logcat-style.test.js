@@ -247,6 +247,7 @@ test('dropdown styles connect every Webview and retain native selection semantic
   for (const selector of ['.menu', '#menu', '.explorer-menu', '#sugg', 'select::picker(select)', 'option::checkmark']) assert.ok(shared.includes(selector), selector);
   for (const token of ['--vscode-menu-background', '--vscode-menu-foreground', '--vscode-focusBorder', 'vscode-light', 'vscode-dark', 'vscode-high-contrast-light', 'forced-colors:active', '@supports (appearance:base-select)', 'appearance:auto']) assert.ok(shared.includes(token), token);
   assert.ok(shared.includes('max-width:calc(100vw - 8px)'));
+  assert.ok(shared.includes('body :is(button,select,input):focus:not(:focus-visible){outline:0!important;box-shadow:none!important}'));
   assert.ok(shared.includes('option:disabled'));
   assert.ok(shared.includes('overflow-wrap:anywhere'));
 });

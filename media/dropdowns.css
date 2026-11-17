@@ -15,6 +15,8 @@ body .menu.hist .hrow .t{min-width:0}
 body .menu.hist .hrow .x{min-height:0;padding:0;border-radius:2px}
 /* 旧内核保留原生箭头与选择语义；支持 base-select 的内核才接管展开面板，避免以 JS 重建选择状态。 */
 body select:not([multiple]){appearance:auto;cursor:pointer}
+/* 鼠标点击不显示宿主橙色焦点框；键盘焦点仍由 :focus-visible 提供可访问反馈。 */
+body :is(button,select,input):focus:not(:focus-visible){outline:0!important;box-shadow:none!important}
 body select:not([multiple]):disabled{cursor:default;color:var(--vscode-disabledForeground);opacity:.65}
 body #tab:focus-within,body .build-target-row:focus-within{border-color:var(--vscode-focusBorder)}
 body #build-project option,body #build-target option{background:var(--popup-bg);color:var(--popup-fg)}
