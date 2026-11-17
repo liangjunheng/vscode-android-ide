@@ -13,7 +13,7 @@ function load(file, cache = new Map()) {
   vm.runInNewContext(transformSync(fs.readFileSync(file, 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController, console, require: id => id.startsWith('.') ? load(path.resolve(path.dirname(file), id + '.ts'), cache) : require(id) });
   return module.exports;
 }
-const { DeviceExplorerProcesses, parseHelo } = load(path.resolve(__dirname, '../src/deviceExplorerProcesses.ts'));
+const { DeviceExplorerProcesses, parseHelo, parseProcessSnapshot } = load(path.resolve(__dirname, '../src/deviceExplorerProcesses.ts'));
 const { FrameReader, AdbSmartSocket } = load(path.resolve(__dirname, '../src/adbSmartSocket.ts'));
 
 // UTF16长度与实际DDMS HELO布局相同，含非BMP名称/可选ABI/包名，防止使用错误长度协议。
@@ -47,14 +47,20 @@ function peer(options = {}) {
         if (options.fail) { feed(s, Buffer.concat([Buffer.from('FAIL'), frame('permission denied')])); return; }
         if (service === 'track-jdwp') { trackers.push(s); feed(s, Buffer.concat([Buffer.from('OKAY'), frame(options.pids === undefined ? '123\n456\n' : options.pids)])); }
         else if (service.startsWith('jdwp:')) { pid = Number(service.slice(5)); feed(s, Buffer.from('OKAY')); }
-        else if (service.startsWith('shell,v2,raw:')) { const bad = options.shellError; feed(s, Buffer.concat([Buffer.from('OKAY'), shellFrame(bad ? 2 : 1, bad || (service.includes('force-stop') ? '' : 'Success\n')), shellFrame(3, Buffer.from([bad ? 1 : 0]))])); }
+        else if (service.startsWith('shell,v2,raw:')) { const bad = options.shellError; const value = service.includes('ps -A') ? (options.metadata || '') : bad || (service.includes('force-stop') ? '' : 'Success\n'); feed(s, Buffer.concat([Buffer.from('OKAY'), shellFrame(bad ? 2 : 1, value), shellFrame(3, Buffer.from([bad ? 1 : 0]))])); }
         else { throw Error('unexpected service ' + service); }
       } else if (data.equals(Buffer.from('JDWP-Handshake'))) { feed(s, data); }
-      else { packets.push(data); if (options.noAck) return; feed(s, reply(data[9] === 0xc7 ? helo(pid) : Buffer.alloc(0))); }
+      else { packets.push(data); if (options.noAck) return; feed(s, reply(data[9] === 0xc7 ? helo(pid) : Buffer.alloc(0), data.readUInt32BE(4), options.jdwpError || 0)); }
     }); sockets.push(socket); return socket;
   };
   return { factory, sockets, commands, trackers, packets, feed };
 }
+
+// 设备ps快照回退恢复进程名、包名和Android用户，覆盖HELO失败时的关键展示字段。
+test('device ps snapshot restores process identity and user id',()=>{const row=parseProcessSnapshot('PID USER NAME ARGS\n18912 u0_a123 com.tcl.sdk.note.hd com.tcl.sdk.note.hd\n',18912);assert.equal(row.pid,18912);assert.equal(row.name,'com.tcl.sdk.note.hd');assert.equal(row.packageName,'com.tcl.sdk.note.hd');assert.equal(row.userId,0);});
+
+// HELO失败时设备侧快照仍恢复完整进程字段，调试错误保持显式。
+test('HELO failure falls back to device process metadata',async()=>{const metadata='PID USER NAME ARGS\n123 u0_a123 com.tcl.sdk.note.hd com.tcl.sdk.note.hd\n__DEX_EXE__\n/system/bin/app_process64\n__DEX_ABI64__\narm64-v8a\n__DEX_ABI__\narmeabi-v7a';const p=peer({metadata,jdwpError:1,split:false});const rows=await new DeviceExplorerProcesses('phone',p.factory).list();assert.equal(rows[0].name,'com.tcl.sdk.note.hd');assert.equal(rows[0].packageName,'com.tcl.sdk.note.hd');assert.equal(rows[0].userId,0);assert.equal(rows[0].abi,'64-bit (arm64)');assert.equal(rows[0].vm,'Dalvik v2.1.0');assert.equal(rows[0].debugger,'error');});
 
 // HELO初始数值/双字符串长度/可选字段必须精确解析，损坏输入拒绝而非默默返回空字段。
 test('HELO decodes actual fields and rejects malformed optional segments', () => {

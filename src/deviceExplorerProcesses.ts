@@ -3,7 +3,34 @@ import { AdbSmartSocket, SocketFactory } from './adbSmartSocket';
 export type DebuggerState = 'default' | 'waiting' | 'attached' | 'error';
 export interface ExplorerProcess { pid: number; name?: string; packageName?: string; abi?: string; vm?: string; userId?: number; debugger: DebuggerState; error?: string; }
 export interface HeloMetadata { pid: number; name?: string; packageName?: string; abi?: string; vm?: string; userId?: number; }
+
+export interface ProcessSnapshot { pid: number; name?: string; packageName?: string; abi?: string; vm?: string; userId?: number; }
+
 const PACKAGE = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/;
+
+// 从设备ps快照解析进程归属；输入来自shell而非本机shell，缺失字段保持缺失不伪造成功。
+export function parseProcessSnapshot(output: string, pid: number): ProcessSnapshot {
+  const lines = output.split(/\r?\n/);
+  const header = lines.findIndex(line => /\bPID\b/.test(line) && /\bUSER\b/.test(line));
+  const row = lines.slice(header + 1).map(line => /^\s*(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/.exec(line)).find(match => match && Number(match[1]) === pid);
+  if (!row) { return { pid }; }
+  const [, , owner, name] = row;
+  const user = /^(?:u(\d+)(?:_.*)?|(\d+))$/.exec(owner);
+  const userId = user ? Number(user[1] ?? user[2]) : undefined;
+  const packageName = name && PACKAGE.test(name) ? name : undefined;
+  return { pid, name, packageName, ...(userId === undefined ? {} : { userId }) };
+}
+
+// 将设备ABI和app_process位数映射为Android Studio式显示文本，只有设备报告的ABI才输出。
+function processAbi(executable: string, abi64: string, abi: string): string | undefined {
+  const values64 = abi64.split(',').map(value => value.trim()).filter(Boolean);
+  const values = abi.split(',').map(value => value.trim()).filter(Boolean);
+  const is64 = /app_process64|64/.test(executable);
+  const value = (is64 ? values64[0] : values[0]) || values64[0] || values[0];
+  if (!value) { return undefined; }
+  const label = value.replace(/-v8a$/, '').replace(/^arm64$/, 'arm64');
+  return (is64 ? '64-bit' : '32-bit') + ' (' + label + ')';
+}
 
 // DDMS长度以UTF-16 code unit计数，所有可选字段只能整段缺省；协议回归覆盖surrogate和截断拒绝。
 class DdmsReader {
@@ -43,7 +70,7 @@ export class DeviceExplorerProcesses {
     try {
       const pids = await new Promise<number[]>((resolve, reject) => { stop = this.adb.trackJdwp(this.serial, resolve, reject, signal); });
       await stop?.(); stop = undefined;
-      return await Promise.all(pids.map(pid => this.describe(pid, signal)));
+      let metadata: Promise<string> | undefined; const loadMetadata = () => metadata ??= this.loadDeviceMetadata(signal); return await Promise.all(pids.map(pid => this.describe(pid, signal, loadMetadata)));
     } finally { await stop?.(); }
   }
 
@@ -52,7 +79,7 @@ export class DeviceExplorerProcesses {
     const controller = new AbortController(); const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) { abort(); }
     const records = new Map<number, { controller: AbortController; row: ExplorerProcess; done: Promise<void> }>();
-    const owned = new Set<Promise<void>>();
+    const owned = new Set<Promise<void>>(); let metadata: Promise<string> | undefined;
     const publish = () => { if (!controller.signal.aborted) { onUpdate([...records.values()].map(record => record.row)); } };
     const stopTracker = this.adb.trackJdwp(this.serial, pids => {
       const active = new Set(pids);
@@ -62,7 +89,7 @@ export class DeviceExplorerProcesses {
         const child = new AbortController(); const cancel = () => child.abort(controller.signal.reason); controller.signal.addEventListener('abort', cancel, { once: true });
         const record = { controller: child, row: { pid, debugger: 'error' as DebuggerState }, done: Promise.resolve() };
         records.set(pid, record);
-        record.done = this.describe(pid, child.signal).then(row => { child.signal.throwIfAborted(); record.row = row; publish(); }, error => { if (!child.signal.aborted) { onError(error instanceof Error ? error : new Error(String(error))); } }).finally(() => { controller.signal.removeEventListener('abort', cancel); owned.delete(record.done); });
+        record.done = this.describe(pid, child.signal, () => metadata ??= this.loadDeviceMetadata(controller.signal)).then(row => { child.signal.throwIfAborted(); record.row = row; publish(); }, error => { if (!child.signal.aborted) { onError(error instanceof Error ? error : new Error(String(error))); } }).finally(() => { controller.signal.removeEventListener('abort', cancel); owned.delete(record.done); });
         owned.add(record.done);
       }
       publish();
@@ -70,8 +97,8 @@ export class DeviceExplorerProcesses {
     return async () => { controller.abort(); await stopTracker(); await Promise.allSettled([...owned]); records.clear(); signal?.removeEventListener('abort', abort); };
   }
 
-  // 请求DDMS HELO，不抢占外部调试器，失败保留明确未知/error；协议回归断言请求chunk与元数据身份。
-  private async describe(pid: number, signal?: AbortSignal): Promise<ExplorerProcess> {
+  // 请求DDMS HELO，不抢占外部调试器；失败时使用设备侧ps快照补齐可识别元数据。
+  private async describe(pid: number, signal?: AbortSignal, loadMetadata?: () => Promise<string>): Promise<ExplorerProcess> {
     let waiting = false;
     const request = Buffer.alloc(12); request.write('HELO', 0, 'ascii'); request.writeUInt32BE(4, 4); request.writeUInt32BE(1, 8);
     try {
@@ -84,7 +111,21 @@ export class DeviceExplorerProcesses {
       });
       signal?.throwIfAborted(); const result = parseHelo(body); if (result.pid !== pid) { throw new Error('HELO PID does not match selected process'); }
       return { ...result, debugger: waiting ? 'waiting' : 'default' };
-    } catch (error) { signal?.throwIfAborted(); return { pid, debugger: 'error', error: String(error) }; }
+    } catch (error) {
+      signal?.throwIfAborted();
+      try {
+        const text = await (loadMetadata ? loadMetadata() : this.loadDeviceMetadata(signal));
+        const ps = text.split('__DEX_EXE__')[0];
+        const executable = text.split('__DEX_EXE__')[1]?.split('__DEX_ABI64__')[0]?.trim() || '';
+        const abi64 = text.split('__DEX_ABI64__')[1]?.split('__DEX_ABI__')[0]?.trim() || '';
+        const abi = text.split('__DEX_ABI__')[1]?.trim() || '';
+        const row = parseProcessSnapshot(ps, pid);
+        return { ...row, abi: processAbi(executable, abi64, abi), vm: executable ? 'Dalvik v2.1.0' : undefined, debugger: 'error', error: String(error) };
+      } catch (fallbackError) {
+        signal?.throwIfAborted();
+        return { pid, debugger: 'error', error: String(error) + '; metadata fallback: ' + String(fallbackError) };
+      }
+    }
   }
 
   // 精确发送一次VirtualMachine.Exit(1)，不是Unix kill也不是force-stop；协议回归核对命令0x0a和正文。
