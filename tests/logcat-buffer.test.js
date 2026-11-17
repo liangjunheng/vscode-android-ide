@@ -107,3 +107,30 @@ test('Logcat applies the byte cap to normal and paused ingestion paths', () => {
   assert.match(main, /pendingBytes = LogcatBuffer\.trimOldest\(pending, maxBytes, itemBytes\)/);
   assert.match(main, /entriesBytes = 0; pendingBytes = 0/);
 });
+
+// 真实 ingest/render 回归 system 行：过滤不匹配仍可见，顺序、UTF-8 预算和字段结构保持。
+test('system process rows remain visible and metadata-free', () => {
+  const data = main.slice(main.indexOf('  const itemBytes ='), main.indexOf('  function recompile()'));
+  const rendering = main.slice(main.indexOf('  function rowHtml(i) {'), main.indexOf('  function buildRe()'));
+  const ctx = vm.createContext({ LogcatBuffer, LogFilter: require('../media/logcat/filter.js') });
+  vm.runInContext("let entries=[],rows=[],maxBytes=1000,entriesBytes=0,pending=[],pendingBytes=0,pkgMap={}; const compiled={test:()=>false}; const S={cur:-1,re:null}; const st={fmt:'standard',wrap:false}; const H=24; const esc=s=>s; const tagColor=()=> 'red';\n" + data + rendering, ctx);
+  const start = '---------------------------- PROCESS STARTED (25219) for package com.tcl.ink.demo ----------------------------';
+  const end = '---------------------------- PROCESS ENDED (25219) for package com.tcl.ink.demo ----------------------------';
+  vm.runInContext("ingest(" + JSON.stringify([{system:true,msg:start,ts:'x',pid:1,tid:2,lv:'I',tag:'sys',pkg:'hidden'},{msg:'ordinary hidden',ts:'x',pid:1,tid:2,lv:'I',tag:'hidden'},{system:true,msg:end,ts:'x',pid:1,tid:2,lv:'I',tag:'sys',pkg:'hidden'}]) + ")", ctx);
+  assert.equal(vm.runInContext('entries.length', ctx), 3); assert.equal(vm.runInContext('rows.length', ctx), 2);
+  assert.deepEqual(Array.from(vm.runInContext('rows.map(r=>r.e.lines[0])', ctx)), [start,end]);
+  assert.equal(vm.runInContext('entries.some(e=>e.local)',ctx),false);
+  assert.equal(vm.runInContext('entriesBytes',ctx),[start,'ordinary hidden',end].reduce((n,s)=>n+Buffer.byteLength(s)+1,0));
+  for (const fmt of ['standard','compact']) {
+    vm.runInContext('st.fmt=' + JSON.stringify(fmt), ctx);
+    for(const [i,msg] of [start,end].entries()) {
+      const html=vm.runInContext('rowHtml('+i+')',ctx);
+      assert.equal(html,'<div class="row system" data-i="'+i+'" style="height:24px"><span class="m">'+msg+'</span></div>');
+      assert.deepEqual(Array.from(vm.runInContext('rowFields('+i+')',ctx)),[msg]);
+    }
+  }
+  vm.runInContext('maxBytes='+ (Buffer.byteLength(end)+1+7)+';trimEntries();ingest([{msg:"日志",ts:"x",pid:1,tid:2,lv:"I",tag:"hidden"}])',ctx);
+  assert.equal(vm.runInContext('entriesBytes',ctx),Buffer.byteLength(end)+1+7);
+  assert.deepEqual(Array.from(vm.runInContext('entries.map(e=>e.lines[0])',ctx)),[end,'日志']);
+  assert.deepEqual(Array.from(vm.runInContext('rows.map(r=>r.e.lines[0])',ctx)),[end]);
+});

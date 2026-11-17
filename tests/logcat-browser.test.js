@@ -145,6 +145,9 @@ async function browser(t, data, signal) {
     await evaluate(`new Promise(resolve=>{const message=${JSON.stringify(message)};window.addEventListener('message',function received(event){if(event.data.type!==message.type)return;window.removeEventListener('message',received);resolve()});window.postMessage(message,'*')})`);
     await frames();
   }
+  // 通过真实CDP文本/输入法入口输入，不调用生产闭包；返回前提交原生输入事件与布局。
+  async function type(text) { await call('Input.insertText', { text }); await frames(); }
+  async function ime(text) { await call('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length }); await frames(); }
   // CDP 设置宽窄屏 viewport，返回前等待页面布局。
   async function viewport(width, deviceScaleFactor = 1, height = 720) { await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile: false }); await frames(); }
   // 只点击公开 DOM 控件，输出为提交后的真实页面状态。
@@ -159,6 +162,8 @@ async function browser(t, data, signal) {
   async function mouse(type, x, y, clickCount = 1) {
     await call('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount });
   }
+  // 原生滚轮命中实际文字/空白区域，输入CSS坐标和位移；完成后等待浏览器滚动和绘制，禁止用scrollTop代替滚轮。
+  async function wheel(x,y,deltaY,deltaX=0) { await call('Input.dispatchMouseEvent',{type:'mouseWheel',x,y,deltaY,deltaX}); await frames(); }
   // select#fmt 派发真实 change 事件，不绕过生产格式处理器。
   async function format(value) { await evaluate(`(()=>{const select=document.querySelector('select#fmt');select.value=${JSON.stringify(value)};select.dispatchEvent(new Event('change',{bubbles:true}))})()`); await frames(); }
   // 搜索用 MutationObserver 等待计数更新，保留生产防抖时序；无结果更新由运行 deadline 失败。
@@ -182,7 +187,7 @@ async function browser(t, data, signal) {
   await post({type:'init',icons:data.icons,mine:['com.browser.fixture'],maxBytes:1048576});
   await post({type:'devices',list:[{serial:'browser-fixture',model:'Browser fixture',state:'device'}],serial:'browser-fixture'});
   await post({type:'reset'});
-  return {evaluate,frames,post,viewport,click,key,mouse,format,search,screenshot,region};
+  return {evaluate,frames,post,viewport,click,key,mouse,wheel,type,ime,format,search,screenshot,region};
 }
 
 // 构造真实 batch 记录；同毫秒元数据复现独立首行与 msg 内换行边界。
@@ -286,6 +291,27 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
     await page.evaluate("document.getElementById('sc').scrollTop-=120");await page.frames();await follows(page,false);
   });
 
+  // real wheel 回归：鼠标位于 fixed 日志文字/空白时上下滚动，过滤及换行不改变路由，追加不夺回阅读位置。
+  await t.test('real wheel scrolls fixed log text in both directions',async()=>{
+    for(const wrap of [false,true]) for(const filter of ['', 'package:mine']){
+      await page.viewport(1440);await page.format('compact');await page.post({type:'reset'});
+      if(await page.evaluate("document.body.classList.contains('wrap')")!==wrap)await page.click('b-wrap');
+      await page.evaluate("(()=>{const q=document.getElementById('q');q.value="+JSON.stringify(filter)+";q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+      await page.post({type:'batch',items:Array.from({length:160},(_,i)=>item('wheel-'+i))});
+      const position=()=>page.evaluate("(()=>{const sc=document.getElementById('sc'),r=sc.getBoundingClientRect();return{top:sc.scrollTop,x:r.left+200,y:r.top+sc.clientHeight/2}})()");
+      const bottom=await position();
+      await page.wheel(bottom.x,bottom.y,-180);const up=await position();assert.ok(up.top<bottom.top,JSON.stringify({bottom,up,wrap,filter}));await follows(page,false);
+      await page.wheel(up.x,up.y,90);const down=await position();assert.ok(down.top>up.top,JSON.stringify({up,down}));
+      await page.post({type:'batch',items:[item('wheel-after')]});assert.equal((await position()).top,down.top);
+      await page.click('b-end');await follows(page,true);await atEnd(page,'wheel-after');
+    }
+    // 文字以外的 fixed 视口空白也必须滚动，避免只处理 .row。
+    await page.post({type:'reset'});await page.post({type:'batch',items:Array.from({length:150},(_,i)=>item('blank-'+i))});
+    const blank=await page.evaluate("(()=>{const s=document.getElementById('sc'),r=s.getBoundingClientRect();return{x:r.right-45,y:r.top+s.clientHeight/2,top:s.scrollTop}})()");
+    await page.wheel(blank.x,blank.y,-120);assert.ok(await page.evaluate("document.getElementById('sc').scrollTop")<blank.top);
+    await page.evaluate("(()=>{const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+  });
+
   // 原生拖选时持续追加：选中文字、端点节点和屏幕位置不变，释放/清空不自动恢复，末尾按钮显式恢复。
   await t.test('text selection keeps its nodes and viewport stable while logs append',async()=>{
     await page.viewport(1600);
@@ -331,6 +357,95 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
     }
   });
 
+  // 用户截图中的总数位数会改变flex空间；真实后台消息改变总数，可见行和整个工具栏/视口都不能移动。
+  await t.test('background count digit changes keep header and visible log geometry stable',async()=>{
+    for(const width of [1600,480]){
+      await page.viewport(width,1,487);await page.post({type:'reset'});
+      await page.evaluate("(()=>{const q=document.getElementById('q');q.value='tag:Keep';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+      await page.post({type:'batch',items:Array.from({length:100},(_,i)=>({...item('constant visible '+i),tag:'Keep'}))});
+      const positions="['header','dev','fmt','filterbox','side','sc'].map(id=>{const r=document.getElementById(id).getBoundingClientRect();return[id,r.x,r.y,r.width,r.height]})";
+      const initial=await page.evaluate(positions);let total=100;
+      for(const next of [999,1000,9999,10000]){
+        await page.post({type:'batch',items:Array.from({length:next-total},()=>({...item('noise'),tag:'Other'}))});total=next;
+        assert.deepEqual(await page.evaluate(positions),initial,'layout changed at count '+next+', width '+width);
+      }
+      await page.evaluate("(()=>{const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+    }
+  });
+
+  // 可见原生光标、输入选区与文档模型分离：在旧行输入/粘贴统一追加尾部，不能覆盖旧记录。
+  await t.test('native caret supports append-only typing paste and IME without rewriting logs',async()=>{
+    await page.viewport(1600);await page.post({type:'reset'});await page.format('standard');
+    if(await page.evaluate("document.body.classList.contains('wrap')"))await page.click('b-wrap');
+    await page.post({type:'batch',items:[item('original first word'),item('original second word')]});
+    const point=await page.evaluate("(()=>{const r=document.querySelector('#win .row .m').getBoundingClientRect();return{x:r.left+25,y:r.top+r.height/2}})()");
+    await page.mouse('mousePressed',point.x,point.y);await page.mouse('mouseReleased',point.x,point.y);await page.frames();
+    assert.equal(await page.evaluate("document.activeElement===document.getElementById('row-viewport')"),true);
+    assert.equal(await page.evaluate('getSelection().isCollapsed'),true);
+    // 模拟宿主黄色focus样式，局部规则必须胜出，但不能通过blur丢弃编辑光标。
+    assert.deepEqual(await page.evaluate("(()=>{const s=document.createElement('style');s.id='host-focus-fixture';s.textContent='*:focus{outline:1px solid rgb(255,204,0)}';document.head.append(s);return ['sc','row-viewport'].map(id=>{const n=document.getElementById(id);n.focus({preventScroll:true});const c=getComputedStyle(n);return[c.outlineStyle,c.outlineWidth,c.boxShadow]})})()"),[['none','0px','none'],['none','0px','none']]);
+    assert.equal(await page.evaluate("document.activeElement===document.getElementById('row-viewport')"),true);
+    await page.evaluate("document.getElementById('host-focus-fixture').remove()");
+    await page.type('typed');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].map(n=>n.textContent)"),['original first word','original second word','typed']);
+    // 标准/紧凑均使用原生 Range 测量首字符与时间列左缘；主题切换只改变 caret/正文色，不改变字号。
+    for(const fmt of ['standard','compact']) {
+      await page.format(fmt);
+      const font=await page.evaluate("getComputedStyle(document.querySelector('.row.local .m')).fontSize");
+      for(const [cursor,foreground] of [['#ff00aa','#eeeeee'],['#00aaff','#dddddd']]) {
+        await page.evaluate("document.body.style.setProperty('--vscode-editorCursor-foreground',"+JSON.stringify(cursor)+");document.body.style.setProperty('--vscode-editor-foreground',"+JSON.stringify(foreground)+")");
+        const layout=await page.evaluate("(()=>{const sc=document.getElementById('sc'),row=document.querySelector('.row.local'),m=row.querySelector('.m'),time=document.querySelector('.row .ts,.row .ctime'),r=document.createRange();r.setStart(m.firstChild,0);r.setEnd(m.firstChild,1);return{left:r.getBoundingClientRect().left-sc.getBoundingClientRect().left,time:time.getBoundingClientRect().left-sc.getBoundingClientRect().left,scroll:sc.scrollLeft,fields:[...row.children].map(n=>n.className),text:row.textContent,color:getComputedStyle(m).color,caret:getComputedStyle(m).caretColor,font:getComputedStyle(m).fontSize}})()");
+        assert.ok(Math.abs(layout.left-layout.time)<1,JSON.stringify(layout)); assert.equal(layout.scroll,0); assert.deepEqual(layout.fields,['m']); assert.equal(layout.text,'typed'); assert.equal(layout.font,font);
+        assert.equal(layout.caret,cursor==='#ff00aa'?'rgb(255, 0, 170)':'rgb(0, 170, 255)'); assert.equal(layout.color,foreground==='#eeeeee'?'rgb(238, 238, 238)':'rgb(221, 221, 221)');
+      }
+      await page.screenshot('caret-left-'+fmt);
+    }
+    await page.evaluate("document.body.style.removeProperty('--vscode-editorCursor-foreground');document.body.style.removeProperty('--vscode-editor-foreground')");
+    await page.format('standard');
+    await page.type(' more');await page.key('Enter');await page.type('next');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].map(n=>n.textContent)"),['original first word','original second word','typed more','next']);
+    await page.evaluate("(()=>{const m=document.querySelector('#win .row .m').firstChild;getSelection().setBaseAndExtent(m,0,m,8)})()");await page.frames();await follows(page,false);
+    await page.key('Backspace');await page.key('Delete');
+    assert.equal(await page.evaluate("document.querySelector('#win .row .m').textContent"),'original first word');
+    await page.type(' tail');
+    assert.equal(await page.evaluate("document.querySelector('#win .row:last-child .m').textContent"),'next tail');
+    await page.evaluate("(()=>{const data=new DataTransfer();data.setData('text/plain',"+JSON.stringify('<b>paste</b>\nline')+");document.getElementById('row-viewport').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}))})()");await page.frames();
+    assert.equal(await page.evaluate("document.querySelector('#win .row:last-child .m').textContent"),'line');assert.equal(await page.evaluate("document.querySelectorAll('#win b').length"),0);
+    await page.ime('中文');await page.type('中文');
+    assert.equal(await page.evaluate("document.querySelector('#win .row:last-child .m').textContent"),'line中文');
+    assert.equal(await page.evaluate("document.querySelector('#win .row .m').textContent"),'original first word');
+    await page.post({type:'batch',items:[item('device after typing')]});
+    assert.equal(await page.evaluate("document.querySelector('#win .row:not(.local):last-of-type')?.textContent.includes('device after typing') || [...document.querySelectorAll('#win .row:not(.local) .m')].some(n=>n.textContent==='device after typing')"),true);
+    assert.equal(await page.evaluate("document.querySelector('#win .row:last-child .m').textContent"),'device after typing');
+    await page.ime('待提交');await page.post({type:'reset'});await page.type('new document');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].map(n=>n.textContent)"),['new document']);
+    await page.screenshot('caret-append');
+    await page.evaluate('getSelection().removeAllRanges();document.activeElement.blur()');
+  });
+
+  // tail input回归：无新日志续写同一行，有日志严格按到达顺序追加；旧选区不参与插入，长行/换行/IME光标可见。
+  await t.test('tail input continues without new logs and preserves device arrival order',async()=>{
+    await page.viewport(480);await page.format('compact');await page.post({type:'reset'});
+    if(await page.evaluate("document.body.classList.contains('wrap')"))await page.click('b-wrap');
+    await page.post({type:'batch',items:Array.from({length:90},(_,i)=>item('captured-'+i))});
+    await page.evaluate("(()=>{const n=document.querySelector('#win .row .m').firstChild;getSelection().setBaseAndExtent(n,0,n,5);document.getElementById('row-viewport').focus({preventScroll:true})})()");
+    await page.type('first');
+    await page.type(' second');await page.type(' third');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('.row.local .m')].map(n=>n.textContent)"),['first second third']);
+    await page.post({type:'batch',items:[item('incoming one'),item('incoming two')]});
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].slice(-3).map(n=>n.textContent)"),['first second third','incoming one','incoming two']);
+    await page.type('after logs');await page.type(' continued');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].slice(-4).map(n=>n.textContent)"),['first second third','incoming one','incoming two','after logs continued']);
+    assert.equal(await page.evaluate("[...document.querySelectorAll('.row:not(.local) .m')].some(n=>n.textContent==='captured-89')"),true);
+    await page.type('x'.repeat(160));
+    const visible=()=>page.evaluate("(()=>{const s=getSelection(),r=s.getRangeAt(0).getBoundingClientRect(),v=document.getElementById('sc'),b=v.getBoundingClientRect();return{focused:document.activeElement.id==='row-viewport',collapsed:s.isCollapsed,local:!!s.anchorNode.parentElement.closest('.row.local'),height:r.height,x:r.left-b.left,y:r.top-b.top,right:v.clientWidth,bottom:v.clientHeight}})()");
+    let caret=await visible();assert.ok(caret.focused&&caret.collapsed&&caret.local&&caret.height>0&&caret.x>=0&&caret.x<caret.right&&caret.y>=0&&caret.y+caret.height<=caret.bottom+1,JSON.stringify(caret));
+    await page.key('Enter');await page.type('next');assert.equal(await page.evaluate("document.querySelector('.row.local:last-child .m').textContent"),'next');
+    await page.ime('中文');await page.type('中文');assert.equal(await page.evaluate("document.querySelector('.row.local:last-child .m').textContent"),'next中文');
+    caret=await visible();assert.ok(caret.height>0&&caret.x>=0&&caret.x<caret.right&&caret.y>=0&&caret.y+caret.height<=caret.bottom+1,JSON.stringify(caret));
+    await page.screenshot('tail-input-visible');await page.post({type:'reset'});await page.evaluate('getSelection().removeAllRanges();document.activeElement.blur()');
+  });
+
   // 用户复现：过滤后的记录未变，后台只追加不匹配日志；日志节点、样式、滚动和像素必须完全不变。
   await t.test('filtered-out batches never mutate or reposition unchanged visible logs',async()=>{
     await page.viewport(1600);await page.format('standard');
@@ -350,6 +465,101 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
       // 新匹配仍应显示，不能通过停止接收来使静止断言伪通过。
       await page.post({type:'batch',items:[{...item('new matching record'),tag:'Keep'}]});await atEnd(page,'new matching record');
     }
+    await page.evaluate("(()=>{const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+  });
+
+  // 多行溢出回归：真实 Edge 的两种 DPR/字号/过滤矩阵，先 reset 灌入，再跟随批次与真实 wheel 阅读。
+  // 前置为 1MiB 预算；严格比较相同可见记录的 DOM 身份、屏幕位置和固定区域 PNG，且证明匹配前缀确实淘汰。
+  await t.test('overflowing viewport preserves tail and surviving reader glyph phase',async t=>{
+    await page.format('standard');
+    if(await page.evaluate("document.body.classList.contains('wrap')"))await page.click('b-wrap');
+    for(const dpr of [1.25,1.5]) for(const size of [14,15]) for(const filter of ['package:mine','']){
+      await t.test('DPR '+dpr+' font '+size+' filter '+(filter||'none'),async()=>{
+        await page.viewport(1600,dpr,480);
+        await page.evaluate("document.body.style.setProperty('--vscode-editor-font-size',"+JSON.stringify(size+'px')+")");await page.frames();
+        await page.evaluate("(()=>{const q=document.getElementById('q');q.value="+JSON.stringify(filter)+";q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+        await page.post({type:'reset'});
+        const fixed=item('OVERFLOW GLYPH ABC 0123456789 '.padEnd(700,'x'));
+        await page.post({type:'batch',items:Array.from({length:1250},()=>({...fixed}))});
+        await follows(page,true);
+        const tail=await page.evaluate("(()=>{const sc=document.getElementById('sc'),row=document.querySelector('#win .row:last-child'),m=row.querySelector('.m').getBoundingClientRect();return{overflow:sc.scrollHeight>sc.clientHeight,top:row.getBoundingClientRect().top,clip:{x:m.x,y:m.y,width:220,height:m.height}}})()");
+        assert.equal(tail.overflow,true,'fixture must actually overflow');
+        const tailPixels=await page.region(tail.clip);
+        for(const count of [1,2,7]){
+          await page.post({type:'batch',items:Array.from({length:count},()=>({...fixed}))});
+          await follows(page,true);
+          assert.equal(await page.evaluate("(()=>{const sc=document.getElementById('sc'),row=document.querySelector('#win .row:last-child'),r=row.getBoundingClientRect(),box=sc.getBoundingClientRect();return sc.scrollHeight-sc.clientHeight-sc.scrollTop<=1&&r.bottom>box.top&&r.bottom<=box.top+sc.clientHeight+1})()"),true,'actual final duplicate row visible at native end');
+          assert.equal(await page.evaluate("document.querySelector('#win .row:last-child').getBoundingClientRect().top"),tail.top,'tail phase '+JSON.stringify({dpr,size,filter,count}));
+          assert.equal(await page.region(tail.clip),tailPixels,'tail PNG '+JSON.stringify({dpr,size,filter,count}));
+        }
+        // 鼠标命中 fixed 文字层；不能用直接设置 scrollTop 伪造退出跟随。
+        await page.wheel(tail.clip.x+12,tail.clip.y+5,-210.5);await follows(page,false);
+        const reader=await page.evaluate("(()=>{const sc=document.getElementById('sc'),box=sc.getBoundingClientRect();window.__overflowRows=[...document.querySelectorAll('#win .row')].filter(row=>{const r=row.getBoundingClientRect();return r.top>=box.top&&r.bottom<=box.top+sc.clientHeight}).slice(0,3);const first=window.__overflowRows[0],m=first.querySelector('.m').getBoundingClientRect();return{rows:window.__overflowRows.map(row=>({top:row.getBoundingClientRect().top,text:row.querySelector('.m').textContent,index:+row.dataset.i})),count:Number(document.getElementById('count').textContent.split('/')[0]),clip:{x:m.x,y:m.y,width:220,height:m.height}}})()");
+        assert.equal(reader.rows.length,3,'multiple actual visible records');
+        const readerPixels=await page.region(reader.clip);
+        for(const count of [13,240]){
+          await page.post({type:'batch',items:Array.from({length:count},()=>({...fixed,...(filter?{pkg:'com.other.fixture'}:{})}))});
+          await follows(page,false);
+          const after=await page.evaluate("window.__overflowRows.map(row=>({same:row.isConnected&&[...document.querySelectorAll('#win .row')].includes(row),top:row.getBoundingClientRect().top,text:row.querySelector('.m').textContent,index:+row.dataset.i}))");
+          for(let i=0;i<after.length;i++){
+            assert.equal(after[i].same,true,'surviving record DOM identity');
+            assert.equal(after[i].text,reader.rows[i].text);
+            assert.equal(after[i].top,reader.rows[i].top,'reader phase '+JSON.stringify({dpr,size,filter,count,before:reader.rows[i],after:after[i]}));
+          }
+          assert.equal(await page.region(reader.clip),readerPixels,'reader PNG '+JSON.stringify({dpr,size,filter,count}));
+          if(count===240)assert.ok(after[0].index<reader.rows[0].index,'matching prefix eviction must change surviving row index');
+        }
+        await page.post({type:'reset'});await follows(page,true);
+        await page.post({type:'batch',items:Array.from({length:123},()=>({...fixed}))});
+        assert.equal(await page.evaluate("document.querySelector('#win .row:last-child').getBoundingClientRect().top"),tail.top,'reset refilling keeps tail phase');
+        assert.equal(await page.region(tail.clip),tailPixels,'reset refilling PNG');
+      });
+    }
+    await page.evaluate("(()=>{document.body.style.setProperty('--vscode-editor-font-size','14px');const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+  });
+
+  // 顶部空白回归：短窗/DPR1.25 下真实大滚轮、滚动条跳跃与淘汰交错，输入两种过滤/换行及长批次，输出每帧连续覆盖。
+  // 前置为真实 Edge 和溢出数据；所有可见行矩形必须无缝覆盖视口，不能以 scrollTop 改变替代绘制正确性。
+  await t.test('scroll coverage survives large wheel jumps wrapping and same-frame eviction',async()=>{
+    await page.viewport(1600,1.25,360);await page.format('standard');
+    for(const wrap of [false,true]) for(const filter of ['package:mine','']){
+      await page.post({type:'reset'});
+      if(await page.evaluate("document.body.classList.contains('wrap')")!==wrap)await page.click('b-wrap');
+      await page.evaluate("(()=>{const q=document.getElementById('q');q.value="+JSON.stringify(filter)+";q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+      const batch=Array.from({length:1400},(_,i)=>item(('coverage-'+i+' ').padEnd(600+(i%9)*190,'x')+(i%7===0?'\ncontinuation '+i:'')));
+      await page.post({type:'batch',items:batch});
+      // 采集输入label及可选原生滚轮操作，输出逐帧覆盖断言；前提生产wheel监听先注册，首帧不等待稳定或重试。
+      async function covered(label,action,items=[]){
+        const sampling="new Promise(resolve=>{const samples=[];function frame(){const sc=document.getElementById('sc'),box=sc.getBoundingClientRect();samples.push({top:box.top,bottom:box.top+sc.clientHeight,scrollTop:sc.scrollTop,overflow:sc.scrollHeight>sc.clientHeight,layers:['win','row-viewport','row-window'].map(id=>{const el=document.getElementById(id),r=el.getBoundingClientRect();return{id,top:r.top,bottom:r.bottom,scrollTop:el.scrollTop}}),rows:[...document.querySelectorAll('#win .row')].map(row=>{const r=row.getBoundingClientRect();return{top:r.top,bottom:r.bottom,index:+row.dataset.i}}).filter(r=>r.bottom>box.top&&r.top<box.top+sc.clientHeight)});if(samples.length===3)resolve(samples);else requestAnimationFrame(frame)}"+(action?"window.addEventListener('wheel',()=>{window.dispatchEvent(new MessageEvent('message',{data:{type:'batch',items:"+JSON.stringify(items)+"}}));requestAnimationFrame(frame)},{once:true})":"requestAnimationFrame(frame)")+"})";
+        if(action){await page.evaluate("window.__coverageFrames="+sampling+";true");await action();}
+        const samples=await page.evaluate(action?"window.__coverageFrames":sampling);
+        for(const sample of samples){
+          const detail=JSON.stringify({wrap,filter,label,sample});assert.ok(sample.rows.length,detail);
+          for(const layer of sample.layers){assert.equal(layer.scrollTop,0,detail);assert.equal(layer.top,sample.top,detail);}
+          assert.ok(sample.layers[1].bottom>=sample.bottom,detail);
+          for(let i=1;i<sample.rows.length;i++)assert.ok(Math.abs(sample.rows[i].top-sample.rows[i-1].bottom)<=0.02,detail);
+          if(sample.overflow&&sample.scrollTop>0)assert.ok(sample.rows[0].top<=sample.top+0.02,detail);
+          if(sample.overflow)assert.ok(sample.rows.at(-1).bottom>=sample.bottom-1,detail);
+        }
+      }
+      await covered('initial');
+      for(const delta of [-1280,-4600,2300,-7900,5100,-3600]){
+        const point=await page.evaluate("(()=>{const r=document.getElementById('sc').getBoundingClientRect();return{x:r.left+200,y:r.top+100}})()");
+        await covered('wheel '+delta,()=>page.wheel(point.x,point.y,delta));
+      }
+      for(const ratio of [0.1,0.93,0.45,0.99]){
+        // 同一事件任务内投递真实 batch 并跳动原生滚动位置，覆盖淘汰后自动 clamp 与 scroll 事件交错。
+        await page.evaluate("new Promise(resolve=>{window.addEventListener('message',function received(event){if(event.data.type!=='batch')return;window.removeEventListener('message',received);const sc=document.getElementById('sc');sc.scrollTop=sc.scrollHeight*"+ratio+";resolve()});window.postMessage({type:'batch',items:"+JSON.stringify(batch.slice(0,380))+"},'*')})");
+        await covered('jump eviction '+ratio);
+        // 多帧及反向滚轮仍须填满顶部，排除持续裁剪偏移而非仅瞬时空白。
+        for(const delta of [-640,1280,-640])await covered('persistent wheel '+ratio+' '+delta,()=>page.wheel(250,140,delta),batch.slice(0,60));
+      }
+      // 快速切换公开布局控件时保留未知换行高度，不等待中间布局帧。
+      await page.evaluate("(()=>{document.getElementById('b-wrap').click();const q=document.getElementById('q');q.value="+JSON.stringify(filter?'':'package:mine')+";q.dispatchEvent(new Event('input',{bubbles:true}));document.getElementById('sc').scrollTop=1e9})()");
+      await covered('rapid switch');
+    }
+    await page.post({type:'reset'});await page.viewport(1600,1.25,480);
+    if(await page.evaluate("document.body.classList.contains('wrap')"))await page.click('b-wrap');
     await page.evaluate("(()=>{const q=document.getElementById('q');q.value='';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
   });
 
@@ -487,6 +697,80 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
       for(let i=0;i<3;i++)assert.deepEqual(rows[i],[...head,['same-first','same-second','same-third'][i]]);
       assert.deepEqual(rows[3],[...head.map(()=>''),'real-continuation']);
     }
+  });
+  // Studio按可见文档续写：被过滤日志不得拆开尾local，不改变原始记录顺序；可见新日志正常追加后才创建新输入行。
+  await t.test('filtered background does not split repeated tail input',async()=>{
+    await page.viewport(1440);await page.post({type:'reset'});
+    await page.evaluate("(()=>{const q=document.getElementById('q');q.value='package:mine';q.dispatchEvent(new Event('input',{bubbles:true}))})()");await page.frames();
+    await page.post({type:'batch',items:[item('visible before typing')]});
+    await page.evaluate("document.getElementById('row-viewport').focus({preventScroll:true})");await page.type('alpha');
+    for(const text of ['beta','gamma']){
+      await page.post({type:'batch',items:[{...item('hidden-'+text),pkg:'com.other.hidden'}]});
+      await page.evaluate("(()=>{const n=document.querySelector('.row.local .m').firstChild;getSelection().collapse(n,n.length)})()");
+      await page.type(text);
+    }
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('.row.local .m')].map(n=>n.textContent)"),['alphabetagamma']);
+    await page.post({type:'batch',items:[item('visible after typing')]});
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].slice(-2).map(n=>n.textContent)"),['alphabetagamma','visible after typing']);
+    await page.type('delta');await page.type('epsilon');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].slice(-3).map(n=>n.textContent)"),['alphabetagamma','visible after typing','deltaepsilon']);
+    await page.evaluate("document.getElementById('q').value='';document.getElementById('q').dispatchEvent(new Event('input',{bubbles:true}))");await page.frames();
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].slice(-5).map(n=>n.textContent)"),['alphabetagamma','hidden-beta','hidden-gamma','visible after typing','deltaepsilon']);
+    await page.post({type:'reset'});await page.evaluate('getSelection().removeAllRanges();document.activeElement.blur()');
+  });
+
+  // 用户矩阵日志：原始msg内换行保留记录边界，仅首行有元数据，同毫秒独立记录仍完整显示；复制正文保留所有换行。
+  await t.test('matrix multiline continuations omit metadata without merging independent records',async()=>{
+    await page.viewport(1600);await page.post({type:'reset'});
+    const lines=['presentTrans:(row0: 1, 0, 0, 0','row1: -0, -1, -0, -0','row2: 0, 0, 1, 0','row3: 0, 0, 0, 1',')'];
+    const record={...item(lines.join(String.fromCharCode(10))),tag:'INK_SDK_JNI',pkg:'com.tcl.ink.demo'};
+    await page.post({type:'batch',items:[record,{...record,msg:'independent same header'}]});
+    for(const fmt of ['standard','compact']){
+      await page.format(fmt);
+      const data=await page.evaluate("[...document.querySelectorAll('#win .row')].map(r=>[...r.children].map(n=>n.textContent))");
+      assert.equal(data.length,6);assert.equal(data[0].at(-1),lines[0]);assert.equal(data[0][fmt==='standard'?4:1],'I');
+      for(let i=1;i<5;i++){assert.equal(data[i].at(-1),lines[i]);assert.ok(data[i].slice(0,-1).every(s=>s===''),JSON.stringify({fmt,i,row:data[i]}));}
+      assert.equal(data[5].at(-1),'independent same header');assert.equal(data[5][fmt==='standard'?4:1],'I');assert.ok(data[5].some(s=>s==='INK_SDK_JNI'));
+      await page.evaluate("document.querySelectorAll('#win .row .m')[2].dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:80,clientY:140}))");
+      await page.evaluate("[...document.querySelectorAll('.menu div')].find(n=>n.textContent==='Copy message').click()");
+      assert.deepEqual(await page.evaluate("window.__hostMessages.filter(m=>m.type==='copy').at(-1)"),{type:'copy',text:record.msg});
+    }
+    await page.screenshot('matrix-multiline');await page.post({type:'reset'});
+  });
+
+  // 公开协议投递分隔行；真实过滤、暂停/隐藏恢复、两格式、搜索复制和窄屏换行共同验证系统行。
+  await t.test('process separators stay plain through filtering pause search and wrap',async()=>{
+    await page.post({type:'reset'}); await page.viewport(1440);
+    const start='---------------------------- PROCESS STARTED (25219) for package com.tcl.ink.demo ----------------------------';
+    const end='---------------------------- PROCESS ENDED (25219) for package com.tcl.ink.demo ----------------------------';
+    await page.post({type:'batch',items:[{...item(start),system:true},item('normal-before')]});
+    await page.click('b-pause');
+    await page.post({type:'batch',items:[item('normal-paused'),{...item(end),system:true}]});
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].map(n=>n.textContent)"),[start,'normal-before']);
+    await page.click('b-pause');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].map(n=>n.textContent)"),[start,'normal-before','normal-paused',end]);
+    await page.evaluate("document.getElementById('q').focus()"); await page.type('tag:NeverMatches'); await page.key('Enter');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row')].map(n=>n.textContent)"),[start,end]);
+    await page.post({type:'visibility',visible:false}); await page.post({type:'batch',items:[{...item(start),system:true}]});
+    assert.equal(await page.evaluate("document.querySelectorAll('#win .row').length"),2); await page.post({type:'visibility',visible:true});
+    for(const fmt of ['standard','compact']){
+      await page.format(fmt);
+      assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row')].map(r=>[r.className,r.children.length,r.firstElementChild.className,r.textContent])"),[[ 'row system',1,'m',start],['row system',1,'m',end],['row system',1,'m',start]]);
+      await page.search('SharedTag'); assert.equal(await page.evaluate("document.getElementById('scount').textContent"),'No results'); await page.key('Escape');
+      await page.search('PROCESS ENDED'); assert.equal(await page.evaluate("document.getElementById('scount').textContent"),'1/1');
+      assert.equal(await page.evaluate("document.querySelector('.row.cur').textContent"),end); await page.key('Escape');
+      // 系统行复制沿用生产右键命令，不能重新拼入隐藏元数据。
+      for(const label of ['Copy message','Copy line']) {
+        await page.evaluate("document.querySelector('#win .row.system .m').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:60,clientY:100}))");
+        await page.evaluate("[...document.querySelectorAll('.menu div')].find(n=>n.textContent==="+JSON.stringify(label)+").click()");
+        assert.deepEqual(await page.evaluate("window.__hostMessages.filter(m=>m.type==='copy').at(-1)"),{type:'copy',text:start});
+      }
+      await page.screenshot('process-'+fmt);
+    }
+    await page.viewport(480); if(!await page.evaluate("document.body.classList.contains('wrap')"))await page.click('b-wrap');
+    const box=await page.evaluate("(()=>{const sc=document.getElementById('sc'),r=[...document.querySelectorAll('#win .row')];return{width:sc.clientWidth,scroll:sc.scrollWidth,wrapped:r.every(n=>n.getBoundingClientRect().height>parseFloat(getComputedStyle(sc).lineHeight)),overlap:r.slice(1).some((n,i)=>r[i].getBoundingClientRect().bottom>n.getBoundingClientRect().top+1),color:getComputedStyle(r[0]).color}})()");
+    assert.ok(box.scroll<=box.width+1); assert.equal(box.wrapped,true); assert.equal(box.overlap,false); assert.equal(box.color,'rgb(221, 221, 221)'); await page.screenshot('process-wrap-480');
+    await page.evaluate("document.getElementById('q').value='';document.getElementById('q').dispatchEvent(new Event('input',{bubbles:true}))"); await page.key('Enter'); await page.frames();
   });
   } catch (error) { console.error('Logcat browser failure before cleanup:', error); throw error; }
 });

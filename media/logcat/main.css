@@ -15,7 +15,7 @@ html,body{height:100%;margin:0;padding:0;overflow:hidden}
 body{display:flex;flex-direction:column;color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size)}
 svg{width:16px;height:16px;display:block}
 
-#header{display:flex;gap:6px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--vscode-panel-border,#444)}
+#header{display:flex;flex-shrink:0;gap:6px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--vscode-panel-border,#444)}
 select{appearance:none;-webkit-appearance:none;background-color:var(--vscode-dropdown-background,var(--vscode-input-background));color:var(--vscode-dropdown-foreground,var(--vscode-input-foreground));border:1px solid var(--vscode-dropdown-border,var(--vscode-input-border,#555));padding:5px 30px 5px 9px;border-radius:6px;max-width:220px;min-height:28px;font:inherit;line-height:1.2;cursor:pointer;transition:border-color .12s ease,background-color .12s ease,box-shadow .12s ease}
 .device-select{position:relative;flex:0 1 220px;min-width:80px}
 .device-select #dev{display:block;width:100%;max-width:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.device-select #dev:focus-visible,select:focus-visible{outline:0;border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px var(--vscode-focusBorder)}select:hover{border-color:var(--vscode-focusBorder)}select option{background:var(--vscode-dropdown-background,var(--vscode-editorWidget-background));color:var(--vscode-dropdown-foreground,var(--vscode-foreground))}
@@ -35,15 +35,16 @@ body:not(.vscode-light) #hl .kv{color:transparent}
 .ib.on{background:var(--vscode-toolbar-activeBackground,var(--vscode-toolbar-hoverBackground))}
 .ib .codicon{font-size:16px}
 #fav.active svg path,#fav.active svg{color:#ffaf0f}
-#count{opacity:.6;white-space:nowrap}
+#count{flex:0 0 14ch;min-width:14ch;max-width:14ch;overflow:hidden;text-overflow:ellipsis;opacity:.6;text-align:end;white-space:nowrap;font-variant-numeric:tabular-nums}
 
 #main{flex:1;min-height:0;display:flex}
 #log-content{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
-#side{display:flex;flex-direction:column;gap:2px;padding:4px 2px;border-right:1px solid var(--vscode-panel-border,#444)}
+#side{display:flex;flex-shrink:0;min-height:0;flex-direction:column;gap:2px;padding:4px 2px;border-right:1px solid var(--vscode-panel-border,#444)}
 #sc{flex:1;min-width:0;min-height:0;position:relative;overflow-y:auto;overflow-x:scroll;overflow-anchor:none;scrollbar-gutter:stable;background:var(--vscode-editor-background);font-family:var(--vscode-editor-font-family,var(--vscode-font-family));font-size:var(--vscode-editor-font-size,var(--vscode-font-size));font-weight:var(--vscode-editor-font-weight);line-height:round(up,1.5em,1px)}
 #spacer{width:1px;pointer-events:none}
 #win{position:fixed;height:0;min-width:0}
-#row-viewport{position:absolute;top:0;left:0;width:100%;overflow:clip}
+#row-viewport{position:absolute;top:0;left:0;width:100%;overflow:clip;caret-color:var(--vscode-editorCursor-foreground,var(--vscode-editor-foreground,var(--vscode-foreground)))}
+#sc:focus,#sc:focus-visible,#row-viewport:focus,#row-viewport:focus-visible{outline:0;box-shadow:none}
 #row-window{position:relative;min-width:100%}
 #row-window>.row{position:absolute;left:0;min-width:100%;width:max-content}
 .wrap #row-window>.row{width:100%}
@@ -53,6 +54,8 @@ body:not(.vscode-light) #hl .kv{color:transparent}
 .lvb{width:3ch;text-align:center;border-radius:3px;margin:0 1ch;background:var(--b);color:var(--f)}
 .ctime{width:12ch;color:var(--muted)}
 .m{overflow:visible!important;flex:1 1 auto!important}
+/* 系统分隔行使用普通编辑器正文色；回归覆盖级别色隔离与窄屏换行。 */
+.row.system,.row.local{color:var(--vscode-editor-foreground,var(--vscode-foreground))}
 .wrap #sc{overflow-x:hidden}
 .wrap #win,.wrap #row-viewport{width:100%;min-width:0}
 .wrap .row{white-space:pre-wrap;overflow-wrap:anywhere;min-height:1.5em}

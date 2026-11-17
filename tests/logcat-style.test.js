@@ -74,6 +74,14 @@ test('Logcat search stays inside log content without moving the toolbar', () => 
   assert.match(rule('#sbar'),/flex-shrink:0/);
 });
 
+// npm test 回归：只移除日志容器和编辑区的焦点框，过滤框继续保留宿主焦点颜色。
+test('Logcat editor omits its enclosing focus outline without changing other controls', () => {
+  const focus = rule('#sc:focus,#sc:focus-visible,#row-viewport:focus,#row-viewport:focus-visible');
+  assert.match(focus, /outline:0/);
+  assert.match(focus, /box-shadow:none/);
+  assert.ok(rule('#filterbox:focus-within').includes('border-color:var(--vscode-focusBorder)'));
+});
+
 // npm test 无设备回归：断言 UI 根节点使用宿主字体和字号变量。
 test('Logcat UI uses VS Code font variables', () => {
   assert.ok(rule('body').includes('font-family:var(--vscode-font-family)'));
@@ -87,6 +95,18 @@ test('Logcat rows use editor typography rather than bundled fonts', () => {
     assert.ok(log.includes(value), value);
   }
   assert.doesNotMatch(css, /JetBrains|@font-face|monospace/);
+});
+
+// npm test 无设备回归：固定顶栏、计数槽和侧栏最小高度，覆盖计数位数变化不抢占设备/筛选框布局。
+test('Logcat toolbar reserves stable count space and cannot be squeezed by content', () => {
+  assert.match(rule('#header'), /flex-shrink:0/);
+  const count = rule('#count');
+  for (const value of ['flex:0 0 14ch', 'min-width:14ch', 'max-width:14ch', 'overflow:hidden', 'text-overflow:ellipsis', 'font-variant-numeric:tabular-nums']) {
+    assert.ok(count.includes(value), value);
+  }
+  assert.match(rule('#side'), /flex-shrink:0/);
+  assert.match(rule('#side'), /min-height:0/);
+  assert.doesNotMatch(css, /(?:^|[;{])\s*(?:zoom|transform|will-change|(?:animation|transition)-delay)\s*:/i);
 });
 
 // npm test 验证最低宿主、锁文件与说明同步，避免在不支持 CSS round() 的旧 Webview 安装。

@@ -10,9 +10,10 @@
   const sc = $('sc'), win = $('row-window'), viewport = $('row-viewport'), spacer = $('spacer'), q = $('q'), hl = $('hl');
   let H = parseFloat(getComputedStyle(sc).lineHeight);
   let icons = {}, deviceList = [], statusText = '', statusTimer = 0;
-  let offsets = [0], rowHeights = new WeakMap(), layoutKey = '';
+  let offsets = [0], offsetRows = [], rowHeights = new WeakMap(), layoutKey = '';
   let viewportAnchor = null, requestedRow = null;
   const renderedRows = new WeakMap();
+  let tailCaret = null, composition = null;
   const S = { open: false, re: null, rows: [], cur: -1, err: false, dirty: false, scroll: false, timer: 0 };
 
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -31,7 +32,7 @@
   // 清空重置缓存计数，末尾按钮同步跟随状态；回归：tests/logcat-buffer.test.js 与 tests/logcat-browser.test.js。
   function buildToolbar() {
     const side = $('side'); side.innerHTML = '';
-    btn('b-clear', 'Clear Logcat', svg('lc-delete'), () => { if (logSelection()) { getSelection().removeAllRanges(); } entries = []; rows = []; pending = []; entriesBytes = 0; pendingBytes = 0; S.dirty = true; viewportAnchor = null; requestedRow = null; render(); vs.postMessage({ type: 'clear' }); }, side);
+    btn('b-clear', 'Clear Logcat', svg('lc-delete'), () => { resetEditor(); if (logSelection()) { getSelection().removeAllRanges(); } entries = []; rows = []; pending = []; entriesBytes = 0; pendingBytes = 0; S.dirty = true; viewportAnchor = null; requestedRow = null; render(); vs.postMessage({ type: 'clear' }); }, side);
     btn('b-pause', 'Pause Logcat', svg('lc-pause'), togglePause, side);
     btn('b-restart', 'Restart Logcat', svg('lc-refresh'), () => vs.postMessage({ type: 'restart' }), side);
     btn('b-end', 'Scroll to the End', svg('lc-scroll-end'), () => { if (logSelection()) { getSelection().removeAllRanges(); } setFollowing(!stick); render(); }, side);
@@ -93,18 +94,21 @@
   }
 
   const filterView = (e) => ({ tag: e.tag, pkg: e.pkg, lines: e.lines, lv: e.lv, lvn: e.lvn, rx: e.rx, pid: e.pid, tid: e.tid });
-  const visible = (e) => compiled.test(filterView(e));
+  // 系统分隔行与 Studio 一致无条件可见，普通记录执行过滤；buffer/browser 的 system 回归断言不匹配过滤仍保留分隔行。
+  const visible = (e) => e.system || e.local || compiled.test(filterView(e));
 
   function pushRows(e) { for (let i = 0; i < e.lines.length; i++) { rows.push({ e, i }); } }
 
   // 按输入记录边界接收日志并维护 UTF-8 字节预算；输入为 ADB 日志项，输出更新后的有界 entries。
   // 前置条件是每项为独立日志记录且包含 msg；仅消息内部换行产生续行，不按相同时间或 Tag 合并。
-  // 回归：tests/logcat-buffer.test.js，npm test 断言同毫秒独立记录不合并、真实消息内换行可续行及缓存预算。
+  // 保留 system 标记而非 local，避免尾部输入归并；回归：tests/logcat-buffer.test.js 定向执行真实 ingest，断言分隔行顺序和共用 UTF-8 预算。
   function ingest(items) {
+    // 日志与本地输入严格按到达顺序追加，不把输入行置底；无新日志时才由appendInput续写尾local。
+    // browser tail input回归断言无日志续写同一行，新日志位于输入之后且再次输入在新的尾部。
     for (const raw of items) {
       const it = normalizeItem(raw);
       const bytes = itemBytes(it);
-      const e = { ts: it.ts, pid: it.pid, tid: it.tid, lv: it.lv, lvn: LogFilter.LEVELS[it.lv] || 4, tag: it.tag, pkg: it.pkg || pkgMap[it.pid] || '', lines: it.msg.split('\n'), bytes, rx: it.rx };
+      const e = { ts: it.ts, pid: it.pid, tid: it.tid, lv: it.lv, lvn: LogFilter.LEVELS[it.lv] || 4, tag: it.tag, pkg: it.pkg || pkgMap[it.pid] || '', lines: it.msg.split('\n'), bytes, rx: it.rx, system: it.system };
       entries.push(e);
       entriesBytes += bytes;
       if (visible(e)) { e.vis = true; pushRows(e); }
@@ -140,9 +144,12 @@
   // 回归：tests/logcat-style.test.js 断言字段及续行，tests/logcat-browser.test.js 断言两种格式实际换行高度。
   function rowHtml(i) {
     const { e, i: li } = rows[i];
-    const first = li === 0;
+    const first = li === 0 && !e.local;
     const msg = hx(e.lines[li]);
     const cur = S.cur >= 0 && S.rows[S.cur] === i ? ' cur' : '';
+    // system/local 各保留身份且只输出消息字段，无 Tab/元数据；buffer/browser 回归覆盖系统过滤、两格式、复用、换行及 local 原生光标左缘。
+    if (e.system) { return `<div class="row system${cur}" data-i="${i}" style="height:${st.wrap ? 'auto' : H + 'px'}"><span class="m">${msg}</span></div>`; }
+    if (e.local) { return `<div class="row local${cur}" data-i="${i}" style="height:${st.wrap ? 'auto' : H + 'px'}"><span class="m">${msg}</span></div>`; }
     if (st.fmt === 'compact') {
       const head = `<span class="ctime">${first ? hx(e.ts.slice(11)) : ''}</span>\t<span class="lvb">${first ? e.lv : ''}</span>`;
       const tg = `<span style="color:${tagColor(e.tag)}">${first ? hx(e.tag) : ''}</span>`;
@@ -166,11 +173,11 @@
   }
 
   // 收集有效行索引对应的可见搜索字段，返回字符串数组；首行包含当前格式的元数据，续行只搜索消息，空源值不伪造。
-  // 回归：tests/logcat-style.test.js，npm test 验证重复 Tag、续行渲染和搜索一致。
+  // 系统行仅搜索消息；回归：tests/logcat-buffer.test.js 与 tests/logcat-browser.test.js 的 system 用例断言元数据不命中、消息命中。
   function rowFields(i) {
     const { e, i: li } = rows[i];
     const f = [];
-    if (li === 0) {
+    if (li === 0 && !e.local && !e.system) {
       if (st.fmt === 'compact') { f.push(e.ts.slice(11)); } else { f.push(e.ts, e.pid + '-' + e.tid, e.pkg); }
       f.push(e.lv, e.tag);
     }
@@ -318,10 +325,10 @@
   function render() { if (hostVisible && !document.hidden && !raf) { raf = requestAnimationFrame(() => { raf = 0; draw(); }); } }
 
   // 以缓存的实际行高构建前缀坐标；输入为当前 rows，输出完整缓存范围的 offsets。
-  // 未测量行采用编辑器行高估计，显示后立即用浏览器实际高度更新，不删除历史行。
-  // 回归：tests/logcat-browser.test.js 验证超过 3000 行可访问、搜索和跳转。
+  // 未测量行采用编辑器行高估计，输出 offsetRows 身份快照与 offsets 同步；显示后同次布局更新实测高度，不删除历史行。
+  // 回归：tests/logcat-browser.test.js 的 scroll coverage 验证大跳跃/未知换行高度/淘汰覆盖，另验证超过 3000 行搜索和跳转。
   function measureOffsets() {
-    offsets = [0];
+    offsets = [0]; offsetRows = rows.slice();
     for (const row of rows) {
       const height = st.wrap ? rowHeights.get(row.e)?.get(row.i) ?? H : H;
       offsets.push(offsets[offsets.length - 1] + height);
@@ -329,22 +336,31 @@
   }
 
   // 二分定位滚动坐标所属行；输入为像素坐标，输出有界行索引，空列表返回 0。
-  // 回归：tests/logcat-style.test.js 边界断言与浏览器滚动验证。
+  // 前提为 offsets 快照已建立，不依赖可能刚淘汰的新 rows 长度；回归 tests/logcat-style.test.js 边界及 browser 的 scroll coverage。
   function rowAt(top) {
-    let low = 0, high = rows.length;
+    let low = 0, high = offsets.length - 1;
     while (low < high) {
       const mid = Math.floor((low + high) / 2);
       if (offsets[mid + 1] <= top) { low = mid + 1; } else { high = mid; }
     }
-    return Math.min(low, Math.max(0, rows.length - 1));
+    return Math.min(low, Math.max(0, offsets.length - 2));
   }
 
-  // 保存正在阅读的真实记录及行内偏移；前提是 offsets 对应当前 rows，无输入无返回值。
-  // 回归：tests/logcat-browser.test.js 验证追加与淘汰旧项后存活记录屏幕位置稳定。
-  function rememberAnchor() {
-    if (stick || !rows.length) { return; }
-    const index = rowAt(sc.scrollTop), row = rows[index];
-    viewportAnchor = { e: row.e, i: row.i, offset: sc.scrollTop - offsets[index] };
+  // 保存真实记录、逻辑行内偏移和屏幕相位；输入 painted 表示 draw 已提交布局，无返回值。
+  // 前置为 offsets/offsetRows 属于同次已测量快照；淘汰后的新 rows 不得解释旧滚动坐标，绘制后读回实际几何。
+  // 跟随也保存快照承接滚轮退出，程序 clamp 在同次 draw 末尾结算；回归 tests/logcat-browser.test.js 的 scroll coverage 和多行溢出矩阵断言覆盖/identity/top/PNG。
+  function rememberAnchor(painted = false) {
+    if (!offsetRows.length) { return; }
+    const scrollTop = sc.scrollTop, index = rowAt(scrollTop), row = offsetRows[index];
+    const previous = viewportAnchor ? offsetRows.findIndex((r) => r.e === viewportAnchor.e && r.i === viewportAnchor.i) : -1;
+    let top = offsets[index] - scrollTop;
+    if (!painted && previous >= 0) {
+      top = viewportAnchor.top + (offsets[index] - offsets[previous]) - (scrollTop - viewportAnchor.scrollTop);
+    } else if (painted) {
+      const node = Array.from(win.children).find((node) => renderedRows.get(node)?.e === row.e && renderedRows.get(node)?.i === row.i);
+      if (node) { top = node.getBoundingClientRect().top - sc.getBoundingClientRect().top; }
+    }
+    viewportAnchor = { e: row.e, i: row.i, offset: scrollTop - offsets[index], top, scrollTop };
   }
 
   // 同步末尾跟随的唯一状态与按钮；输入布尔值，输出按钮选中和可访问状态。
@@ -401,12 +417,15 @@
   }
 
   // 在固定/可变行高模式共用虚拟窗口；无输入，输出测量后的 DOM、总高度和滚动位置。
-  // 根因是原生 scrollTop 与 fixed 层行 top 各自被浏览器按 DPR 取整，分数行高会让同一 glyph 跨物理像素往返。
-  // 本帧将滚动坐标和视口绝对坐标统一量化到同一物理像素网格，避免双坐标模型产生约一录屏像素的抖动。
-  // 回归 tests/logcat-browser.test.js 的 package:mine/1MiB 淘汰测试记录每帧 row top、scrollTop 和 glyph PNG，并断言计数变化时可见内容不变。
+  // 前置为可见且非组合输入；draw 独占固定层坐标，原生滚动仅提供范围和用户位移，不以量化目标冒充浏览器实际 scrollTop。
+  // 跟随采用距末尾相对坐标，阅读采用距存活锚点相对坐标，避免累计 offset 量化相减改变 glyph 相位；dirty 搜索语义不变。
+  // 回归 tests/logcat-browser.test.js 的 scroll coverage 在短窗360/DPR1.25/两种过滤和换行断言逐帧顶边覆盖；多行溢出矩阵严格断言 top/identity/PNG。
   function draw() {
     if (!hostVisible || document.hidden) { return; }
+    if (composition) { return; }
     const selection = logSelection();
+    const caret = getSelection();
+    const retainedSelection = selection || (document.activeElement === viewport && caret?.rangeCount && viewport.contains(caret.anchorNode) ? caret : null);
     if (selection && stick) { setFollowing(false); }
     const n = rows.length;
     drawHeader();
@@ -417,58 +436,147 @@
     measureOffsets();
     const anchorIndex = viewportAnchor ? rows.findIndex((r) => r.e === viewportAnchor.e && r.i === viewportAnchor.i) : -1;
     const focus = requestedRow != null && requestedRow < n ? requestedRow : null;
-    let target = stick ? offsets[n] - sc.clientHeight : anchorIndex >= 0 ? offsets[anchorIndex] + viewportAnchor.offset : sc.scrollTop;
-    if (focus != null) { target = offsets[focus] - sc.clientHeight / 2 + H / 2; }
-    target = Math.max(0, target);
-    let a = Math.max(0, rowAt(target) - 10), b = Math.min(n, rowAt(target + sc.clientHeight) + 11);
-    if (selection) {
-      for (const endpoint of [selection.anchorNode, selection.focusNode]) {
-        const node = (endpoint.nodeType === Node.ELEMENT_NODE ? endpoint : endpoint.parentElement)?.closest('.row');
-        const row = node && renderedRows.get(node), index = row ? rows.findIndex((r) => r.e === row.e && r.i === row.i) : -1;
-        if (index >= 0) { a = Math.min(a, index); b = Math.max(b, index + 1); }
-      }
-    }
-    if (spacer.style.height !== offsets[n] + 'px') { spacer.style.height = offsets[n] + 'px'; }
     const box = sc.getBoundingClientRect(), layer = $('win');
     if (layer.style.top !== box.top + 'px') { layer.style.top = box.top + 'px'; }
     if (layer.style.left !== box.left + 'px') { layer.style.left = box.left + 'px'; }
     if (layer.style.width !== sc.clientWidth + 'px') { layer.style.width = sc.clientWidth + 'px'; }
     if (viewport.style.height !== sc.clientHeight + 'px') { viewport.style.height = sc.clientHeight + 'px'; }
-    updateWindow(a, b);
-    if (st.wrap) {
-      for (const node of win.children) {
-        const row = rows[+node.dataset.i];
-        let heights = rowHeights.get(row.e);
-        if (!heights) { heights = new Map(); rowHeights.set(row.e, heights); }
-        heights.set(row.i, Math.max(H, node.getBoundingClientRect().height));
+    let origin = 0;
+    // 布局工作集只测量本次覆盖范围的未知行；每轮必须消耗未知高度，直到当前坐标下的窗口完整可用。
+    // 这是同一布局事务而非延时重试：实测改变前缀与原生上限后，范围和固定层均使用重新读回的坐标。
+    const measured = new Set();
+    for (;;) {
+      let target = stick ? offsets[n] - sc.clientHeight : focus != null ? offsets[focus] - sc.clientHeight / 2 + (offsets[focus + 1] - offsets[focus]) / 2
+        : anchorIndex >= 0 ? offsets[anchorIndex] + viewportAnchor.offset : viewportAnchor ? 0 : sc.scrollTop;
+      if (spacer.style.height !== offsets[n] + 'px') { spacer.style.height = offsets[n] + 'px'; }
+      const boundedTarget = Math.max(0, Math.min(target, sc.scrollHeight - sc.clientHeight));
+      if (sc.scrollTop !== boundedTarget) { sc.scrollTop = boundedTarget; }
+      const scrollTop = sc.scrollTop;
+      origin = stick ? offsets[n] - Math.min(sc.clientHeight, offsets[n])
+        : focus == null && anchorIndex >= 0 ? offsets[anchorIndex] - viewportAnchor.top - (target - boundedTarget)
+          : scrollTop;
+      let a = Math.max(0, rowAt(origin) - 10), b = Math.min(n, rowAt(origin + sc.clientHeight) + 11);
+      if (retainedSelection) {
+        for (const endpoint of [retainedSelection.anchorNode, retainedSelection.focusNode]) {
+          const node = (endpoint.nodeType === Node.ELEMENT_NODE ? endpoint : endpoint.parentElement)?.closest('.row');
+          const row = node && renderedRows.get(node), index = row ? rows.findIndex((r) => r.e === row.e && r.i === row.i) : -1;
+          if (index >= 0) { a = Math.min(a, index); b = Math.max(b, index + 1); }
+        }
       }
+      updateWindow(a, b);
+      let changed = false;
+      if (st.wrap) {
+        for (const node of win.children) {
+          const row = rows[+node.dataset.i];
+          if (measured.has(row)) { continue; }
+          measured.add(row);
+          let heights = rowHeights.get(row.e);
+          if (!heights) { heights = new Map(); rowHeights.set(row.e, heights); }
+          const height = Math.max(H, node.getBoundingClientRect().height);
+          if ((heights.get(row.i) ?? H) !== height) { changed = true; }
+          heights.set(row.i, height);
+        }
+      }
+      if (!changed) { break; }
       measureOffsets();
     }
-    if (spacer.style.height !== offsets[n] + 'px') { spacer.style.height = offsets[n] + 'px'; }
-    if (stick) { target = offsets[n] - sc.clientHeight; }
-    else if (focus != null) { target = offsets[focus] - sc.clientHeight / 2 + (offsets[focus + 1] - offsets[focus]) / 2; }
-    else if (anchorIndex >= 0) { target = offsets[anchorIndex] + viewportAnchor.offset; }
-    else if (viewportAnchor) { target = 0; }
     const width = (st.wrap ? 1 : Array.from(win.children).reduce((size, node) => Math.max(size, node.scrollWidth), sc.clientWidth)) + 'px';
     if (spacer.style.width !== width) { spacer.style.width = width; }
     const left = -sc.scrollLeft + 'px';
     if (win.style.left !== left) { win.style.left = left; }
-    // 输入为逻辑滚动目标和 fixed 层边界，输出为同一 DPR 物理网格上的滚动及行坐标；
-    // 前置条件是 box 已读取、offsets 对应当前 rows，结果避免原生滚动与行定位分别取整。
-    const dpr = window.devicePixelRatio || 1;
-    // 仅过滤视图固定可见层的物理栅格；未过滤日志保留编辑器原生分数基线。
-    const align = st.filter ? (value) => Math.round(value * dpr) / dpr : (value) => value;
-    const scrollTop = Math.max(0, align(target));
-    if (sc.scrollTop !== scrollTop) { sc.scrollTop = scrollTop; }
     for (const node of win.children) {
-      const absoluteTop = align(box.top + offsets[+node.dataset.i] - scrollTop);
-      const top = (absoluteTop - box.top) + 'px';
+      const top = offsets[+node.dataset.i] - origin + 'px';
       if (node.style.top !== top) { node.style.top = top; }
     }
     requestedRow = null;
-    rememberAnchor();
+    if (tailCaret) {
+      const node = Array.from(win.children).find((node) => renderedRows.get(node)?.e === tailCaret && +node.dataset.i === rows.length - 1);
+      if (node) { showInputCaret(node); }
+      tailCaret = null;
+    }
+    rememberAnchor(true);
     if (S.open && S.dirty) { scheduleSearch(true, 500); }
   }
+
+  // 日志文档清空/切换时释放临时组合节点和待定位光标；无输入/输出，旧组合不得提交到新文档。
+  // 回归：tests/logcat-browser.test.js 组合输入期间reset，前提为清空、设备切换或reset入口。
+  function resetEditor() { composition?.remove(); composition = null; tailCaret = null; }
+
+  // 将原生Range放到已绘制的本地行尾，并把尾端横向纳入sc视口；输入尾行DOM，输出可见、聚焦的collapsed caret。
+  // 前提为draw已完成纵向末尾布局；不调用scrollIntoView移动fixed祖先，browser tail input回归检查Range在视口内。
+  function showInputCaret(node) {
+    const message = node.querySelector('.m');
+    const range = document.createRange();
+    const walker = document.createTreeWalker(message, NodeFilter.SHOW_TEXT);
+    let text, last; while ((text = walker.nextNode())) { last = text; }
+    if (last) { range.setStart(last, last.length); }
+    else { if (!message.firstChild) { message.appendChild(document.createElement('br')); } range.setStart(message, 0); }
+    range.collapse(true);
+    viewport.focus({ preventScroll: true });
+    const caret = getSelection(); caret.removeAllRanges(); caret.addRange(range);
+    const bounds = range.getBoundingClientRect(), box = sc.getBoundingClientRect();
+    const x = bounds.height ? bounds.left : message.getBoundingClientRect().right;
+    const delta = x < box.left + 2 ? x - box.left - 2 : x > box.left + sc.clientWidth - 2 ? x - box.left - sc.clientWidth + 2 : 0;
+    if (delta) {
+      spacer.style.width = Math.max(sc.scrollWidth, sc.scrollLeft + delta + sc.clientWidth + 2) + 'px';
+      sc.scrollLeft += delta; win.style.left = -sc.scrollLeft + 'px';
+    }
+  }
+
+  // 每次提交前准备可见文档的尾输入记录并迁移Selection，输入无，输出记录身份；历史日志不参与浏览器插入或IME组合。
+  // Studio UserInputHandlers按document.textLength追加，过滤隐藏的原始记录不构成可见换行；不移动缓存中的记录顺序。
+  // 回归：browser filtered background/tail input断言隐藏批次不中断续写、可见新日志正常追加、Enter与IME保留换行。
+  function prepareTailInput() {
+    getSelection().removeAllRanges();
+    let entry;
+    for (let i = entries.length - 1; i >= 0; i--) { if (visible(entries[i])) { entry = entries[i]; break; } }
+    if (!entry?.local) {
+      entry = { local: true, ts: '', pid: 0, tid: 0, lv: 'I', lvn: 4, tag: '', pkg: '', lines: [''], bytes: 1, rx: Date.now() };
+      entries.push(entry); entriesBytes++;
+    }
+    trimEntries(); tailCaret = entry; setFollowing(true); draw();
+    return entry;
+  }
+
+  // 将键盘或粘贴文字提交到有界文档尾部；输入纯文本，输出本地记录，绝不替换光标下的设备日志。
+  // 本地输入不伪造ADB元数据，输入完成后恢复末尾跟随和真实光标；回归：tests/logcat-browser.test.js 编辑交互。
+  function appendInput(text) {
+    if (!text) { return; }
+    let entry = prepareTailInput();
+    const value = LogcatBuffer.truncateUtf8(text.replace(/\r\n?/g, '\n'), maxBytes - 1);
+    const combined = entry?.local ? entry.lines.join('\n') + value : value;
+    if (entry?.local && LogcatBuffer.utf8Bytes(combined) + 1 <= maxBytes) {
+      const old = entry.bytes;
+      const message = combined;
+      entry.lines = message.split('\n'); entry.bytes = LogcatBuffer.utf8Bytes(message) + 1; entriesBytes += entry.bytes - old;
+      rowHeights.delete(entry);
+    } else {
+      entry = { local: true, ts: '', pid: 0, tid: 0, lv: 'I', lvn: 4, tag: '', pkg: '', lines: value.split('\n'), bytes: LogcatBuffer.utf8Bytes(value) + 1, rx: Date.now() };
+      entries.push(entry); entriesBytes += entry.bytes;
+    }
+    if (logSelection()) { getSelection().removeAllRanges(); }
+    trimEntries(); tailCaret = entry; setFollowing(true); render();
+  }
+
+  // 原生可编辑面提供光标、选词和扩选；beforeinput只允许尾部追加，删除/剪切/撤销不改写采集日志。
+  // 组合输入由临时尾部文本节点承接，结束后移除临时节点并提交模型；回归：tests/logcat-browser.test.js 输入/粘贴/IME。
+  viewport.addEventListener('beforeinput', (event) => {
+    if (composition) { return; }
+    event.preventDefault();
+    if (event.inputType === 'insertText' || event.inputType === 'insertReplacementText') { appendInput(event.data || ''); }
+    else if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') { appendInput('\n'); }
+  });
+  viewport.addEventListener('paste', (event) => { event.preventDefault(); appendInput(event.clipboardData.getData('text/plain')); });
+  viewport.addEventListener('drop', (event) => { event.preventDefault(); appendInput(event.dataTransfer.getData('text/plain')); });
+  viewport.addEventListener('cut', (event) => { event.preventDefault(); if (logSelection()) { vs.postMessage({ type: 'copy', text: String(getSelection()) }); } });
+  viewport.addEventListener('compositionstart', () => {
+    prepareTailInput();
+    const message = win.lastElementChild.querySelector('.m');
+    const node = document.createElement('span'); node.textContent = ''; message.appendChild(node);
+    composition = node; const range = document.createRange(); range.selectNodeContents(node); range.collapse(false); const caret = getSelection(); caret.removeAllRanges(); caret.addRange(range); setFollowing(false);
+  });
+  viewport.addEventListener('compositionend', (event) => { const node = composition; if (!node) { return; } composition = null; node.remove(); appendInput(event.data || ''); render(); });
+  viewport.addEventListener('keydown', (event) => { if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); appendInput('\t'); } });
 
   document.addEventListener('selectionchange', () => { if (logSelection() && stick) { setFollowing(false); } });
   sc.addEventListener('scroll', () => {
@@ -476,7 +584,18 @@
     rememberAnchor();
     render();
   });
-  sc.addEventListener('wheel', (ev) => { if (ev.deltaY < 0) { setFollowing(false); } }, { passive: true });
+  // fixed 文字层不参与祖先的原生滚轮滚动链；输入像素/行/页位移，输出到唯一滚动容器 sc，避免文字区滚轮失效。
+  // 仅接管绘制层内事件，空白/滚动条保留原生滚动，Ctrl 缩放不拦截；browser 的 real wheel 回归覆盖上下/横向/换行/过滤及跟随。
+  sc.addEventListener('wheel', (ev) => {
+    if (ev.ctrlKey || ev.defaultPrevented) { return; }
+    if (ev.deltaY < 0) { setFollowing(false); }
+    if (!viewport.contains(ev.target)) { return; }
+    ev.preventDefault();
+    const unit = ev.deltaMode === WheelEvent.DOM_DELTA_LINE ? H : ev.deltaMode === WheelEvent.DOM_DELTA_PAGE ? sc.clientHeight : 1;
+    sc.scrollTop += (ev.shiftKey ? 0 : ev.deltaY) * unit;
+    sc.scrollLeft += (ev.deltaX + (ev.shiftKey ? ev.deltaY : 0)) * unit;
+    rememberAnchor(); render();
+  }, { passive: false });
   sc.addEventListener('click', (ev) => { if (ev.target.closest('.row')) { setFollowing(false); } });
   sc.addEventListener('pointerdown', (ev) => { if (ev.target.closest('.row')) { setFollowing(false); } });
   sc.addEventListener('keydown', (ev) => { if (['ArrowUp', 'PageUp', 'Home'].includes(ev.key)) { setFollowing(false); } });
@@ -658,6 +777,7 @@
   };
 
   // ---- context menu ----
+  // 右键复制沿用日志消息/行命令，系统行不附加元数据；browser 的 system 回归通过菜单断言完整分隔行。
   const quote = (v) => (/[\s"()|&]/.test(v) ? '"' + v.replace(/"/g, '\\"') + '"' : v);
   const append = (term) => setFilter((st.filter.trim() ? st.filter.trim() + ' ' : '') + term, true);
   sc.addEventListener('contextmenu', (ev) => {
@@ -671,7 +791,7 @@
     if (e.pkg) { items.push('-', { label: `Show only package: ${e.pkg}`, run: () => append('package:' + quote(e.pkg)) }, { label: `Hide package: ${e.pkg}`, run: () => append('-package:' + quote(e.pkg)) }); }
     items.push('-', { label: `Show this level and above (${e.lv})`, run: () => append('level:' + e.lv) });
     items.push('-', { label: 'Copy message', run: () => vs.postMessage({ type: 'copy', text: e.lines.join('\n') }) },
-      { label: 'Copy line', run: () => vs.postMessage({ type: 'copy', text: `${e.ts} ${e.pid}-${e.tid} ${e.tag} ${e.lv}: ${e.lines[i]}` }) });
+      { label: 'Copy line', run: () => vs.postMessage({ type: 'copy', text: e.system ? e.lines[i] : `${e.ts} ${e.pid}-${e.tid} ${e.tag} ${e.lv}: ${e.lines[i]}` }) });
     openMenu(items, ev.clientX, ev.clientY);
   });
 
@@ -681,7 +801,7 @@
   // 鼠标/触摸和键盘展开均查询目录；npm test 的 device-selection-sync.test.js 执行真实绑定，断言每次展开各发一次查询。
   $('dev').onpointerdown = e => { if (e.button === 0) vs.postMessage({ type: 'discoverDevices' }); };
   $('dev').onkeydown = e => { if (['Enter', ' ', 'ArrowDown', 'ArrowUp', 'F4'].includes(e.key)) vs.postMessage({ type: 'discoverDevices' }); };
-  $('dev').onchange = () => { entries = []; rows = []; vs.postMessage({ type: 'select', serial: $('dev').value }); };
+  $('dev').onchange = () => { resetEditor(); entries = []; rows = []; entriesBytes = 0; vs.postMessage({ type: 'select', serial: $('dev').value }); };
 
   // 绘制全部设备与状态快照；无输入，在线设备可选，离线/未授权项标注状态并禁用，空选择保留占位。
   // 前提由 draw 保证可见，隐藏消息只更新模型；device-selection-sync.test.js 执行渲染并断言状态、禁用项和空选项。
@@ -717,7 +837,7 @@
       case 'visibility': syncVisibility(m.visible); break;
       case 'init': hostVisible = m.visible !== false; icons = m.icons; mine = m.mine || []; maxBytes = Number.isFinite(m.maxBytes) ? m.maxBytes : 1024 * 1024; buildToolbar(); q.value = st.filter; applyWrap(); recompile(); break;
       case 'devices': serial = m.serial || ''; deviceList = m.list; render(); break;
-      case 'reset': if (logSelection()) { getSelection().removeAllRanges(); } entries = []; rows = []; entriesBytes = 0; S.dirty = true; pending = []; pendingBytes = 0; pkgMap = {}; viewportAnchor = null; setFollowing(true); render(); break;
+      case 'reset': resetEditor(); if (logSelection()) { getSelection().removeAllRanges(); } entries = []; rows = []; entriesBytes = 0; S.dirty = true; pending = []; pendingBytes = 0; pkgMap = {}; viewportAnchor = null; setFollowing(true); render(); break;
       case 'batch': {
         if (paused) {
           const batch = m.items.map(normalizeItem);
