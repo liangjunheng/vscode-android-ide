@@ -1,0 +1,42 @@
+/* 全局弹窗主题与原生选择器共用 VS Code 色板；npm test dropdown 回归及 LOGCAT_BROWSER=1 的 dropdown 浏览器断言覆盖深浅主题、禁用、长文本和键盘。 */
+body{--popup-bg:var(--vscode-menu-background,var(--vscode-editorWidget-background,var(--vscode-editor-background,#252526)));--popup-fg:var(--vscode-menu-foreground,var(--vscode-foreground,#ccc));--popup-border:var(--vscode-menu-border,var(--vscode-widget-border,var(--vscode-panel-border,#454545)));--popup-hover:var(--vscode-list-hoverBackground,#ffffff12);--popup-hover-fg:var(--vscode-list-hoverForeground,var(--popup-fg));--popup-check:var(--vscode-testing-iconPassed,#73c991);--popup-shadow:0 4px 16px var(--vscode-widget-shadow,#0005)}
+body.vscode-light,body.vscode-high-contrast-light{color-scheme:light;--popup-hover:var(--vscode-list-hoverBackground,#0000000a);--popup-check:var(--vscode-testing-iconPassed,#388a34)}
+body.vscode-dark,body.vscode-high-contrast{color-scheme:dark}
+body .menu,body #menu,body .explorer-menu,body #sugg{box-sizing:border-box;background:var(--popup-bg);color:var(--popup-fg);border:1px solid var(--popup-border);border-radius:6px;box-shadow:var(--popup-shadow);padding:4px;letter-spacing:0;max-width:calc(100vw - 8px);max-height:min(320px,calc(100vh - 8px));overflow:auto;scrollbar-width:thin;scrollbar-color:var(--vscode-scrollbarSlider-background,#8886) transparent}
+body .menu>div,body #menu>div,body .explorer-menu>button,body #sugg .si{box-sizing:border-box;min-height:30px;padding:6px 10px;border-radius:3px;line-height:18px;white-space:nowrap}
+body .menu>div:hover,body #menu>div:hover,body .explorer-menu>button:not(:disabled):hover,body #sugg .si:hover,body #sugg .si.on{background:var(--popup-hover);color:var(--popup-hover-fg)}
+body .explorer-menu>button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px;background:var(--popup-hover)}
+body .explorer-menu>button:disabled{background:transparent;color:var(--vscode-disabledForeground,var(--vscode-descriptionForeground));cursor:default}
+body .menu hr{border:0;border-top:1px solid var(--vscode-menu-separatorBackground,var(--popup-border));margin:4px 6px}
+body #sugg{min-width:min(360px,90vw)}
+body #sugg .si{gap:12px}
+body #sugg .si .d{overflow:hidden;text-overflow:ellipsis;min-width:0;color:var(--vscode-descriptionForeground);opacity:1}
+body .menu.hist .hrow .t{min-width:0}
+body .menu.hist .hrow .x{min-height:0;padding:0;border-radius:2px}
+/* 旧内核保留原生箭头与选择语义；支持 base-select 的内核才接管展开面板，避免以 JS 重建选择状态。 */
+body select:not([multiple]){appearance:auto;cursor:pointer}
+body select:not([multiple]):disabled{cursor:default;color:var(--vscode-disabledForeground);opacity:.65}
+body #tab:focus-within,body .build-target-row:focus-within{border-color:var(--vscode-focusBorder)}
+body #build-project option,body #build-target option{background:var(--popup-bg);color:var(--popup-fg)}
+@supports (appearance:base-select){
+  body select:not([multiple]),body select#dev,body .device-select #dev,body select#build-project,body select#build-target,body select.process-sort{appearance:base-select;display:inline-flex;background-image:none;padding-inline-end:8px;align-items:center;gap:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  select::picker(select){appearance:base-select;box-sizing:border-box;background:var(--popup-bg);color:var(--popup-fg);border:1px solid var(--popup-border);border-radius:6px;box-shadow:var(--popup-shadow);padding:4px;margin-block:4px;min-width:anchor-size(width);max-width:calc(100vw - 8px);max-height:min(320px,calc(100vh - 8px));overflow:auto;scrollbar-width:thin;scrollbar-color:var(--vscode-scrollbarSlider-background,#8886) transparent;font:13px var(--vscode-font-family);letter-spacing:0}
+  select::picker-icon{content:"\eab4";font:16px codicon;margin-inline-start:auto;flex:0 0 16px;color:var(--vscode-descriptionForeground,var(--popup-fg))}
+  select:open::picker-icon{transform:rotate(180deg)}
+  body select:is(select,#dev,#build-project,#build-target) option{box-sizing:border-box;display:flex;align-items:center;gap:8px;min-height:32px;padding:6px 10px;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--popup-fg);white-space:normal;overflow-wrap:anywhere;font:inherit;line-height:18px}
+  body select:is(select,#dev,#build-project,#build-target) option::before{content:var(--dropdown-icon,"\ea95");font:16px codicon;flex:0 0 16px;color:var(--vscode-descriptionForeground,var(--popup-fg))}
+  body select:is(select,#dev,#build-project,#build-target) option:checked{background:var(--popup-hover);color:var(--popup-hover-fg)}
+  body select:is(select,#dev,#build-project,#build-target) option:checked::before{color:var(--popup-check)}
+  body select:is(select,#dev,#build-project,#build-target) option::checkmark{content:"\eab2";font:16px codicon;order:1;margin-inline-start:auto;flex:0 0 16px;color:var(--popup-check)}
+  body select:is(select,#dev,#build-project,#build-target) option:not(:disabled):hover,body select:is(select,#dev,#build-project,#build-target) option:focus{background:var(--popup-hover);color:var(--popup-hover-fg)}
+  body select:is(select,#dev,#build-project,#build-target) option:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px}
+  body select:is(select,#dev,#build-project,#build-target) option:disabled{background:transparent;color:var(--vscode-disabledForeground,var(--vscode-descriptionForeground));opacity:.65;cursor:default}
+  body select:is(select,#dev,#build-project,#build-target) option:disabled::before{color:inherit}
+  select#dev{--dropdown-icon:"\eadb"}
+  select#build-project{--dropdown-icon:"\eb30"}
+  select#build-target{--dropdown-icon:"\eb29"}
+  select.process-sort{--dropdown-icon:"\eb16"}
+  body .device-select #dev{height:28px;display:inline-flex}
+  body #tab #chev,body .device-select-arrow{display:none}
+}
+@media (forced-colors:active){body .menu,body #menu,body .explorer-menu,body #sugg,select::picker(select){border-color:CanvasText;box-shadow:none}body select:is(select,#dev,#build-project,#build-target) option:checked,body select:is(select,#dev,#build-project,#build-target) option:focus{outline:1px solid Highlight;outline-offset:-1px}}

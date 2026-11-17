@@ -22,7 +22,7 @@ function fixture() {
   const font = fs.readFileSync(path.join(root, 'media/codicons/codicon.ttf')).toString('base64');
   const css = fs.readFileSync(path.join(root, 'media/codicons/codicon.css'), 'utf8').replace(/url\([^)]*\)/g, 'url(data:font/ttf;base64,' + font + ')')
     + fs.readFileSync(path.join(root, 'media/build-panel.css'), 'utf8') + fs.readFileSync(path.join(root, 'media/device-explorer/main.css'), 'utf8') + fs.readFileSync(path.join(root, 'media/device-processes/processes.css'), 'utf8');
-  return html.replace('</head>', '<style>' + css + '</style></head>');
+  return html.replace('</head>', '<style>' + css + fs.readFileSync(path.join(root, 'media/dropdowns.css'), 'utf8') + '</style></head>');
 }
 
 // 可重复真实浏览器回归：设置EXPLORER_PLAYWRIGHT为已安装playwright模块路径、EXPLORER_BROWSER为浏览器路径。
@@ -108,10 +108,10 @@ test('Explorer files scroll in aligned columns and process cards never scroll ho
           await page.locator('.file-row').first().click({ button: 'right' });
           const menu = await page.locator('.explorer-menu').evaluate(element => {
             const r = element.getBoundingClientRect();
-            return { x: r.x, right: r.right, bottom: r.bottom, labels: [...element.querySelectorAll('button')].map(button => ({ width: button.clientWidth, fits: button.scrollWidth <= button.clientWidth, nowrap: getComputedStyle(button).whiteSpace === 'nowrap' })) };
+            return { x: r.x, right: r.right, bottom: r.bottom, width:r.width, innerWidth:element.clientWidth, padding:parseFloat(getComputedStyle(element).paddingLeft), labels: [...element.querySelectorAll('button')].map(button => ({ width: button.clientWidth, fits: button.scrollWidth <= button.clientWidth, nowrap: getComputedStyle(button).whiteSpace === 'nowrap' })) };
           });
           assert.ok(menu.x >= 0 && menu.right <= width && menu.bottom <= 800, JSON.stringify({ theme, width, menu }));
-          assert.equal(menu.labels.length, 8); assert.ok(menu.labels.every(label => label.width >= 178 && label.fits && label.nowrap));
+          assert.equal(menu.width,180); assert.equal(menu.labels.length, 8); assert.ok(menu.labels.every(label => label.width === menu.innerWidth - 2 * menu.padding && label.fits && label.nowrap));
           await page.keyboard.press('Escape'); assert.equal(await page.locator('.explorer-menu').count(), 0);
         }
         await page.screenshot({ path: path.join(screenshots, mode + '-' + width + '-' + theme + '-start.png') });

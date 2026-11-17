@@ -19,6 +19,8 @@ export async function openExtendedControls(extPath: string, serial?: string, tit
   openPanel(extPath, serial, title);
 }
 
+// 输入扩展路径和模拟器串号，创建或聚焦原生控件面板并加载共享下拉主题；无设备不创建。
+// 回归：npm test dropdown 接线断言与 LOGCAT_BROWSER=1 dropdown 验证动态 select 的主题、长文本、禁用及键盘选择。
 function openPanel(extPath: string, serial?: string, title?: string) {
   if (!serial) { vscode.window.showWarningMessage('No device selected.'); return; }
   if (!serial.startsWith('emulator-')) { vscode.window.showInformationMessage('Extended Controls are only available for emulators.'); return; }
@@ -36,7 +38,7 @@ function openPanel(extPath: string, serial?: string, title?: string) {
   const csp = `default-src 'none'; style-src ${w.cspSource} 'unsafe-inline'; script-src ${w.cspSource}; font-src ${w.cspSource};`;
   w.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
 <link rel="stylesheet" href="${w.asWebviewUri(vscode.Uri.joinPath(codicons, 'codicon.css'))}">
-<link rel="stylesheet" href="${u('extended', 'main.css')}"></head><body><div id="nav"></div><div id="page"></div>
+<link rel="stylesheet" href="${u('extended', 'main.css')}"><link rel="stylesheet" href="${u('dropdowns.css')}"></head><body><div id="nav"></div><div id="page"></div>
 <script src="${u('extended', 'main.js')}"></script></body></html>`;
   w.onDidReceiveMessage(async (m) => {
     try {

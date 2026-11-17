@@ -52,6 +52,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
   // 设备选择保留原生 select；右侧 log-content 容纳搜索与日志，左侧工具栏不随搜索栏移动。
   // 前提为宿主提供真实 visible；生命周期事件输出 visibility.visible，隐藏释放采集，旧视图事件不得操作新视图。
   // 回归：npm test 中 logcat-visibility.test.js 模拟隐藏/销毁/替换；既有样式和选择同步测试分别断言结构与错误。
+  // 下拉共享样式覆盖设备、格式、历史和补全；npm test dropdown 接线、LOGCAT_BROWSER=1 dropdown 断言主题/键盘/窄屏。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -62,7 +63,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
     const csp = `default-src 'none'; style-src ${w.cspSource} 'unsafe-inline'; script-src ${w.cspSource}; font-src ${w.cspSource};`;
     w.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
 <link rel="stylesheet" href="${w.asWebviewUri(vscode.Uri.joinPath(codicons, 'codicon.css'))}">
-<link rel="stylesheet" href="${u('logcat', 'main.css')}"></head><body>
+<link rel="stylesheet" href="${u('logcat', 'main.css')}"><link rel="stylesheet" href="${u('dropdowns.css')}"></head><body>
 <div id="header"><div class="device-select"><select id="dev" title="Device" aria-label="Device"></select><span class="device-select-arrow" aria-hidden="true"><span class="codicon codicon-chevron-down"></span></span></div><select id="fmt" title="Format"><option value="standard">Standard</option><option value="compact">Compact</option></select>
 <div id="filterbox"><button class="ib" id="hist-btn" title="Filter history"></button><div id="editor"><div id="hl"></div><input id="q" spellcheck="false" placeholder="Filter, e.g. tag:foo level:warn -message:bar"></div><button class="ib" id="fav" title="Favorite"></button></div>
 <span id="count"></span></div>

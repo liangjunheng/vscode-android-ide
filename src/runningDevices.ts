@@ -86,12 +86,13 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
   // 输入 VS Code 视图，安装消息与生命周期监听并输出带配置初始状态的 HTML。
   // 回归：npm test 的 build panel bridge / initial mirror state 及 mirror preference 断言初始隐藏和握手。
+  // 下拉主题随资源传递且不改变 CSP；npm test dropdown 接线断言检查 resolveWebviewView 与 html 调用链。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media', 'codicons'));
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(path.join(this.extPath, 'media')), media, vscode.Uri.file(path.join(this.extPath, 'media', 'icons'))] };
     const art = (n: string) => view.webview.asWebviewUri(vscode.Uri.file(path.join(this.extPath, 'media', 'icons', n))).toString();
-    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), mirrorVisible: this.mirrorVisible, deviceViewMode: this.deviceViewMode, processesScript: art('../device-processes/processes.js'), processesStyle: art('../device-processes/processes.css'), explorerScript: art('../device-explorer/main.js'), explorerStyle: art('../device-explorer/main.css') });
+    view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), dropdownStyle: art('../dropdowns.css'), mirrorVisible: this.mirrorVisible, deviceViewMode: this.deviceViewMode, processesScript: art('../device-processes/processes.js'), processesStyle: art('../device-processes/processes.css'), explorerScript: art('../device-explorer/main.js'), explorerStyle: art('../device-explorer/main.css') });
     view.webview.onDidReceiveMessage((m) => this.onMessage(m).catch((e) => this.post({ type: 'error', text: e.message })));
     view.onDidChangeVisibility(() => this.restart());
     view.onDidDispose(() => { if (this.view !== view) { return; } this.view = undefined; void this.dispose().catch(error => vscode.window.showErrorMessage(String(error))); });
@@ -485,7 +486,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 // 生成当前设备名称和全设备下拉 UI；npm test 的 DOM 回归执行 renderDevices 并断言状态、禁用项和空态。
 // 输入资源和模式，在设备选择框后输出投屏/Explorer/Processes图标组，不生成Wi-Fi按钮；build-panel-ui与device-view-mode回归验证同排顺序、移除绑定与四态恢复。
 // 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
-function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; processesStyle: string; explorerScript: string; explorerStyle: string }) {
+// 共享下拉资源随页面生成；npm test 的 dropdown 接线断言及 LOGCAT_BROWSER=1 dropdown 回归验证图标、主题和原生选择。
+function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; processesStyle: string; explorerScript: string; explorerStyle: string; dropdownStyle: string }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource};">
 <link rel="stylesheet" href="${codicons}"><link rel="stylesheet" href="${art.processesStyle}"><style>
@@ -497,7 +499,7 @@ body{margin:0;padding:0;gap:0;font-family:var(--vscode-font-family);color:var(--
 #chev{display:block;pointer-events:none;font-size:14px;opacity:.8;flex:none}
 #tab.multi #chev{display:block}
 #tab.multi select{padding-right:0}
-#tab select{background:var(--vscode-dropdown-background);border:0;color:var(--vscode-dropdown-foreground);font:inherit;appearance:none;-webkit-appearance:none;cursor:pointer;padding:0 4px;text-overflow:ellipsis;min-width:0;width:100%;height:100%}
+#tab select{background:var(--vscode-dropdown-background);border:0;color:var(--vscode-dropdown-foreground);font:inherit;appearance:none;-webkit-appearance:none;cursor:pointer;padding:0 4px;text-overflow:ellipsis;min-width:0;width:100%;height:100%;border-radius:4px;transition:background-color .12s ease,box-shadow .12s ease}#tab select:hover{background:var(--vscode-list-hoverBackground)}
 #tab select:focus-visible{outline:1px solid var(--vscode-focusBorder)}
 #tab select option{background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground)}
 .dk,.lt{display:none}body:not(.vscode-light) .dk{display:flex}body.vscode-light .lt{display:flex}
@@ -532,15 +534,15 @@ button svg{width:20px;height:20px}
 #frame.skin{display:block;position:relative;flex:none}
 #frame.skin #bk,#frame.skin #fg{display:block;position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
 #frame.skin #cv,#frame.skin #screen{position:absolute;max-width:none;max-height:none;border-radius:0;object-fit:fill}
-#menu{display:none;position:fixed;z-index:10;background:var(--vscode-menu-background);color:var(--vscode-menu-foreground);border:1px solid var(--vscode-menu-border,#555);border-radius:4px;padding:4px 0;min-width:160px;box-shadow:0 2px 8px #0008;font-size:12px}
-#menu div{padding:4px 14px;cursor:pointer}#menu div:hover{background:var(--vscode-menu-selectionBackground);color:var(--vscode-menu-selectionForeground)}
+#menu{display:none;position:fixed;z-index:10;min-width:160px;padding:6px 0;background:var(--vscode-menu-background,var(--vscode-editorWidget-background));color:var(--vscode-menu-foreground,var(--vscode-foreground));border:1px solid var(--vscode-menu-border,var(--vscode-widget-border,#555));border-radius:6px;box-shadow:0 8px 24px #0005,0 2px 6px #0003;font-size:12px;overflow:hidden}
+#menu div{min-height:30px;padding:7px 14px;display:flex;align-items:center;cursor:pointer;transition:background-color .12s ease,color .12s ease}#menu div:hover,#menu div:focus-visible{background:var(--vscode-menu-selectionBackground,var(--vscode-list-hoverBackground));color:var(--vscode-menu-selectionForeground,var(--vscode-foreground));outline:0}
 #msg{font-size:11px;opacity:.7;padding:2px 8px}
 #empty{display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:16px 24px;text-align:center;opacity:.9;font-size:13px;line-height:1.6;color:var(--vscode-descriptionForeground)}
 #empty img{width:225px;height:150px}
 #empty a{color:var(--vscode-textLink-foreground);cursor:pointer;text-decoration:none}#empty a:hover{text-decoration:underline}
 body.empty #bar,body.empty #wrap{display:none}
 body.empty #empty{display:flex}
-</style><link rel="stylesheet" href="${art.style}"><link rel="stylesheet" href="${art.explorerStyle}"></head><body class="empty${art.mirrorVisible ? '' : ' mirror-hidden'}" data-mirror-visible="${art.mirrorVisible}" data-device-view-mode="${art.deviceViewMode}">
+</style><link rel="stylesheet" href="${art.style}"><link rel="stylesheet" href="${art.explorerStyle}"><link rel="stylesheet" href="${art.dropdownStyle}"></head><body class="empty${art.mirrorVisible ? '' : ' mirror-hidden'}" data-mirror-visible="${art.mirrorVisible}" data-device-view-mode="${art.deviceViewMode}">
 <div id="tabs" aria-label="Android run configuration">
 <div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
 <div class="build-surface">

@@ -47,6 +47,7 @@ export class DeviceManagerView implements vscode.WebviewViewProvider {
     return out;
   }
 
+  // 菜单加载共享深浅色样式；npm test dropdown 接线及 LOGCAT_BROWSER=1 dropdown 的 .menu 断言验证资源与视觉契约。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -57,7 +58,7 @@ export class DeviceManagerView implements vscode.WebviewViewProvider {
     const u = (...p: string[]) => w.asWebviewUri(vscode.Uri.joinPath(media, ...p));
     w.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
 <link rel="stylesheet" href="${w.asWebviewUri(vscode.Uri.joinPath(codicons, 'codicon.css'))}">
-<link rel="stylesheet" href="${u('devicemanager', 'main.css')}"></head><body>
+<link rel="stylesheet" href="${u('devicemanager', 'main.css')}"><link rel="stylesheet" href="${u('dropdowns.css')}"></head><body>
 <div id="bar"></div><div id="head"></div><div id="list"></div>
 <script src="${u('devicemanager', 'main.js')}"></script></body></html>`;
     w.onDidReceiveMessage((m) => this.onMessage(m));

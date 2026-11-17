@@ -22,8 +22,11 @@ test('Logcat device selector reserves a separate arrow area', () => {
   assert.match(rule('.device-select #dev'), /width:100%/);
   assert.match(rule('.device-select #dev'), /appearance:none/);
   assert.match(rule('.device-select #dev'), /background-image:none/);
-  assert.ok(rule('.device-select #dev').includes('padding-inline-end:calc(1.5em + 8px)'));
+  assert.ok(rule('.device-select #dev').includes('padding-inline-end:calc(1.5em + 18px)'));
   assert.match(rule('.device-select #dev'), /text-overflow:ellipsis/);
+  assert.match(rule('select'), /border-radius:6px/);
+  assert.match(rule('select'), /var\(--vscode-dropdown-background/);
+  assert.match(rule('.device-select #dev:focus-visible,select:focus-visible'), /box-shadow:0 0 0 1px var\(--vscode-focusBorder/);
   assert.match(rule('.device-select-arrow'), /width:1\.5em/);
   assert.match(rule('.device-select-arrow'), /pointer-events:none/);
   assert.match(rule('.device-select-arrow'), /inset-inline-end:1px/);
@@ -201,4 +204,22 @@ test('font changes update height without direct scroll writes', () => {
   assert.equal(vm.runInContext('H', ctx), 30);
   assert.ok(js.includes('new MutationObserver(syncFontMetrics).observe(document.body'));
   assert.ok(js.includes('let H = parseFloat(getComputedStyle(sc).lineHeight)'));
+});
+
+// npm test dropdown：检查四类Webview资源接线、原生语义和主题覆盖；实际级联与键盘由LOGCAT_BROWSER=1 dropdown浏览器回归验证。
+test('dropdown styles connect every Webview and retain native selection semantics', () => {
+  const shared = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
+  for (const name of ['logcat', 'deviceManagerView', 'extendedControls']) {
+    const source = fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8');
+    assert.ok(source.includes("u('dropdowns.css')"), name);
+    assert.ok(source.includes('localResourceRoots: [media, codicons]'), name);
+  }
+  const running = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
+  assert.ok(running.includes("dropdownStyle: art('../dropdowns.css')"));
+  assert.ok(running.includes('href="${art.dropdownStyle}"'));
+  for (const selector of ['.menu', '#menu', '.explorer-menu', '#sugg', 'select::picker(select)', 'option::checkmark']) assert.ok(shared.includes(selector), selector);
+  for (const token of ['--vscode-menu-background', '--vscode-menu-foreground', '--vscode-focusBorder', 'vscode-light', 'vscode-dark', 'vscode-high-contrast-light', 'forced-colors:active', '@supports (appearance:base-select)', 'appearance:auto']) assert.ok(shared.includes(token), token);
+  assert.ok(shared.includes('max-width:calc(100vw - 8px)'));
+  assert.ok(shared.includes('option:disabled'));
+  assert.ok(shared.includes('overflow-wrap:anywhere'));
 });

@@ -16,9 +16,9 @@ body{display:flex;flex-direction:column;color:var(--vscode-foreground);font-fami
 svg{width:16px;height:16px;display:block}
 
 #header{display:flex;gap:6px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--vscode-panel-border,#444)}
-select{background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground);border:1px solid var(--vscode-dropdown-border);padding:2px 4px;border-radius:2px;max-width:220px;font:inherit}
+select{appearance:none;-webkit-appearance:none;background-color:var(--vscode-dropdown-background,var(--vscode-input-background));color:var(--vscode-dropdown-foreground,var(--vscode-input-foreground));border:1px solid var(--vscode-dropdown-border,var(--vscode-input-border,#555));padding:5px 30px 5px 9px;border-radius:6px;max-width:220px;min-height:28px;font:inherit;line-height:1.2;cursor:pointer;transition:border-color .12s ease,background-color .12s ease,box-shadow .12s ease}
 .device-select{position:relative;flex:0 1 220px;min-width:80px}
-.device-select #dev{display:block;width:100%;max-width:none;min-width:0;appearance:none;background-image:none;padding-inline-end:calc(1.5em + 8px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.device-select #dev{display:block;width:100%;max-width:none;min-width:0;appearance:none;-webkit-appearance:none;background-image:none;padding-inline-end:calc(1.5em + 18px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.device-select #dev:focus-visible,select:focus-visible{outline:0;border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px var(--vscode-focusBorder)}select:hover{border-color:var(--vscode-focusBorder)}select option{background:var(--vscode-dropdown-background,var(--vscode-editorWidget-background));color:var(--vscode-dropdown-foreground,var(--vscode-foreground))}
 .device-select-arrow{position:absolute;inset-inline-end:1px;top:1px;bottom:1px;width:1.5em;display:grid;place-items:center;pointer-events:none;border-inline-start:1px solid var(--vscode-dropdown-border);color:var(--vscode-dropdown-foreground)}
 #filterbox{flex:1;min-width:120px;display:flex;align-items:center;position:relative;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;height:24px}
 #filterbox:focus-within{border-color:var(--vscode-focusBorder)}
@@ -64,10 +64,10 @@ body:not(.vscode-light) #hl .kv{color:transparent}
 #status{position:absolute;right:16px;bottom:8px;padding:2px 8px;border-radius:3px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);display:none}
 #empty{position:absolute;top:12px;left:16px;font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground)}
 
-.menu{position:fixed;z-index:10;background:var(--vscode-menu-background);color:var(--vscode-menu-foreground);border:1px solid var(--vscode-menu-border,#555);border-radius:4px;padding:4px 0;min-width:180px;box-shadow:0 2px 8px #0008;font:inherit}
-.menu div{padding:3px 14px;cursor:pointer;white-space:nowrap}
-.menu div:hover{background:var(--vscode-menu-selectionBackground);color:var(--vscode-menu-selectionForeground)}
-.menu hr{border:0;border-top:1px solid var(--vscode-menu-separatorBackground);margin:4px 0}
+.menu{position:fixed;z-index:10;min-width:180px;padding:6px 0;background:var(--vscode-menu-background,var(--vscode-editorWidget-background));color:var(--vscode-menu-foreground,var(--vscode-foreground));border:1px solid var(--vscode-menu-border,var(--vscode-widget-border,#555));border-radius:6px;box-shadow:0 8px 24px #0005,0 2px 6px #0003;font:inherit;overflow:hidden}
+.menu div{min-height:30px;padding:7px 14px;display:flex;align-items:center;cursor:pointer;white-space:nowrap;transition:background-color .12s ease,color .12s ease}
+.menu div:hover,.menu div:focus-visible{background:var(--vscode-menu-selectionBackground,var(--vscode-list-hoverBackground));color:var(--vscode-menu-selectionForeground,var(--vscode-foreground));outline:0}
+.menu hr{border:0;border-top:1px solid var(--vscode-menu-separatorBackground,var(--vscode-panel-border));margin:6px 8px}
 #hist{max-height:240px;overflow:auto}
 #hist .h{display:flex;align-items:center;gap:6px;font:inherit}
 #hist .sec{opacity:.6;padding:2px 14px;cursor:default}

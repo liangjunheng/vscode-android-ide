@@ -67,7 +67,8 @@ async function fixture() {
   for (const name of await fs.readdir(path.join(root, 'media/icons'))) {
     if (name.endsWith('.svg')) icons[name.slice(0, -4)] = await fs.readFile(path.join(root, 'media/icons', name), 'utf8');
   }
-  const css = await fs.readFile(path.join(root, 'media/logcat/main.css'), 'utf8');
+  const css = await fs.readFile(path.join(root, 'media/logcat/main.css'), 'utf8') + await fs.readFile(path.join(root, 'media/dropdowns.css'), 'utf8')
+    + (await fs.readFile(path.join(root, 'media/codicons/codicon.css'), 'utf8')).replace(/url\([^)]*\)/g, 'url(data:font/ttf;base64,' + (await fs.readFile(path.join(root, 'media/codicons/codicon.ttf'))).toString('base64') + ')');
   const scripts = await Promise.all(['filter.js', 'buffer.js', 'main.js'].map(name => fs.readFile(path.join(root, 'media/logcat', name), 'utf8')));
   return { html, icons, css, scripts };
 }
@@ -90,7 +91,15 @@ async function dispose(child, profile) {
 async function browser(t, data, signal) {
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'logcat-edge-profile-'));
   let child, cdp;
-  t.after(async () => { try { cdp?.close(); } finally { await dispose(child, profile); } });
+  // 浏览器先按协议关闭并等待自有进程退出，再断开CDP和移除profile；dropdown/Logcat真实浏览器回归同时覆盖清理，避免taskkill与自然退出竞争。
+  t.after(async () => {
+    try {
+      if (cdp && child.exitCode === null && child.signalCode === null) {
+        await cdp.call('Browser.close');
+        if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
+      }
+    } finally { cdp?.close(); await dispose(child, profile); }
+  });
   const endpoint = new Promise((resolve, reject) => {
     // Edge 的兼容层重启会脱离 child 及 stderr；禁止该重启以保留进程所有权和 CDP endpoint 事件。
     child = spawn(executable, ['--edge-skip-compat-layer-relaunch', '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
@@ -142,8 +151,9 @@ async function browser(t, data, signal) {
   async function click(id) { await evaluate(`document.getElementById(${JSON.stringify(id)}).click()`); await frames(); }
   // 用真实 CDP 键盘事件触发 Ctrl+F 和 Escape，并等待布局。
   async function key(key, modifiers = 0) {
-    await call('Input.dispatchKeyEvent', { type: 'keyDown', key, modifiers, windowsVirtualKeyCode: key === 'Escape' ? 27 : 70 });
-    await call('Input.dispatchKeyEvent', { type: 'keyUp', key, modifiers }); await frames();
+    const code = { Escape:27, Enter:13, Backspace:8, Delete:46, Tab:9, ArrowLeft:37, ArrowRight:39, ArrowUp:38, ArrowDown:40 }[key] || key.toUpperCase().charCodeAt(0);
+    await call('Input.dispatchKeyEvent', { type: 'keyDown', key, modifiers, windowsVirtualKeyCode: code, ...(key === 'Enter' ? {text:'\r'} : {}) });
+    await call('Input.dispatchKeyEvent', { type: 'keyUp', key, modifiers, windowsVirtualKeyCode: code }); await frames();
   }
   // 发送原生鼠标事件验证真实拖选/双击，输入类型、CSS坐标和点击次数，输出协议完成。
   async function mouse(type, x, y, clickCount = 1) {
@@ -452,4 +462,72 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
     }
   });
   } catch (error) { console.error('Logcat browser failure before cleanup:', error); throw error; }
+});
+
+// LOGCAT_BROWSER=1 node --test --test-name-pattern=dropdown tests/logcat-browser.test.js：真实CSS级联、鼠标展开/键盘选择、主题切换、长文本与滚动上限断言，无ADB设备依赖。
+test('dropdown browser themes native choices and bounded menus', {skip:!enabled,timeout:60000}, async t => {
+  const controller=new AbortController();
+  const deadline=setTimeout(()=>controller.abort(new Error('Dropdown browser deadline exceeded')),45000);
+  t.after(()=>clearTimeout(deadline));
+  const page=await browser(t,await fixture(),controller.signal);
+  assert.equal(await page.evaluate('CSS.supports("appearance","base-select")'),true);
+  // 生产页面的设备列表走真实消息协议；第一项较长、第二项离线，其余项覆盖滚动。
+  await page.post({type:'devices',list:Array.from({length:24},(_,i)=>({serial:'dropdown-'+i,model:i===0?'Android development device with a long readable name':i===1?'Offline device':'Device '+i,state:i===1?'offline':'device'})),serial:'dropdown-0'});
+  for(const theme of ['dark','light','high-contrast','high-contrast-light']) for(const width of [240,800]) {
+    const light=theme==='light'||theme==='high-contrast-light';
+    const bg=light?'rgb(255, 255, 255)':'rgb(37, 37, 38)', fg=light?'rgb(32, 32, 32)':'rgb(204, 204, 204)';
+    await page.viewport(width);
+    await page.evaluate(`(()=>{
+      document.body.className='vscode-'+${JSON.stringify(theme)};
+      for(const [key,value] of Object.entries({'menu-background':${JSON.stringify(bg)},'menu-foreground':${JSON.stringify(fg)},'dropdown-background':${JSON.stringify(bg)},'dropdown-foreground':${JSON.stringify(fg)},'descriptionForeground':${JSON.stringify(fg)},'focusBorder':'#007acc','menu-border':${JSON.stringify(light?'#b8b8b8':'#454545')},'list-hoverBackground':${JSON.stringify(light?'#e8e8e8':'#37373d')}}))document.body.style.setProperty('--vscode-'+key,value);
+      document.body.style.backgroundColor=${JSON.stringify(bg)};document.body.style.color=${JSON.stringify(fg)};
+      document.body.style.setProperty('--vscode-editor-background',${JSON.stringify(bg)});
+      document.getElementById('dev').value='dropdown-0';
+      const dev=document.getElementById('dev');dev.focus();
+    })()`);
+    const rect=await page.evaluate("(()=>{const r=document.getElementById('dev').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,height:r.height}})()");
+    assert.equal(rect.height,28);
+    await page.mouse('mousePressed',rect.x,rect.y); await page.mouse('mouseReleased',rect.x,rect.y); await page.frames();
+    assert.equal(await page.evaluate("document.getElementById('dev').matches(':open')"),true);
+    const actual=await page.evaluate(`(()=>{const dev=document.getElementById('dev'),popup=getComputedStyle(dev,'::picker(select)'),first=dev.selectedOptions[0],r=first.getBoundingClientRect();return {appearance:getComputedStyle(dev).appearance,bg:popup.backgroundColor,fg:popup.color,radius:popup.borderRadius,maxHeight:parseFloat(popup.maxHeight),scroll:popup.overflowY,icon:getComputedStyle(first,'::before').fontFamily,check:getComputedStyle(first,'::checkmark').fontFamily,x:r.x,right:r.right,height:r.height,disabled:dev.querySelector('[value=dropdown-1]').disabled}})()`);
+    assert.equal(actual.appearance,'base-select');assert.equal(actual.bg,bg);assert.equal(actual.fg,fg);assert.equal(actual.radius,'6px');assert.ok(actual.maxHeight<=320);assert.equal(actual.scroll,'auto');assert.equal(actual.icon,'codicon');assert.equal(actual.check,'codicon');assert.ok(actual.x>=0&&actual.right<=width,JSON.stringify(actual));assert.ok(actual.height>=32);assert.equal(actual.disabled,true);
+    if(width===800&&(theme==='dark'||theme==='light'))await page.screenshot('dropdown-'+theme);
+    await page.key('Escape');assert.equal(await page.evaluate("document.getElementById('dev').matches(':open')"),false);
+    await page.key('ArrowDown');
+    assert.equal(await page.evaluate("document.getElementById('dev').matches(':open')"),true);
+    await page.key('ArrowDown');await page.key('Enter');
+    assert.equal(await page.evaluate("document.getElementById('dev').value"),'dropdown-2');
+    assert.deepEqual(await page.evaluate("window.__hostMessages.filter(m=>m.type==='select').at(-1)"),{type:'select',serial:'dropdown-2'});
+    // 用真实共享CSS覆盖所有弹窗选择器，比较背景、圆角和滚动约束；不替代原生select的交互断言。
+    const menus=await page.evaluate(`(()=>{const results=[];for(const selector of ['.menu','#menu','.explorer-menu','#sugg']){const menu=document.createElement('div');if(selector[0]==='#')menu.id=selector.slice(1);else menu.className=selector.slice(1);menu.style.cssText='display:block;position:fixed;left:4px;top:80px;width:180px';const row=document.createElement(selector==='.explorer-menu'?'button':'div');if(selector==='#sugg')row.className='si';row.textContent='Available action';menu.append(row);document.body.append(menu);const s=getComputedStyle(menu),r=getComputedStyle(row);results.push({selector,bg:s.backgroundColor,fg:s.color,radius:s.borderRadius,padding:s.padding,maxHeight:parseFloat(s.maxHeight),overflow:s.overflowY,rowHeight:parseFloat(r.minHeight)});menu.remove()}return results})()`);
+    for(const menu of menus){assert.equal(menu.bg,bg,menu.selector);assert.equal(menu.fg,fg,menu.selector);assert.equal(menu.radius,'6px');assert.equal(menu.padding,'4px');assert.ok(menu.maxHeight<=320);assert.equal(menu.overflow,'auto');assert.equal(menu.rowHeight,30);}
+  }
+  // 其余视图使用各自真实样式与同一份共享CSS，覆盖项目/变体、进程排序及动态扩展设置选择器的级联和原生键盘。
+  for(const [file,id,className] of [['build-panel.css','build-project',''],['build-panel.css','build-target',''],['device-processes/processes.css','sort-test','process-sort'],['extended/main.css','setting-test','']]) {
+    const style=await fs.readFile(path.join(root,'media',file),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
+    await page.viewport(240);
+    await page.evaluate('(function(css,id,className){document.getElementById("dropdown-companion-style")?.remove();document.getElementById("dropdown-companion")?.remove();const style=document.createElement("style");style.id="dropdown-companion-style";style.textContent=css;document.head.append(style);const host=document.createElement("div");host.id="dropdown-companion";host.style.cssText="position:fixed;left:8px;bottom:20px;width:200px;z-index:100";const select=document.createElement("select");select.id=id;select.className=className;select.setAttribute("aria-label","Dropdown verification");select.style.width="200px";for(const [value,label,disabled] of [["first","First item",false],["disabled","Unavailable",true],["next","Next item with a long descriptive label",false]]){const option=document.createElement("option");option.value=value;option.textContent=label;option.disabled=disabled;select.append(option)}host.append(select);document.body.append(host);select.focus()})('+JSON.stringify(style)+','+JSON.stringify(id)+','+JSON.stringify(className)+')');
+    const expression='document.getElementById('+JSON.stringify(id)+')';
+    assert.equal(await page.evaluate('getComputedStyle('+expression+').appearance'),'base-select',file);
+    await page.key('ArrowDown');assert.equal(await page.evaluate(expression+".matches(':open')"),true);
+    const box=await page.evaluate('(()=>{const s='+expression+',p=getComputedStyle(s,"::picker(select)"),r=s.options[0].getBoundingClientRect();return {x:r.x,right:r.right,bottom:r.bottom,radius:p.borderRadius,bg:p.backgroundColor,selectedBg:getComputedStyle(s.options[0]).backgroundColor}})()');
+    assert.equal(box.radius,'6px');assert.equal(box.bg,'rgb(255, 255, 255)');assert.equal(box.selectedBg,'rgb(232, 232, 232)');assert.ok(box.x>=0&&box.right<=240&&box.bottom<=720,JSON.stringify({file,box}));
+    await page.key('ArrowDown');await page.key('Enter');assert.equal(await page.evaluate(expression+'.value'),'next');
+    await page.evaluate('document.getElementById("dropdown-companion").remove();document.getElementById("dropdown-companion-style").remove()');
+  }
+
+  // 真实Explorer脚本经消息生成文件行，右键事件打开八项菜单；240/800px边缘定位、内边距、标签完整和Escape关闭均执行断言。
+  const explorerCSS=await fs.readFile(path.join(root,'media/device-explorer/main.css'),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
+  await page.evaluate('(function(css){const style=document.createElement("style");style.textContent=css;document.head.append(style);const root=document.createElement("section");root.id="device-explorer";root.style.cssText="position:fixed;inset:100px 0 0;height:auto;z-index:30;background:var(--popup-bg)";document.body.append(root);window.send=m=>window.__hostMessages.push(m)})('+JSON.stringify(explorerCSS)+')');
+  for(const file of ['media/device-processes/processes.js','media/device-explorer/main.js'])await page.evaluate(await fs.readFile(path.join(root,file),'utf8'));
+  await page.post({type:'explorerState',serial:'dropdown-phone',tab:'files',capabilities:{}});
+  await page.post({type:'explorerFiles',path:'/',entries:[{path:'/example',name:'example',kind:'file',permissions:'-rw-r--r--',size:24}]});
+  for(const theme of ['dark','light'])for(const width of [240,800]){
+    await page.viewport(width);
+    await page.evaluate('document.body.className='+JSON.stringify('vscode-'+theme)+';document.body.style.setProperty("--vscode-menu-background",'+JSON.stringify(theme==='light'?'#fff':'#252526')+');document.body.style.setProperty("--vscode-menu-foreground",'+JSON.stringify(theme==='light'?'#202020':'#ccc')+')');
+    await page.evaluate('document.querySelector(".file-row").dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:innerWidth-2,clientY:innerHeight-2}))');
+    const menu=await page.evaluate('(()=>{const menu=document.querySelector(".explorer-menu"),r=menu.getBoundingClientRect(),s=getComputedStyle(menu);return{x:r.x,right:r.right,bottom:r.bottom,width:r.width,inner:menu.clientWidth,padding:parseFloat(s.paddingLeft),radius:s.borderRadius,labels:[...menu.children].map(row=>({width:row.clientWidth,fits:row.scrollWidth<=row.clientWidth,text:row.textContent}))}})()');
+    assert.ok(menu.x>=0&&menu.right<=width&&menu.bottom<=720,JSON.stringify(menu));assert.equal(menu.width,180);assert.equal(menu.radius,'6px');assert.equal(menu.labels.length,8);assert.ok(menu.labels.every(row=>row.width===menu.inner-2*menu.padding&&row.fits));
+    await page.key('Escape');assert.equal(await page.evaluate('document.querySelectorAll(".explorer-menu").length'),0);
+  }
 });

@@ -11,6 +11,7 @@ h3{font-weight:400;margin:0 0 14px;font-size:15px;opacity:.85}
 .row{display:flex;align-items:center;gap:12px;margin:12px 0;flex-wrap:wrap}
 .row label{min-width:140px;opacity:.8}
 input,select{background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,#555);border-radius:3px;padding:4px 8px;font:inherit}
+select{border-radius:6px;padding:6px 9px;cursor:pointer}select:hover{border-color:var(--vscode-focusBorder)}select:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}select option{background:var(--vscode-dropdown-background,var(--vscode-editorWidget-background));color:var(--vscode-dropdown-foreground,var(--vscode-foreground))}
 input[type=range]{padding:0;flex:1;max-width:320px}
 button{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border:1px solid var(--vscode-panel-border,#555);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit}
 button:hover{background:var(--vscode-button-secondaryHoverBackground)}
