@@ -2,13 +2,13 @@ const test=require('node:test');const assert=require('node:assert/strict');const
 const os=require('node:os');
 const processesCss=fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.css'),'utf8');
 // 执行真实前端并记录DOM/消息，注入的FileReader与同步ACK仅控制外部事件；上传回归不改写生产函数。
-function boot(options={}){const sent=[];const nodes={};const created=[];function el(tag){return {tagName:tag,children:[],style:{setProperty(){}},dataset:{},classList:{add(name){this._names=this._names||new Set();this._names.add(name)},remove(name){if(this._names)this._names.delete(name)},toggle(name,force){const next=force===undefined?!this.contains(name):force;if(next)this.add(name);else this.remove(name);return next},contains(name){return !!(this._names&&this._names.has(name))}},className:'',textContent:'',appendChild(x){this.children.push(x);return x},replaceChildren(...x){this.children=x},addEventListener(type,fn){this['on'+type]=fn},setAttribute(key,value){this[key]=value;},remove(){},querySelectorAll(selector){const found=[];const visit=node=>{for(const child of node.children||[]){if(child.className===selector.slice(1))found.push(child);visit(child);}};visit(this);return found},querySelector(){return null},getBoundingClientRect(){return {width:0,height:0}},select(){},click(){this.onclick?.()}}}const doc={getElementById:id=>nodes[id]||(nodes[id]=el('div')),createElement:tag=>{const node=el(tag);created.push(node);return node;},body:el('body'),addEventListener(){}};nodes['device-explorer']=el('section');const ctx={document:doc,window:{send:m=>sent.push(m),addEventListener(type,fn){if(type==='message')this.message=fn}},navigator:{clipboard:{writeText:async v=>{ctx.copied=v}}},send:m=>{sent.push(m);options.onSend?.(m,ctx);},AbortController,Intl:options.Intl||Intl,FileReader:options.FileReader||UploadReader,innerWidth:1000,innerHeight:800,console,Math,Date,Set,Map,Promise,Uint8Array,ArrayBuffer,btoa:s=>Buffer.from(s,'binary').toString('base64'),setTimeout,clearTimeout};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.js'),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.js'),'utf8'),ctx);return {ctx,sent,created,api:ctx.window.__deviceExplorer,root:nodes['device-explorer']}}
+function boot(options={}){const sent=[];const nodes={};const created=[];function el(tag){return {tagName:tag,children:[],style:{setProperty(){}},dataset:{},classList:{add(name){this._names=this._names||new Set();this._names.add(name)},remove(name){if(this._names)this._names.delete(name)},toggle(name,force){const next=force===undefined?!this.contains(name):force;if(next)this.add(name);else this.remove(name);return next},contains(name){return !!(this._names&&this._names.has(name))}},className:'',textContent:'',appendChild(x){this.children.push(x);return x},replaceChildren(...x){this.children=x},addEventListener(type,fn){this['on'+type]=fn},setAttribute(key,value){this[key]=value;},remove(){},querySelectorAll(selector){const found=[];const visit=node=>{for(const child of node.children||[]){if(child.className===selector.slice(1))found.push(child);visit(child);}};visit(this);return found},contains(node){return node===this||this.children.some(child=>child.contains(node))},querySelector(){return null},getBoundingClientRect(){return {width:0,height:0}},select(){},click(){this.onclick?.()}}}const doc={getElementById:id=>nodes[id]||(nodes[id]=el('div')),createElement:tag=>{const node=el(tag);created.push(node);return node;},body:el('body'),addEventListener(){}};nodes['device-explorer']=el('section');const ctx={document:doc,window:{send:m=>sent.push(m),addEventListener(type,fn){if(type==='message')this.message=fn}},navigator:{clipboard:{writeText:async v=>{ctx.copied=v}}},send:m=>{sent.push(m);options.onSend?.(m,ctx);},AbortController,Intl:options.Intl||Intl,FileReader:options.FileReader||UploadReader,innerWidth:1000,innerHeight:800,console,Math,Date,Set,Map,Promise,Uint8Array,ArrayBuffer,btoa:s=>Buffer.from(s,'binary').toString('base64'),setTimeout,clearTimeout};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.js'),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.js'),'utf8'),ctx);return {ctx,sent,created,api:ctx.window.__deviceExplorer,root:nodes['device-explorer']}}
 // CSS回归直接读取独立Processes资源，验证窄面板左右padding和卡片间距不会只依赖浏览器矩阵。
 test('Processes CSS keeps compact balanced list spacing',()=>{assert.match(processesCss,/\.process-list\{[^}]*padding:2px[^}]*scrollbar-gutter:stable\}/);assert.match(processesCss,/\.process-card\{[^}]*margin:0 0 10px;padding:5px/);});
 
 test('Explorer sends ready and preserves expanded tree while safely rendering names',()=>{const b=boot();assert.equal(b.sent[0].type,'explorer');assert.equal(b.sent[0].action,'ready');b.api.receive({type:'explorerState',serial:'s',deviceName:'<Phone>',tab:'files'});b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/A',name:'A',kind:'directory'},{path:'/z<bad>',name:'<bad>',kind:'file'}]});b.api.state.expanded.add('/A');b.api.receive({type:'explorerFiles',path:'/A',entries:[{path:'/A/x',name:'x',kind:'file'}]});assert.equal(b.api.state.expanded.has('/A'),true);assert.equal(b.root.children[0].children[0].textContent.includes('<Phone>'),true);assert.equal(b.root.children[0].children.length,1)});
 test('Explorer protocol exposes tab and process selection ordering',()=>{const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'processes'});b.api.receive({type:'explorerProcesses',processes:[{pid:2,name:'z'},{pid:1,name:'A'}]});assert.equal(b.api.state.processes[0].pid,2);assert.equal(b.root.children.length>0,true);b.api.state.processSelected=1;b.ctx.document.dispatchEvent?.({})});
-// 目录单击、空名称回退和拖动悬停选中必须走真实文件行事件，避免只能点箭头或出现无名项。
+// 通过真实文件行事件验证目录单击、空名称回退，以及独立拖放目标保留普通选择，避免无名项或悬停覆盖选择。
 test('folder rows toggle on click and select as drag targets',()=>{
   const b=boot(); b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
   b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/named-folder',name:'   ',kind:'directory'},{path:'/empty-name.txt',kind:'file'}]});
@@ -25,8 +25,89 @@ test('folder rows toggle on click and select as drag targets',()=>{
   list=b.root.children[1].children[2]; folder=list.children[1]; file=list.children[2];
   assert.equal(folder.classList.contains('selected'),false);
   folder.ondragover({preventDefault(){}});
-  assert.equal(Array.from(b.api.state.selected).join(','),'/named-folder');
-  assert.equal(folder.classList.contains('selected'),true);
+  assert.equal(Array.from(b.api.state.selected).join(','),'/empty-name.txt');
+  assert.equal(folder.classList.contains('drop-target'),true);
+  assert.equal(file.classList.contains('selected'),true);
+  b.root.ondragleave({relatedTarget:null});
+  assert.equal(folder.classList.contains('drop-target'),false);
+});
+
+// 读取当前CSS断言蓝色拖放和选择样式存在且声明未截断；结合真实DOM类切换回归验证视觉绑定。
+test('file selection and drop target have blue visual feedback',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.css'),'utf8');
+  assert.ok(css.includes('.file-row.drop-target,.file-row.drop-target:hover{background:#075fa8;color:#fff;'));
+  assert.ok(css.includes('.file-row.selected,.file-row.selected:hover{background:var(--vscode-list-activeSelectionBackground,#094771)'));
+  assert.ok(css.includes('.file-list>.state.error{white-space:pre-wrap;overflow-wrap:anywhere;'));
+  assert.equal(css.includes('line truncated'),false);
+  assert.equal((css.match(/\{/g)||[]).length,(css.match(/\}/g)||[]).length);
+});
+
+// 执行真实行事件，单选、Ctrl多选和Shift连选不被拖放悬停覆盖，退出或视图切换清理拖放类。
+test('upload drag targets preserve normal single and multiple selection',()=>{
+  const b=boot(); b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  b.api.receive({type:'explorerFiles',path:'/',entries:['a','b','c'].map(name=>({path:'/'+name,name,kind:'file'}))});
+  const rows=()=>b.root.children[1].children[2].children.slice(1);
+  rows()[0].onclick({}); assert.equal(rows()[0]['aria-selected'],'true');
+  rows()[1].onclick({ctrlKey:true}); assert.deepEqual(Array.from(b.api.state.selected),['/a','/b']);
+  rows()[2].onclick({shiftKey:true}); assert.deepEqual(Array.from(b.api.state.selected),['/a','/b','/c']);
+  b.root.ondragover({preventDefault(){},target:{closest:()=>rows()[1]}}); assert.equal(rows()[1].classList.contains('drop-target'),true);
+  assert.deepEqual(Array.from(b.api.state.selected),['/a','/b','/c']);
+  b.root.ondragleave({relatedTarget:rows()[1].children[0]});
+  assert.equal(rows()[1].classList.contains('drop-target'),true);
+  b.root.ondragleave({relatedTarget:b.ctx.document.createElement('div')});
+  assert.equal(rows()[1].classList.contains('drop-target'),false);
+  b.root.ondragover({preventDefault(){},target:{closest:()=>rows()[1]}});
+  assert.equal(b.api.state.dragTarget,'/b');
+  assert.equal(rows()[1].classList.contains('drop-target'),true);
+  b.root.ondragover({preventDefault(){},target:{closest:()=>null}});
+  assert.equal(b.api.state.dragTarget,null);
+  assert.equal(rows()[1].classList.contains('drop-target'),false);
+  rows()[1].ondragover({preventDefault(){}});
+  b.root.ondragend(); assert.equal(rows()[1].classList.contains('drop-target'),false);
+  rows()[0].ondragover({preventDefault(){}}); b.api.receive({type:'deviceViewMode',mode:'processes'});
+  assert.equal(b.api.state.dragTarget,null);
+});
+// 真实drop与设备ACK错误必须显示具体写入/清理原因，错误不替代文件行，随后仍可正常选择。
+test('failed drop keeps file rows selectable and shows all upload causes',async()=>{
+  const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m,m.action==='uploadEnd'?'Permission denied: /dest':m.action==='uploadAbort'?'cleanup failed':undefined);}});
+  b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/dest',name:'dest',kind:'directory'}]});
+  const folder=b.root.children[1].children[2].children[1]; folder.ondragover({preventDefault(){}});
+  await b.root.ondrop(droppedEvent([],[uploadFile(0)],'/dest'));
+  assert.equal(b.api.state.dragTarget,null); assert.ok(b.api.state.error.includes('Permission denied: /dest')); assert.match(b.api.state.error,/cleanup failed/);
+  let list=b.root.children[1].children[2]; assert.equal(list.children[1].role,'alert'); assert.equal(list.children[2].dataset.path,'/dest');
+  list.children[2].onclick({ctrlKey:true}); assert.deepEqual(Array.from(b.api.state.selected),['/dest']);
+  b.api.receive({type:'explorerProgress',busy:false,error:'No space left on device',message:'Upload failed'});
+  list=b.root.children[1].children[2]; assert.equal(list.children[1].textContent,'No space left on device');
+  assert.equal(list.children[2].classList.contains('selected'),true);
+});
+
+// 文件输入事件既要展开嵌套本地错误，也要在下一次成功上传时移除旧错误，不影响文件行。
+test('upload input displays nested causes and clears old failures on success',async()=>{
+  const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});
+  b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/a',name:'a',kind:'file'}]});
+  const nested=new AggregateError([new AggregateError([new Error('file locked')],'reader failed')],'upload failed');
+  let input=b.created.findLast(node=>node.type==='file');
+  input.files=[{name:'bad',size:1,slice(){throw nested;}}]; await input.onchange();
+  assert.equal(b.api.state.error,'upload failed: reader failed: file locked');
+  assert.equal(b.root.children[1].children[2].children[1].role,'alert');
+  input=b.created.findLast(node=>node.type==='file'); input.files=[uploadFile(0)]; await input.onchange();
+  assert.equal(b.api.state.error,''); assert.equal(b.api.state.transfer,null);
+  const list=b.root.children[1].children[2];assert.equal(list.children.some(node=>node.role==='alert'),false);
+  assert.equal(list.children[1].dataset.path,'/a'); assert.equal(b.sent.filter(m=>m.action==='uploadEnd').length,1);
+});
+
+// 宿主设备/连接/状态改变必须清理拖放目标；从真实root事件进入，普通选择按宿主生命周期处理。
+test('host context events clear hovered upload targets',()=>{
+  for(const message of [{type:'devices',serial:'other'},{type:'explorerConnection',serial:'s',view:'files',connected:false},{type:'explorerState',serial:'s',tab:'files',active:false}]){
+    const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+    b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/a',name:'a',kind:'file'}]});
+    const row=b.root.children[1].children[2].children[1];
+    b.root.ondragover({preventDefault(){},target:{closest:()=>row}});
+    assert.equal(b.api.state.dragTarget,'/a'); assert.equal(row.classList.contains('drop-target'),true);
+    b.api.receive(message);assert.equal(b.api.state.dragTarget,null);assert.equal(row.classList.contains('drop-target'),false);
+  }
 });
 
 // 标准FileReader测试替身保留异步load/error/abort行为，不替换生产分块逻辑。
