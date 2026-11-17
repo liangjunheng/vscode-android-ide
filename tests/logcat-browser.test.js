@@ -473,7 +473,7 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
   assert.equal(await page.evaluate('CSS.supports("appearance","base-select")'),true);
   // 生产页面的设备列表走真实消息协议；第一项较长、第二项离线，其余项覆盖滚动。
   await page.post({type:'devices',list:Array.from({length:24},(_,i)=>({serial:'dropdown-'+i,model:i===0?'Android development device with a long readable name':i===1?'Offline device':'Device '+i,state:i===1?'offline':'device'})),serial:'dropdown-0'});
-  for(const theme of ['dark','light','high-contrast','high-contrast-light']) for(const width of [240,800]) {
+  for(const theme of ['dark','light','high-contrast','high-contrast-light']) for(const width of [240,283,800]) {
     const light=theme==='light'||theme==='high-contrast-light';
     const bg=light?'rgb(255, 255, 255)':'rgb(37, 37, 38)', fg=light?'rgb(32, 32, 32)':'rgb(204, 204, 204)';
     await page.viewport(width);
@@ -487,6 +487,24 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
     })()`);
     const rect=await page.evaluate("(()=>{const r=document.getElementById('dev').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,height:r.height}})()");
     assert.equal(rect.height,28);
+    // 箭头对齐回归：真实长设备名下，与Format逐属性和中心位置比较，不以CSS声明存在代替视觉几何。
+    const arrowStyles=await page.evaluate("(()=>['dev','fmt'].map(id=>{const el=document.getElementById(id),s=getComputedStyle(el,'::picker-icon'),r=el.getBoundingClientRect();return {style:Object.fromEntries(['content','fontFamily','fontSize','color','width','height','position','insetInlineEnd','top','translate','pointerEvents'].map(k=>[k,s[k]])),padding:getComputedStyle(el).paddingInlineEnd,center:r.y+r.height/2,width:r.width,overlay:document.querySelectorAll('.device-select-arrow').length}}))()");
+    assert.deepEqual(arrowStyles[0].style,arrowStyles[1].style);
+    assert.equal(arrowStyles[0].style.position,'static');
+    assert.equal(arrowStyles[0].style.width,'16px');
+    assert.equal(arrowStyles[0].style.fontSize,'16px');
+    assert.ok(parseFloat(arrowStyles[0].style.height)>0&&parseFloat(arrowStyles[0].style.height)<rect.height);
+    assert.equal(arrowStyles[0].style.fontFamily,'codicon');
+    assert.equal(arrowStyles[0].padding,arrowStyles[1].padding);
+    assert.equal(arrowStyles[0].padding,'8px');
+    assert.ok(Math.abs(arrowStyles[0].center-arrowStyles[1].center)<1,JSON.stringify(arrowStyles));
+    assert.equal(arrowStyles[0].overlay,0);
+    const labelBounds=await page.evaluate("(()=>['dev','fmt'].map(id=>{const s=document.getElementById(id),label=s.querySelector('selectedcontent'),r=s.getBoundingClientRect(),a=getComputedStyle(s,'::picker-icon'),c=getComputedStyle(s),l=label.getBoundingClientRect();return {id,left:l.left,right:l.right,width:l.width,arrowLeft:r.right-parseFloat(c.borderRightWidth)-parseFloat(c.paddingRight)-parseFloat(a.width),clip:getComputedStyle(label).overflow,textOverflow:getComputedStyle(label).textOverflow,text:label.textContent,selected:s.selectedOptions[0].textContent,scroll:label.scrollWidth,client:label.clientWidth}}))()");
+    for(const label of labelBounds){assert.ok(label.width>0,JSON.stringify(label));assert.ok(label.right+7<=label.arrowLeft,JSON.stringify(label));assert.equal(label.clip,'hidden');assert.equal(label.textOverflow,'ellipsis');assert.equal(label.text,label.selected);}
+    assert.ok(labelBounds[0].scroll>labelBounds[0].client,JSON.stringify(labelBounds[0]));
+
+    if(width===800&&(theme==='dark'||theme==='light'))await page.screenshot('arrow-aligned-'+theme);
+
     await page.mouse('mousePressed',rect.x,rect.y); await page.mouse('mouseReleased',rect.x,rect.y); await page.frames();
     assert.equal(await page.evaluate("document.getElementById('dev').matches(':open')"),true);
     const actual=await page.evaluate(`(()=>{const dev=document.getElementById('dev'),popup=getComputedStyle(dev,'::picker(select)'),first=dev.selectedOptions[0],r=first.getBoundingClientRect();return {appearance:getComputedStyle(dev).appearance,bg:popup.backgroundColor,fg:popup.color,radius:popup.borderRadius,maxHeight:parseFloat(popup.maxHeight),scroll:popup.overflowY,icon:getComputedStyle(first,'::before').fontFamily,check:getComputedStyle(first,'::checkmark').fontFamily,x:r.x,right:r.right,height:r.height,disabled:dev.querySelector('[value=dropdown-1]').disabled}})()`);
@@ -501,6 +519,13 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
     // 用真实共享CSS覆盖所有弹窗选择器，比较背景、圆角和滚动约束；不替代原生select的交互断言。
     const menus=await page.evaluate(`(()=>{const results=[];for(const selector of ['.menu','#menu','.explorer-menu','#sugg']){const menu=document.createElement('div');if(selector[0]==='#')menu.id=selector.slice(1);else menu.className=selector.slice(1);menu.style.cssText='display:block;position:fixed;left:4px;top:80px;width:180px';const row=document.createElement(selector==='.explorer-menu'?'button':'div');if(selector==='#sugg')row.className='si';row.textContent='Available action';menu.append(row);document.body.append(menu);const s=getComputedStyle(menu),r=getComputedStyle(row);results.push({selector,bg:s.backgroundColor,fg:s.color,radius:s.borderRadius,padding:s.padding,maxHeight:parseFloat(s.maxHeight),overflow:s.overflowY,rowHeight:parseFloat(r.minHeight)});menu.remove()}return results})()`);
     for(const menu of menus){assert.equal(menu.bg,bg,menu.selector);assert.equal(menu.fg,fg,menu.selector);assert.equal(menu.radius,'6px');assert.equal(menu.padding,'4px');assert.ok(menu.maxHeight<=320);assert.equal(menu.overflow,'auto');assert.equal(menu.rowHeight,30);}
+  }
+  // 目录刷新、断开空态和重连均保留唯一selectedcontent；复现用户设备名，比较实际文本右边界与箭头左边界。
+  for(const list of [[{serial:'short',model:'Pixel',state:'device'}],[],[{serial:'VKH6IFDMBUKJ8XXC',model:'9566X API 35',state:'device'}]]){
+    await page.viewport(283);
+    await page.post({type:'devices',list,serial:list[0]?.serial||''});
+    const fresh=await page.evaluate("(()=>{const s=document.getElementById('dev'),label=s.querySelector('selectedcontent'),r=s.getBoundingClientRect(),a=getComputedStyle(s,'::picker-icon'),c=getComputedStyle(s),l=label.getBoundingClientRect();return {count:s.querySelectorAll('selectedcontent').length,width:l.width,right:l.right,arrowLeft:r.right-parseFloat(c.borderRightWidth)-parseFloat(c.paddingRight)-parseFloat(a.width),text:label.textContent,expected:s.selectedOptions[0].textContent}})()");
+    assert.equal(fresh.count,1);assert.ok(fresh.width>0);assert.ok(fresh.right+7<=fresh.arrowLeft,JSON.stringify(fresh));assert.equal(fresh.text,fresh.expected);
   }
   // 其余视图使用各自真实样式与同一份共享CSS，覆盖项目/变体、进程排序及动态扩展设置选择器的级联和原生键盘。
   for(const [file,id,className] of [['build-panel.css','build-project',''],['build-panel.css','build-target',''],['device-processes/processes.css','sort-test','process-sort'],['extended/main.css','setting-test','']]) {

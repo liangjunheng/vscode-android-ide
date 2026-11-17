@@ -37,6 +37,12 @@ body #build-project option,body #build-target option{background:var(--popup-bg);
   select#build-target{--dropdown-icon:"\eb29"}
   select.process-sort{--dropdown-icon:"\eb16"}
   body .device-select #dev{height:28px;display:inline-flex}
-  body #tab #chev,body .device-select-arrow{display:none}
+  /* 标签是可收缩的原生selectedcontent，箭头独占16px布局项；dropdown浏览器回归断言文本边界与箭头槽无重叠。 */
+  body #header #dev,body #header #fmt{display:flex;align-items:center;gap:8px;padding-inline-end:8px}
+  #header select>button{display:flex;align-items:center;flex:1;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:start}
+  body #header #fmt{flex-shrink:0}
+  #header selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #header select::picker-icon{position:static;flex:0 0 16px;margin-inline-start:0;pointer-events:none}
+  body #tab #chev{display:none}
 }
 @media (forced-colors:active){body .menu,body #menu,body .explorer-menu,body #sugg,select::picker(select){border-color:CanvasText;box-shadow:none}body select:is(select,#dev,#build-project,#build-target) option:checked,body select:is(select,#dev,#build-project,#build-target) option:focus{outline:1px solid Highlight;outline-offset:-1px}}

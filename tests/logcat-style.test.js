@@ -13,23 +13,25 @@ function rule(selector) {
   return match[2];
 }
 
-// npm test 回归：设备选择的箭头独立定位，文字为其预留宽度，原生 select 保留焦点和选择行为。
-test('Logcat device selector reserves a separate arrow area', () => {
+// npm test回归：设备与Format共用原生select箭头且无覆盖层；LOGCAT_BROWSER=1 dropdown断言长名称下箭头几何、深浅主题及键盘选择。
+test('Logcat device selector matches the Format arrow', () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/logcat.ts'), 'utf8');
-  assert.ok(source.includes('<div class="device-select"><select id="dev" title="Device" aria-label="Device"></select><span class="device-select-arrow" aria-hidden="true"><span class="codicon codicon-chevron-down"></span></span></div>'));
+  assert.ok(source.includes('<div class="device-select"><select id="dev" title="Device" aria-label="Device"><button type="button"><selectedcontent></selectedcontent></button></select></div>'));
   assert.match(rule('.device-select'), /position:relative/);
   assert.match(rule('.device-select'), /flex:0 1 220px/);
   assert.match(rule('.device-select #dev'), /width:100%/);
-  assert.match(rule('.device-select #dev'), /appearance:none/);
-  assert.match(rule('.device-select #dev'), /background-image:none/);
-  assert.ok(rule('.device-select #dev').includes('padding-inline-end:calc(1.5em + 18px)'));
+  assert.ok(!source.includes('device-select-arrow'));
+  assert.doesNotMatch(rule('.device-select #dev'), /appearance:none|padding-inline-end/);
+  const shared = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
+  assert.ok(shared.includes('body #header #dev,body #header #fmt{display:flex;align-items:center;gap:8px;padding-inline-end:8px}'));
+  assert.ok(shared.includes('#header selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'));
+  assert.ok(shared.includes('#header select::picker-icon{position:static;flex:0 0 16px;margin-inline-start:0;pointer-events:none}'));
+  assert.ok(js.includes('sel.innerHTML = '));
+  assert.ok(js.includes('<selectedcontent></selectedcontent></button>'));
   assert.match(rule('.device-select #dev'), /text-overflow:ellipsis/);
   assert.match(rule('select'), /border-radius:6px/);
   assert.match(rule('select'), /var\(--vscode-dropdown-background/);
   assert.match(rule('.device-select #dev:focus-visible,select:focus-visible'), /box-shadow:0 0 0 1px var\(--vscode-focusBorder/);
-  assert.match(rule('.device-select-arrow'), /width:1\.5em/);
-  assert.match(rule('.device-select-arrow'), /pointer-events:none/);
-  assert.match(rule('.device-select-arrow'), /inset-inline-end:1px/);
   assert.ok(js.includes("$('dev').onchange"));
 });
 

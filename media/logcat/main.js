@@ -680,13 +680,14 @@
   // 绘制全部设备与状态快照；无输入，在线设备可选，离线/未授权项标注状态并禁用，空选择保留占位。
   // 前提由 draw 保证可见，隐藏消息只更新模型；device-selection-sync.test.js 执行渲染并断言状态、禁用项和空选项。
   // 回归：npm test 的 device-selection-sync.test.js 断言断开且仍有设备时显示明确空选项；logcat-browser.test.js 断言隐藏零DOM更新和显示恢复。
+  // 原生selectedcontent随选项目录一并生成，由浏览器同步选中标签；dropdown浏览器回归在刷新目录/长名称/空选择后断言标签省略且与箭头不重叠。
   function drawHeader() {
     const end = $('b-end');
     end.classList.toggle('on', stick); end.setAttribute('aria-pressed', String(stick));
     const sel = $('dev'), sig = JSON.stringify(deviceList) + serial;
     if (sel.dataset.sig !== sig) {
       sel.dataset.sig = sig;
-      sel.innerHTML = deviceList.length ? '<option value="">Select Device</option>' + deviceList.map((d) => `<option value="${esc(d.serial)}"${d.state === 'device' ? '' : ' disabled'}>${esc(d.name || d.avdName || d.model || d.serial)} (${esc(d.serial)})${d.state === 'device' ? '' : ' (' + esc(d.state) + ')'}</option>`).join('') : '<option value="">No devices</option>';
+      sel.innerHTML = '<button type="button"><selectedcontent></selectedcontent></button>' + (deviceList.length ? '<option value="">Select Device</option>' + deviceList.map((d) => `<option value="${esc(d.serial)}"${d.state === 'device' ? '' : ' disabled'}>${esc(d.name || d.avdName || d.model || d.serial)} (${esc(d.serial)})${d.state === 'device' ? '' : ' (' + esc(d.state) + ')'}</option>`).join('') : '<option value="">No devices</option>');
       sel.value = serial;
     }
     const status = $('status');
