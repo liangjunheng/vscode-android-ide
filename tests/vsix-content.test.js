@@ -6,15 +6,15 @@ const path = require('node:path');
 const vsce = require('@vscode/vsce');
 const Parse = require('unzipper/lib/parse');
 
-// 使用真实vsce文件收集和ZIP打包器，断言运行时资产保留且本机配置、源码、测试产物不发布。
+// 使用真实vsce文件收集和ZIP打包器，断言Run Extension所需核心资产保留且本地工具与源码不发布。
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'android-vsix-content-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const manifest = { name: 'android-runtime-fixture', version: '1.0.0', publisher: 'fixture', engines: { vscode: '^1.95.0' }, description: 'Package content regression', main: './dist/extension.js', activationEvents: ['onStartupFinished'], license: 'MIT', repository: { type: 'git', url: 'https://github.com/microsoft/vscode-extension-samples.git' } };
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
   fs.copyFileSync(path.join(__dirname, '../.vscodeignore'), path.join(root, '.vscodeignore'));
-  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/android-jvm-debugger.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'tools/win32-x64/platform-tools/adb.exe', 'tools/win32-x64/llvm/bin/lldb-dap.exe', 'tools/win32-x64/llvm/bin/liblldb.dll', 'tools/win32-x64/licenses/NOTICE.txt', 'runtime/runtime-manifest.json', 'resources/scrcpy-server.jar', 'resources/scrcpy-LICENSE.txt', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt', 'android-debugger/jvm/LICENSE', 'android-debugger/jvm/UPSTREAM-PROVENANCE.json'];
-  const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/jvm/src/debugMain.js', 'dist/extension.js.map', 'media/screenshots/private.png', 'unknown-local-folder/private.txt'];
+  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/scrcpy-server.jar', 'resources/scrcpy-LICENSE.txt', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
+  const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/jvm/src/debugMain.js', 'dist/extension.js.map', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'tools/win32-x64/platform-tools/adb.exe', 'runtime/runtime-manifest.json', 'android-debugger/jvm/LICENSE'];
   for (const file of included.concat(excluded)) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), file === 'README.md' ? '# Package fixture' : file === 'LICENSE' ? 'MIT License - Copyright (c) fixture' : 'fixture');
@@ -22,10 +22,10 @@ function fixture(t) {
   return { root, included, excluded };
 }
 
-// 直接vsce package必须经过prepublish运行时门禁，不能仅在npm包装命令中验证。
-test('direct vsce package includes mandatory runtime verification', () => {
+// 直接vsce package必须执行类型检查和生产构建；本地运行时资产由独立校验脚本按需验证。
+test('direct vsce package runs the production build', () => {
   const script = require('../package.json').scripts['vscode:prepublish'];
-  assert.ok(script.includes('node esbuild.js --production && node scripts/verify-runtime.mjs'));
+  assert.equal(script, 'npm run typecheck && node esbuild.js --production');
   assert.equal(script.includes('--if-present'), false);
 });
 
@@ -37,7 +37,7 @@ test('VSIX file collection includes runtime dependencies and excludes private pr
   for (const name of f.excluded) assert.equal(files.has(name), false, 'Private/development file leaked: ' + name);
 });
 
-// 生成真实VSIX后读取ZIP目录，断言后端和本机工具在包内；测试数据不代表真实二进制验收。
+// 生成真实VSIX后读取ZIP目录，断言核心资源在包内且本地工具不进入包。
 test('actual VSIX archive retains bundled backends tools resources and notices', async t => {
   const f = fixture(t);
   const output = path.join(f.root, 'fixture.vsix');
