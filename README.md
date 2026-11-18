@@ -74,6 +74,11 @@ resources/
 ```
 
 Each platform dependency directory also includes its NOTICE, version metadata and provenance.
+The top-level `tools/` staging directory is retired: published tools live only in `runtime/`.
+Inactive native-debugger build artifacts are preserved under the ignored
+`.test-artifacts/native-toolchain/` development cache and are not runtime search paths or VSIX assets.
+Historical `sourcePath` fields in the runtime manifest describe the original migration source;
+they do not require that source directory to exist.
 Emulator, Command-Line Tools, LLDB, NDK, JDK and system-image paths share the same context
 when available, but are not included in this release. Installing the companion extensions
 does not install these external SDK components.

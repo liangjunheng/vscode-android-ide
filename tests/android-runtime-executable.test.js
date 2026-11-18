@@ -68,7 +68,7 @@ test('realpath stat chmod access permission failures propagate unchanged', () =>
 test('VSCE fixture ZIP preserves Windows nonexecutable mode metadata', async t => {
   const { createVSIX } = require('@vscode/vsce'); const unzipper = require('unzipper');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-mode-vsix-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const relative = 'tools/linux-x64/adb'; const binary = path.join(root, relative);
+  const relative = 'runtime/linux-x64/platform-tools/adb'; const binary = path.join(root, relative);
   fs.mkdirSync(path.dirname(binary), { recursive: true }); fs.writeFileSync(binary, 'fixture runtime');
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'runtime-mode-fixture', displayName: 'Runtime Mode Fixture', publisher: 'fixture', version: '1.0.0', description: 'Executable mode regression fixture', engines: { vscode: '^1.95.0' }, repository: 'https://example.com/fixture.git', license: 'MIT' }));
   fs.writeFileSync(path.join(root, 'README.md'), '# Runtime Mode Fixture\n'); fs.writeFileSync(path.join(root, 'LICENSE'), 'MIT\n');

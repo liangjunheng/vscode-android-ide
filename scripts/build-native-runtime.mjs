@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = path.join(ROOT, '.test-artifacts/android-debugger/native-build');
-const PAYLOAD = path.join(ROOT, 'tools/win32-x64');
+// 停用后端的构建产物只写忽略缓存；native-runtime-build回归验证输出不进入发布runtime。
+const PAYLOAD = path.join(ROOT, '.test-artifacts/native-toolchain/win32-x64');
 export const LLVM_SHA256 = '6898f963c8e938981e6c4a302e83ec5beb4630147c7311183cf61069af16333d';
 export const SOURCES = Object.freeze([
   { name: 'llvm', version: '20.1.8', url: 'https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/llvm-project-20.1.8.src.tar.xz', sha256: LLVM_SHA256, archive: 'llvm-project-20.1.8.src.tar.xz' },
@@ -332,7 +333,7 @@ export async function build({ stageOnly = false } = {}) {
     const sums = []; for (const f of await filesUnder(candidate)) sums.push(await digest(f) + '  ' + path.relative(candidate, f).replaceAll('\\', '/'));
     await fs.writeFile(path.join(candidate, 'native-SHA256SUMS'), sums.join('\n') + '\n');
     await publishNative(candidate, payload);
-    console.log('Verified real native payload staged alongside existing host tools: tools/win32-x64/llvm');
+    console.log('Verified native development payload cached at: ' + payload);
   } finally { await new Promise(resolve => log.end(resolve)); }
 }
 

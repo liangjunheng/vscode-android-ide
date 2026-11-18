@@ -15,7 +15,7 @@ export interface AndroidToolchain {
 
 
 
-/** 返回与 VSIX 清单一致的宿主根目录候选，并保留旧 platform-tools 布局；android-toolchain bundled layout 回归断言扩展/存储优先级。 */
+/** 仅返回规范runtime宿主候选；android-toolchain回归断言扩展/存储优先级以及旧tools目录不再选中。 */
 function extensionToolCandidates(context?: vscode.ExtensionContext): Array<{ candidate: string; root: string }> {
   if (!context) return [];
   return [context.extensionPath, context.globalStorageUri.fsPath].flatMap(adbRuntimeCandidates);

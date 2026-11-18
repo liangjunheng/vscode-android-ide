@@ -1,9 +1,8 @@
 import * as fs from 'node:fs';
-import { runtimeExecutable } from '../runtimeExecutable';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import type * as vscode from 'vscode';
-import { getRuntimeContext, resolveBundledPath, resolveBundledLldbServer, legacyToolRoot, legacyLldbServer } from '../../runtimeContext';
+import { getRuntimeContext, resolveBundledPath, resolveBundledLldbServer, runtimeHostRoot } from '../../runtimeContext';
 
 /** 输入 SDK 根、实际目标 ABI、扩展上下文及调用方提供的项目本地覆盖值；不读取 VS Code 设置。 */
 export interface NativeToolchainOptions {
@@ -156,7 +155,7 @@ function platformHosts(): { bundle: string; ndk: string; name: string } {
 function toolRoots(context?: vscode.ExtensionContext): string[] {
   return context ? [context.extensionPath, context.globalStorageUri.fsPath].map(root => {
     stat(root);
-    return legacyToolRoot(root);
+    return runtimeHostRoot(root);
   }) : [];
 }
 
@@ -170,8 +169,6 @@ function packagedServer(context: vscode.ExtensionContext | undefined, abi: strin
     stat(root);
     const bundled = resolveBundledLldbServer(root, abi);
     if (bundled) return bundled;
-    const candidate = legacyLldbServer(root, abi);
-    if (stat(candidate)?.isFile()) return candidate;
   }
   return undefined;
 }
@@ -212,11 +209,6 @@ export async function resolveNativeHostToolchain(options: NativeHostToolchainOpt
       if (lldbDap) break;
       lldbDap = resolveBundledPath(root, ['lldb', 'bin', hosts.name]);
     }
-    for (const root of roots) {
-      if (lldbDap) break;
-      lldbDap = runtimeExecutable(path.join(root, 'llvm', 'bin', hosts.name), root);
-      if (lldbDap) break;
-    }
     if (!lldbDap && ndkRoot) lldbDap = executable(path.join(ndkRoot, 'toolchains', 'llvm', 'prebuilt', hosts.ndk, 'bin', hosts.name));
     if (!lldbDap) lldbDap = await pathDap(hosts.name);
   }
@@ -226,7 +218,7 @@ export async function resolveNativeHostToolchain(options: NativeHostToolchainOpt
 
 /**
  * 输入实际设备 ABI、可选 NDK 根和项目本地 override，输出实际普通 lldb-server。
- * 显式 ndkPath 禁止共享或其他 NDK fallback；无显式覆盖时优先 extension/storage/android/lldb-server/<abi>，再回退 NDK。
+ * 显式 ndkPath 禁止共享或其他 NDK fallback；无显式覆盖时优先 extension/storage/runtime/<host>/lldb-server/<abi>，再回退 NDK。
  * 回归：node --test tests/android-native-toolchain.test.js，四 ABI 共享 server 与显式 NDK 错误均有断言。
  */
 export async function resolveNativeServer(options: NativeServerOptions): Promise<string> {

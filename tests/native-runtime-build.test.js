@@ -25,6 +25,12 @@ async function fixture(fn) {
   try { return await fn(dir); } finally { await fs.rm(dir, { recursive: true, force: true }); }
 }
 
+// 构建输出配置回归：停用后端只进入开发缓存，不能重新生成顶层tools或混入发布runtime。
+test('native build publishes only into ignored development cache', () => {
+  assert.ok(source.includes("const PAYLOAD = path.join(ROOT, '.test-artifacts/native-toolchain/win32-x64')"));
+  assert.equal(source.includes("path.join(ROOT, 'tools/"), false);
+});
+
 // 映射 digest/acquire：已知 abc 摘要、跨块大文件摘要均严格匹配，错误 LLVM 哈希先于任何 tar/spawn。
 test('archive hash gate verifies actual bytes before extraction', async () => fixture(async dir => {
   const calls = []; const api = load({ spawn() { calls.push(true); throw new Error('must not extract'); } });

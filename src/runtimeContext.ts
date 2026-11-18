@@ -74,20 +74,17 @@ export function bundledRuntimeCandidate(root: string, name: string, dependency =
   const owned = path.resolve(root, 'runtime', runtimeTarget());
   return { candidate: path.join(owned, dependency, executable(name)), root: owned };
 }
-/** 返回调试器兼容工具根；runtime-context及android-toolchain回归保留旧tools布局。 */
-export function legacyToolRoot(root: string): string { return path.join(root, 'tools', runtimeTarget()); }
-/** 集中构造旧版和规范ADB候选；android-toolchain回归验证扩展、存储及SDK优先级。 */
+/** 返回当前宿主规范runtime根；android-native-toolchain回归断言扩展与存储候选不再访问旧tools目录。 */
+export function runtimeHostRoot(root: string): string { return path.resolve(root, 'runtime', runtimeTarget()); }
+/** 仅构造规范ADB候选；android-toolchain回归验证扩展、存储、SDK及旧目录不参与回退。 */
 export function adbRuntimeCandidates(root: string): Array<{ candidate: string; root: string }> {
-  const legacy = legacyToolRoot(root);
-  return [bundledRuntimeCandidate(root, 'adb'), { candidate: path.join(legacy, executable('adb')), root: legacy }, { candidate: path.join(legacy, 'platform-tools', executable('adb')), root: legacy }];
+  return [bundledRuntimeCandidate(root, 'adb')];
 }
 /** 解析设备端server，文件名与宿主无关；runtime-context回归覆盖ABI及目录拒绝。 */
 export function resolveBundledLldbServer(root: string, abi: string): string | undefined {
   if (!['arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'].includes(abi)) throw new Error('Unsupported Android ABI: ' + abi);
   return resolveBundledPath(root, ['lldb-server', abi, 'lldb-server'], 'resource');
 }
-/** 集中提供旧设备server布局；运行时定位回归确保不拼接宿主exe后缀。 */
-export function legacyLldbServer(root: string, abi: string): string { return path.join(root, 'tools', 'android', 'lldb-server', abi, 'lldb-server'); }
 /** 输入扩展根，输出已随包发布的scrcpy资源位置；runtime-context回归验证真实VSIX资源位置一致。 */
 export function scrcpyServerPath(root: string): string { return path.join(root, 'resources', 'scrcpy-server.jar'); }
 /** 输入用户SDK覆盖路径，输出标准SDK候选列表；SDK和android-toolchain回归验证配置/环境优先级。 */

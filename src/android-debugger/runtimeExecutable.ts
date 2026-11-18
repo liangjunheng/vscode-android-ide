@@ -3,7 +3,7 @@ import * as path from 'node:path';
 
 /**
  * 输入扩展自有宿主根与候选绝对路径，输出 canonical executable 或明确缺失时 undefined。
- * 前置：仅扩展/全局存储 tools/<host> 调用；禁止将配置、SDK、NDK、PATH 或 Android server 交入。
+ * 前置：仅扩展/全局存储 runtime/<host> 调用；禁止将配置、SDK、NDK、PATH 或 Android server 交入。
  * 校验 lexical/realpath containment、普通文件；Unix 只在无执行位时以 mode|0o111 补位，再检查 X_OK；其他 IO 错误原样传播。
  * 回归：node --test tests/android-runtime-executable.test.js tests/android-toolchain.test.js tests/android-native-toolchain.test.js，断言权限、越界、链接、错误及调用范围。
  */
