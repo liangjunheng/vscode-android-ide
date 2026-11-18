@@ -13,7 +13,3 @@
 !media/!(screenshots)/**
 !resources/**
 !schemas/**
-!tools/**
-!runtime/**
-!android-debugger/jvm/LICENSE
-!android-debugger/jvm/UPSTREAM-PROVENANCE.json

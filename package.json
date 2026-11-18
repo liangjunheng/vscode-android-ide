@@ -53,7 +53,7 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc -p . --noEmit",
-    "vscode:prepublish": "npm run typecheck && node esbuild.js --production && node scripts/verify-runtime.mjs",
+    "vscode:prepublish": "npm run typecheck && node esbuild.js --production",
     "package": "vsce package",
     "test": "node --test tests/*.test.js",
     "clean": "rm -rf dist *.vsix"

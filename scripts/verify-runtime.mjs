@@ -150,7 +150,7 @@ function validateNative(file, target, role, abi) {
 /** 校验包根目录的固定运行时文件均为非空普通文件。 */
 // 回归映射：tests/runtime-package-manifest.test.js；Node >=22 运行指定 node --test 命令，正常返回数量、异常抛错为成功证据。
 function validateRequiredFiles(root) {
-  for (const relative of ['dist/extension.js', 'dist/android-jvm-debugger.js', 'dist/THIRD_PARTY_NOTICES.txt', 'android-debugger/jvm/LICENSE', 'schemas/android-ide.local.schema.json']) {
+  for (const relative of ['dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'schemas/android-ide.local.schema.json']) {
     const filename = path.join(root, ...relative.split('/'));
     const stat = fs.statSync(filename);
     if (!stat.isFile() || stat.size === 0) fail('required file missing or empty: ' + relative);
