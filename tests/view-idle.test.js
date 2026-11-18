@@ -89,7 +89,7 @@ test('mirror grace period reuses each live transport and expires at sixty second
       await f.view.applyDeviceViewMode('explorer');assert.equal(f.view.mirroredSerial(),undefined);clock.advance(59999);assert.equal(owner.controller.signal.aborted,false);
       await f.view.applyDeviceViewMode('mirror');assert.equal(f.view.mirrorConnection,owner);assert.equal(f.records.length,initial);assert.equal(clock.intervals,intervals);
       clock.advance(1);assert.equal(owner.controller.signal.aborted,false);
-      await f.view.applyDeviceViewMode('explorer');clock.advance(60000);assert.equal(owner.controller.signal.aborted,true);assert.equal(f.view.mirrorConnection,undefined);
+      await f.view.applyDeviceViewMode('explorer');clock.advance(60000);assert.equal(owner.controller.signal.aborted,true);assert.equal(f.view.mirrorConnection,undefined);assert.equal(f.messages[f.messages.length-1].type,'loading');
       await f.view.applyDeviceViewMode('mirror');assert.notEqual(f.view.mirrorConnection,owner);assert.equal(f.records.length,mode==='screencap'?0:initial+1);assert.equal(clock.intervals,mode==='screencap'?intervals+1:intervals);
     }finally{await f.view.dispose();assert.equal(clock.timers.size,0);}
   }
