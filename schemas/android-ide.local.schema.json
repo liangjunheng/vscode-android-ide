@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Android IDE Local Project Paths",
+  "description": "Local machine paths for this project. This file is not a VS Code settings file and must not be committed.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sdkPath": {
+      "type": "string",
+      "description": "Android SDK directory. Relative paths resolve from the project root. Empty uses automatic discovery."
+    },
+    "downloadDirectory": {
+      "type": "string",
+      "description": "Local download directory. Empty uses the system Downloads directory."
+    },
+    "debugger": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adbPath": {
+          "type": "string",
+          "description": "Optional adb executable path. Empty uses automatic discovery."
+        },
+        "lldbDapPath": {
+          "type": "string",
+          "description": "Optional LLDB DAP executable path. Empty uses automatic discovery."
+        },
+        "ndkPath": {
+          "type": "string",
+          "description": "Optional Android NDK directory. Empty selects an installed or extension-managed NDK."
+        }
+      }
+    }
+  }
+}
