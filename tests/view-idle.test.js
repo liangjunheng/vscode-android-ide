@@ -24,7 +24,7 @@ function load(file,deps,clock,extra={}){
   vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname,'../src',file),'utf8'),{loader:'ts',format:'cjs'}).code,{module,exports:module.exports,require:id=>Object.hasOwn(deps,id)?deps[id]:require(id),Buffer,process,console,AbortController,Uint8Array,setTimeout:(fn,ms)=>clock.set(fn,ms),clearTimeout:handle=>clock.clear(handle),setInterval:(fn,ms)=>clock.set(fn,ms,true),clearInterval:handle=>clock.clear(handle),...extra});
   return module.exports;
 }
-// 真正运行DeviceExplorerController/ProcessesController，记录每个设备会话、连接和取消信号。
+// 真正运行DeviceExplorerController/ProcessesController及调试器配置模块，宿主边界只替换设备/时钟；Node>=22运行node --test tests/view-idle.test.js验证连接归属、60秒期限和取消回收，不以空调试器stub绕过依赖。
 function backend(clock,options={}){
   const calls=[],posts=[],watchers=[],errors=[];
   const vscode={workspace:{isTrusted:true,findFiles:async()=>[],getConfiguration:section=>({get:(key,fallback)=>section==='launch'?[]:fallback})},window:{showErrorMessage:error=>errors.push(error),showWarningMessage:async()=>options.confirm?options.confirm.promise:'Continue'}};
@@ -45,6 +45,8 @@ function backend(clock,options={}){
     async kill(pid,signal){signal.throwIfAborted();calls.push(['kill',this.serial,pid]);}
   }
   const deps={vscode,'./deviceExplorerFiles':{DeviceExplorerFiles:Files},'./deviceExplorerProcesses':{DeviceExplorerProcesses:Processes}};
+  deps['./projectLocalConfig']=load('projectLocalConfig.ts',deps,clock);
+  deps['./android-debugger']=load('android-debugger/index.ts',deps,clock);
   deps['./processes']=load('processes.ts',deps,clock);
   const {DeviceExplorerController}=load('deviceExplorer.ts',deps,clock);
   const controller=new DeviceExplorerController(message=>posts.push(message));
@@ -89,7 +91,7 @@ test('mirror grace period reuses each live transport and expires at sixty second
       await f.view.applyDeviceViewMode('explorer');assert.equal(f.view.mirroredSerial(),undefined);clock.advance(59999);assert.equal(owner.controller.signal.aborted,false);
       await f.view.applyDeviceViewMode('mirror');assert.equal(f.view.mirrorConnection,owner);assert.equal(f.records.length,initial);assert.equal(clock.intervals,intervals);
       clock.advance(1);assert.equal(owner.controller.signal.aborted,false);
-      await f.view.applyDeviceViewMode('explorer');clock.advance(60000);assert.equal(owner.controller.signal.aborted,true);assert.equal(f.view.mirrorConnection,undefined);
+      await f.view.applyDeviceViewMode('explorer');clock.advance(60000);assert.equal(owner.controller.signal.aborted,true);assert.equal(f.view.mirrorConnection,undefined);assert.equal(f.messages[f.messages.length-1].type,'loading');
       await f.view.applyDeviceViewMode('mirror');assert.notEqual(f.view.mirrorConnection,owner);assert.equal(f.records.length,mode==='screencap'?0:initial+1);assert.equal(clock.intervals,mode==='screencap'?intervals+1:intervals);
     }finally{await f.view.dispose();assert.equal(clock.timers.size,0);}
   }
@@ -245,11 +247,21 @@ test('device catalog invalidation immediately stops retained mirror resources',a
 });
 // 共享二进制执行器保持原字节结果和错误，同时将真实连接signal原样交给execFile。
 test('SDK runBuffer preserves bytes errors and child-process cancellation signal',async()=>{
-  const calls=[],sdk=load('sdk.ts',{vscode:{},child_process:{execFile:(cmd,args,options,callback)=>{calls.push({cmd,args,options,callback});}}},new Clock());
+  const calls=[],clock=new Clock(),deps={vscode:{},child_process:{execFile:(cmd,args,options,callback)=>{calls.push({cmd,args,options,callback});}}};
+  deps['./projectLocalConfig']=load('projectLocalConfig.ts',deps,clock);
+  const sdk=load('sdk.ts',deps,clock);
   const bytes=Buffer.from([0,255,13,10]),plain=sdk.runBuffer('adb',['version']);assert.equal(calls[0].options.signal,undefined);assert.equal(calls[0].options.encoding,'buffer');calls[0].callback(null,bytes);assert.equal(await plain,bytes);
   const owner=new AbortController(),pending=sdk.runBuffer('adb',['push'],owner.signal);assert.equal(calls[1].options.signal,owner.signal);const failed=assert.rejects(pending,e=>e===owner.signal.reason);owner.abort(new Error('cancelled child'));calls[1].callback(owner.signal.reason);await failed;
 });
 // 改设备与销毁不适用闲置宽限，所有旧设备计时、tracker与快照立即关闭。
 test('device selection and disposal immediately close all retained backend sessions',async()=>{
   const clock=new Clock(),f=backend(clock);try{await f.controller.setContext('phone',true,'processes');await f.drain();await f.controller.setContext('phone',true,'files');await f.drain();const old=[...f.controller.scopes.values()];await f.controller.setContext('two',true,'files');await f.drain();assert.ok(old.every(scope=>scope.connection.signal.aborted));assert.equal(f.watchers[0].closed,true);assert.equal(clock.timers.size,0);assert.equal(f.controller.scope.serial,'two');}finally{await f.controller.dispose();assert.equal(clock.timers.size,0);}
+});
+
+// scrcpy失败后回退到截图模式只进入加载态，不把失败诊断重新覆盖到投屏占位。
+test('scrcpy fallback does not replay startup error over screenshot loading state',async()=>{
+  const clock=new Clock(),f=mirror(clock);f.view.restart=async()=>{f.messages.push({type:'mode',mode:'screencap'});};
+  f.view.fallback('screencap','scrcpy failed (handshake closed); using screenshot mode');
+  await Promise.resolve();
+  assert.deepEqual(f.messages,[{type:'mode',mode:'screencap'}]);
 });

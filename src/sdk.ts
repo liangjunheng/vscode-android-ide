@@ -1,12 +1,13 @@
-import * as vscode from 'vscode';
+import { readProjectLocalConfig } from './projectLocalConfig';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as net from 'net';
 import { execFile, spawn } from 'child_process';
 
-export function sdkRoot(): string {
-  const cfg = vscode.workspace.getConfiguration('android').get<string>('sdkPath');
+// 从项目本机 JSON 的 sdkPath 和标准环境候选中选择首个存在的 SDK 路径；可显式传入项目根，缺失时返回空串。回归：node --test tests/device-manager-ui.test.js。
+export function sdkRoot(projectRoot?: string): string {
+  const cfg = readProjectLocalConfig(projectRoot).sdkPath;
   const candidates = [
     cfg,
     process.env.ANDROID_HOME,

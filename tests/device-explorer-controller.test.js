@@ -8,13 +8,15 @@ const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
 const source = fs.readFileSync(path.join(__dirname, '../src/deviceExplorer.ts'), 'utf8');
+const debuggerSource = fs.readFileSync(path.join(__dirname, '../src/android-debugger/index.ts'), 'utf8');
 
-// 创建真实临时目录与可记录后端；workspaceFiles/provider/picker替身支持定位与fallback回归，文件操作hooks支持工具栏结果/取消/故障断言，保留HEAD调试器依赖和配置语义。
+// Node>=22以VM加载TS及可记录后端；workspaceFiles供原过滤器，currentApplicationId注入Build只读选择，directoryEntries可挂起目录读取供取消回归。
+// 真实临时目录及create/remove/push/pull/onPost替身服务locateApp与toolbar具名回归；node --test tests/device-explorer-controller.test.js验证目录快照、落地字节、取消、错误和ACK释放锁。
 async function fixture(options = {}) {
   const temp = await fsp.mkdtemp(path.join(os.tmpdir(), 'device-explorer-controller-test-'));
   const posts = [], calls = [], updates = [];
   let stopCount = 0;
-  const config = { filter: false, downloadLocation: temp, launch: [], debuggerExtensions: [] };
+  const config = { filter: false, downloadDirectory: temp, launch: [], debuggerExtensions: [] };
   const files = {
     serial: 'phone',
     async stat(remote) { calls.push(['stat', remote]); if (options.permission?.includes(remote)) throw new Error('Permission denied'); if (options.statError?.includes(remote)) throw new Error('adb unavailable'); return { path: remote, name: path.posix.basename(remote) || '/', kind: remote.endsWith('/') ? 'directory' : 'file', permissions: '644', size: 0, modified: 0 }; },
@@ -28,22 +30,25 @@ async function fixture(options = {}) {
   const processState = { rows: [], async watch(onUpdate, onError) { calls.push(['watch']); processState.onUpdate = onUpdate; processState.onError = onError; return async () => { stopCount++; calls.push(['stopWatch']); }; }, async kill(pid) { calls.push(['kill', pid]); }, async forceStop(pkg, uid) { calls.push(['forceStop', pkg, uid]); }, async clearData(pkg, uid) { calls.push(['clearData', pkg, uid]); }, async uninstall(pkg) { calls.push(['uninstall', pkg]); } };
   const vscode = {
     extensions: { all: config.debuggerExtensions },
-    workspace: { isTrusted: true, workspaceFolders: [{}], fs: { readFile: async uri => options.workspaceFiles && Object.hasOwn(options.workspaceFiles, uri.path) ? Buffer.from(options.workspaceFiles[uri.path]) : fsp.readFile(uri.fsPath) }, findFiles: async pattern => { options.onFindFiles?.(pattern); return pattern === '**/{output-metadata.json,build.gradle,build.gradle.kts}' ? Object.keys(options.workspaceFiles || {}).map(p => vscode.Uri.file(p)) : []; }, getConfiguration: section => ({ get: (key, fallback) => section === 'launch' ? config.launch : key === 'explorer.downloadLocation' ? config.downloadLocation : config.filter, update: async (key, value) => { if (key === 'explorer.packageFilter') config.filter = value; } }) },
+    workspace: { isTrusted: true, workspaceFolders: [{ name: 'selected-workspace', uri: { fsPath: temp } }], fs: { readFile: async uri => options.workspaceFiles && Object.hasOwn(options.workspaceFiles, uri.path) ? Buffer.from(options.workspaceFiles[uri.path]) : fsp.readFile(uri.fsPath) }, findFiles: async pattern => { options.onFindFiles?.(pattern); return pattern === '**/{output-metadata.json,build.gradle,build.gradle.kts}' ? Object.keys(options.workspaceFiles || {}).map(p => vscode.Uri.file(p)) : []; }, getConfiguration: section => { assert.ok(section === 'android-ide' || section === 'launch'); return ({ get: (key, fallback) => { if (section === 'launch') return config.launch; assert.equal(key, 'explorer.packageFilter', 'Local paths must not be read from VSCode settings'); return config.filter; }, update: async (key, value) => { if (key === 'explorer.packageFilter') config.filter = value; } }); } },
     ConfigurationTarget: { Global: 1 },
     Uri: { file: p => ({ scheme: 'file', fsPath: p, path: p }), parse: value => ({ scheme: value.split(':')[0], fsPath: (value.split('://')[1] || value), path: (value.split('://')[1] || value) }) },
     commands: { executeCommand: async (...args) => calls.push(['command', ...args]) },
     env: { clipboard: { writeText: async value => calls.push(['clipboard', value]) } },
-    window: { showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async (list, settings) => { calls.push(['picker', Array.from(list), settings]); return options.quickPick ? options.quickPick(list, settings) : list[0]; } },
-    debug: { startDebugging: async (...args) => { calls.push(['debug', ...args]); return options.debugResult ?? true; } },
+    window: { showInformationMessage: async message => { calls.push(['information', message]); }, showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async (list, settings) => { calls.push(['picker', Array.from(list), settings]); return options.quickPick ? options.quickPick(list, settings) : list[0]; } },
+    debug: { onDidStartDebugSession: listener => { vscode._debugListener = listener; return { dispose() { if (vscode._debugListener === listener) vscode._debugListener = undefined; } }; }, startDebugging: async (...args) => { calls.push(['debug', ...args]); if (options.debugResult ?? true) vscode._debugListener?.({ configuration: args[1] }); return options.debugResult ?? true; } },
   };
-  const deps = { vscode, './deviceExplorerFiles': { DeviceExplorerFiles: class { constructor(serial,access) { Object.assign(this, files); this.runAs=access?.runAs; } } }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { constructor() { Object.assign(this, processState); } } } };
+  const debuggerModule = { exports: {} };
+  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : require(id), Promise });
+  const deps = { vscode, './projectLocalConfig': { readProjectLocalConfig: function() { return { downloadDirectory: config.downloadDirectory }; } }, './android-debugger': debuggerModule.exports, './deviceExplorerFiles': { DeviceExplorerFiles: class { constructor(serial,access) { Object.assign(this, files); this.runAs=access?.runAs; } } }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { constructor() { Object.assign(this, processState); } } } };
   const processesModule = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/processes.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module: processesModule, exports: processesModule.exports, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id), Buffer, process, AbortController, Promise });
   deps['./processes'] = processesModule.exports;
   const module = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id), Buffer, console, process, AbortController, Promise, Set, Map, URL, URLSearchParams, setTimeout, clearTimeout });
   const Controller = module.exports.DeviceExplorerController;
-  const controller = new Controller(message => { posts.push(message); options.onPost?.(message, controller); }, Object.hasOwn(options, 'currentApplicationId') ? options.currentApplicationId : () => 'com.example.app');
+  const resolveDebugProject = Object.hasOwn(options, 'resolveDebugProject') ? options.resolveDebugProject : async (packageName, workspaceRoot, signal) => { calls.push(['debugProject', packageName, workspaceRoot, signal]); return { androidProjectRoot: temp, androidModuleRoot: path.join(temp, 'app'), androidVariant: 'debug', androidSourceRoots: [path.join(temp, 'generated-sources')], ...(options.nativeModules !== undefined ? { androidNativeModules: options.nativeModules } : {}) }; };
+  const controller = new Controller(message => { posts.push(message); options.onPost?.(message, controller); }, Object.hasOwn(options, 'currentApplicationId') ? options.currentApplicationId : () => 'com.example.app', resolveDebugProject);
   return { controller, posts, calls, processState, config, temp, get stopCount() { return stopCount; }, async close() { await controller.dispose(); await fsp.rm(temp, { recursive: true, force: true }); } };
 }
 
@@ -156,22 +161,81 @@ test('process actions require owned rows and distinguish kill from force stop', 
   } finally { await f.close(); }
 });
 
-// 调试能力同时检查真实注册类型和attach配置，不将Java提供方/孤立配置误报为Android；调用时重新验证卸载状态。
-test('Android attach requires both a registered debugger type and matching configuration',async()=>{
-  const f=await fixture();try{
-    f.config.launch.push({name:'Attach Android',type:'android',request:'attach',custom:'preserved'},{name:'Java only',type:'java',request:'attach'});
-    await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app',packageName:'com.example.app'}]);
-    assert.equal(f.posts.findLast(m=>m.type==='explorerState').capabilities.debug,false);
-    await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android attach debug adapter/);assert.equal(f.calls.some(c=>c[0]==='debug'),false);
-    f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'java'}]}}});await f.controller.handle({type:'explorer',action:'ready'});assert.equal(f.posts.findLast(m=>m.type==='explorerState').capabilities.debug,false);
-    f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.handle({type:'explorer',action:'ready'});assert.equal(f.posts.findLast(m=>m.type==='explorerState').capabilities.debug,true);
-    await f.controller.handle({type:'explorer',action:'debug',pid:42});const launched=f.calls.find(c=>c[0]==='debug')[2];assert.equal(launched.type,'android');assert.equal(launched.request,'attach');assert.equal(launched.serial,'phone');assert.equal(launched.pid,42);assert.equal(launched.processId,42);assert.equal(launched.packageName,'com.example.app');assert.equal(launched.custom,'preserved');
-    f.config.debuggerExtensions.pop();await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android attach debug adapter/);assert.equal(f.calls.filter(c=>c[0]==='debug').length,1);await f.controller.handle({type:'explorer',action:'ready'});assert.equal(f.posts.findLast(m=>m.type==='explorerState').capabilities.debug,false);
-  }finally{await f.close();}
+// 内置Attach保留三模式入口但只提示：在任意模型图下均不查询提供方、不创建会话或发布操作完成。
+test('Android attach built-in modes report placeholder before querying project models', async () => {
+  for (const mode of ['kotlin-java', 'native', 'jvm-native']) {
+    const f = await fixture({ quickPick: items => items.find(item => item.config?.androidMode === mode) });
+    try {
+      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+      f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
+      assert.equal(f.posts.findLast(m => m.type === 'explorerState').capabilities.debug, true);
+      await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42, androidModuleRoot: '/forged', androidVariant: 'release' });
+      const picker = f.calls.find(call => call[0] === 'picker');
+      assert.deepEqual(picker[1].map(item => item.config.androidMode), ['kotlin-java', 'native', 'jvm-native']);
+      assert.deepEqual(f.calls.filter(call => call[0] === 'information'), [['information', 'Android 内置调试功能暂未实现']]);
+      assert.equal(f.calls.some(call => call[0] === 'debugProject' || call[0] === 'debug'), false);
+      assert.equal(f.posts.some(message => message.error || message.message === 'Process action complete'), false);
+    } finally { await f.close(); }
+  }
 });
+
+// 模型提供方尚未接入内置Attach：缺失、抛错及可选Native图均不能被访问，不能以空模型伪启动。
+test('Attach placeholder does not consume unavailable failing or native project models', async () => {
+  for (const provider of [undefined, async () => { throw new Error('Must not query placeholder model'); }, async () => ({ androidNativeModules: [] })]) {
+    let queries = 0;
+    const f = await fixture({ resolveDebugProject: provider === undefined ? undefined : async (...args) => { queries++; return provider(...args); } });
+    try {
+      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+      f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
+      await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+      assert.equal(queries, 0); assert.equal(f.calls.some(call => call[0] === 'debug'), false);
+      assert.equal(f.calls.find(call => call[0] === 'information')[1], 'Android 内置调试功能暂未实现');
+      assert.equal(f.posts.some(message => message.error), false);
+    } finally { await f.close(); }
+  }
+});
+
+// 配置选择仍是异步取消边界：选取期间PID消失、作用域取消或关闭选择，不得继续提示、查询模型或启动过期PID。
+test('Attach revalidates process identity and cancellation after configuration selection', async () => {
+  for (const outcome of ['process-gone', 'cancel-scope', 'cancel-picker']) {
+    let entered, release;
+    const started = new Promise(resolve => { entered = resolve; });
+    const picked = new Promise(resolve => { release = resolve; });
+    let selected;
+    const f = await fixture({ quickPick: items => { selected = items[0]; entered(); return picked; } });
+    try {
+      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+      f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
+      const signal = f.controller.scope.controller.signal;
+      const action = f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 }); await started;
+      if (outcome === 'cancel-scope') f.controller.scope.controller.abort();
+      if (outcome === 'process-gone') f.processState.onUpdate([]);
+      release(outcome === 'cancel-picker' ? undefined : selected); await action;
+      assert.equal(f.calls.some(call => ['debug', 'debugProject', 'information'].includes(call[0])), false);
+      if (outcome === 'process-gone') assert.match(f.posts.at(-1).error, /no longer available/);
+      if (outcome === 'cancel-scope') assert.equal(signal.aborted, true);
+      if (outcome === 'cancel-picker') assert.equal(f.posts.some(message => message.error), false);
+    } finally { release(); await f.close(); }
+  }
+});
+
+// Attach project：第三方配置原名和自有字段保留，不调用本扩展的项目模型提供方。
+test('Attach project leaves external configurations and their project mapping untouched', async () => {
+  const f = await fixture({ resolveDebugProject: async () => { throw new Error('Must not query external project'); }, quickPick: items => items.find(item => item.config?.type === 'external-debugger') });
+  try {
+    f.config.launch.push({ name: 'Original Custom Attach', type: 'external-debugger', request: 'attach', customField: 17 });
+    await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+    f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
+    await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+    const launched = f.calls.find(call => call[0] === 'debug')[2];
+    assert.equal(launched.name, 'Original Custom Attach'); assert.equal(launched.customField, 17); assert.equal(launched.pid, 42);
+    assert.equal(Object.hasOwn(launched, 'androidModuleRoot'), false); assert.equal(Object.hasOwn(launched, 'androidMode'), false);
+  } finally { await f.close(); }
+});
+
 // 匹配注册也不等于会话成功，startDebugging=false须明确报错而非进程操作成功。
 test('Android debugger refusal remains a visible error with registered support',async()=>{
-  const f=await fixture({debugResult:false});try{f.config.launch.push({name:'Attach',type:'android',request:'attach'});f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app'}]);await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android debug adapter did not start/);assert.equal(f.posts.some(m=>m.message==='Process action complete'),false);}finally{await f.close();}
+  const f=await fixture({debugResult:false,quickPick:items=>items.find(item=>item.config?.type==='android')});try{f.config.launch.push({name:'Attach',type:'android',request:'attach'});f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app'}]);await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android debug adapter did not start/);assert.equal(f.posts.some(m=>m.message==='Process action complete'),false);}finally{await f.close();}
 });
 
 // 同设备切换只取消活动操作并独立保留连接，Files重放缓存不重复读取；旧tab消息仍拒绝，精确60秒释放见view-idle。

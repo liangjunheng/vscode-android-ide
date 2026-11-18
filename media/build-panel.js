@@ -13,7 +13,7 @@
     select.value = value || '';
   }
 
-  // 根据任务/设备控制构建按钮，日志入口始终可用；npm test UI 回归断言 busy、无设备、错误时日志仍可打开。
+  // 根据任务/设备控制构建按钮，日志入口始终可用；build-panel-ui回归覆盖busy/空态及已移除工具不再绑定。
   function render() {
     project.disabled = state.busy;
     target.disabled = state.busy || !state.targets.length;

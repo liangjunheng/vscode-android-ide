@@ -37,8 +37,8 @@ function fixture() {
   const parserModule = load('logcatParser', {});
   const logcat = load('logcat', { vscode, './sdk': sdk, './logcatParser': parserModule, child_process: { spawn }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { watch() { return async () => {}; } } } });
   // 调试适配器注册属于独立宿主依赖；仍执行真实 activate 和两侧设备选择，不加载无关调试会话。
-  load('extension', { './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
-  f.running = f.views['android.runningDevice']; f.logcat = f.views['android.logcat'];
+  load('extension', { './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
+  f.running = f.views['android-ide.runningDevice']; f.logcat = f.views['android-ide.logcat'];
   f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
   // 创建实际 HTML 与宿主消息入口，默认均可见；可在测试中延迟创建或隐藏来覆盖生命周期。
   f.resolve = (provider) => {
@@ -69,7 +69,7 @@ test('device selection sync is bidirectional and idempotent through actual activ
 // 在未创建/隐藏视图时同步选择，不抢焦点或建立隐藏流；打开后仍使用同步后的设备。
 test('device selection sync retains selection before views exist and while hidden', async () => {
   const f = fixture();
-  await f.handlers['android.selectDevice']({ serial: 'two' });
+  await f.handlers['android-ide.selectDevice']({ serial: 'two' });
   assert.equal(f.logcat.serial, 'two'); assert.equal(f.streams.length, 0); assert.equal(f.commands.length, 0);
   const l = f.resolve(f.logcat); l.view.visible = false;
   await f.running.applyMirrorVisibility(false);
@@ -123,11 +123,11 @@ test('device selection sync clears invalid mirror device and exposes selection e
 test('Logcat entry always opens without a device and preserves selected device', async () => {
   const f = fixture(); f.resolve(f.running); f.resolve(f.logcat);
   await f.running.onMessage({ type: 'logcat' });
-  assert.ok(f.commands.some(([id]) => id === 'android.logcat.focus')); assert.equal(f.streams.length, 0);
-  await f.handlers['android.mirrorDevice']({ serial: 'two' });
+  assert.ok(f.commands.some(([id]) => id === 'android-ide.logcat.focus')); assert.equal(f.streams.length, 0);
+  await f.handlers['android-ide.mirrorDevice']({ serial: 'two' });
   assert.equal(f.logcat.serial, 'two'); assert.equal(f.running.serial, 'two');
   await f.running.onMessage({ type: 'logcat' }); assert.equal(f.streams.length, 1);
-  f.handlers['android.showLogcat'] = async () => { throw new Error('focus failed'); };
+  f.handlers['android-ide.showLogcat'] = async () => { throw new Error('focus failed'); };
   await assert.rejects(f.running.onMessage({ type: 'logcat' }), /focus failed/);
 });
 

@@ -151,6 +151,7 @@ test('android-build metadata and launcher failures remain visible', async t => {
   await assert.rejects(f.action('run', undefined, 'phone'), /JSON|Unexpected|property/i);
   fs.unlinkSync(f.metadata);
   await assert.rejects(f.action('run', undefined, 'phone'), /No APK metadata/);
+  f.configs = [{ name: 'External', type: 'adapter', request: 'attach' }];
   await assert.rejects(f.action('debug', undefined, 'phone'), /No APK metadata/);
   fs.writeFileSync(f.metadata, JSON.stringify({ variantName: 'debug', applicationId: 'com.example.app' }));
   f.launchOutput = 'No activities found'; await assert.rejects(f.action('run', undefined, 'phone'), /No activities/);
@@ -158,17 +159,20 @@ test('android-build metadata and launcher failures remain visible', async t => {
   await f.controller.dispose();
 });
 
-// npm test：Debug 通过内置三模式和自定义选择器，取消在安装前结束，适配器拒绝不伪成功。
-test('android-build debug uses selected native launch configuration', async t => {
+// npm test：内置三模式提示占位且零安装/模型查询；外部选择、取消、真实会话停止及拒绝保持原契约。
+test('android-build debug reports built-in placeholder and preserves external session behavior', async t => {
   const f = fixture(t); await f.action('refresh');
   for (const pickIndex of [0, 1, 2]) {
     f.pickIndex = pickIndex;
+    const commandsBefore = f.calls.length;
     await f.action('debug', undefined, 'phone');
     assert.equal(f.debugCalls.length, 0);
     assert.match(f.notifications.at(-1), /Android 内置调试功能暂未实现/);
-    assert.equal(f.modelCalls.at(-1).selection.modulePath, ':app');
-    assert.equal(f.modelCalls.at(-1).selection.variant, 'debug');
-    assert.ok(f.calls[f.modelCalls.at(-1).commandsBefore - 1].args.includes(':app:installDebug'));
+    assert.equal(f.modelCalls.length, 0);
+    assert.equal(f.calls.length, commandsBefore);
+    assert.equal(f.last().status, 'Android 内置调试功能暂未实现');
+    assert.equal(f.last().running, false);
+    assert.equal(f.controller.launched, undefined);
     await f.action('stop');
   }
   f.configs = [{ name: 'One', type: 'adapter', request: 'launch' }, { name: 'Two', type: 'adapter', request: 'attach' }];
@@ -207,8 +211,8 @@ test('android-build provider selection resolves matching package without install
   assert.equal(f.modelCalls.length, 2); assert.notEqual(first, second); assert.equal(f.calls.length, before); await f.controller.dispose();
 });
 
-// native graph：provider 与内置 Debug 保持精确依赖模块身份，缺失不注入，[] 表示已知空图；不按 app 或当前变体重建。
-test('android-build provider and Debug preserve optional native graph identity and empty semantics', async t => {
+// native graph：注入provider保持精确依赖身份和已知空图；内置Debug占位不能查询或消费此图。
+test('android-build provider preserves native graph identity while built-in Debug never queries it', async t => {
   const f = fixture(t); await f.action('refresh');
   const graph = [
     { modulePath: ':engine:bridge', moduleRoot: path.join(f.root, 'custom-native-owner'), variant: 'enginePaidRelease' },
@@ -221,8 +225,11 @@ test('android-build provider and Debug preserve optional native graph identity a
     assert.equal(Object.hasOwn(project, 'androidNativeModules'), nativeModules !== undefined);
     if (nativeModules !== undefined) assert.deepEqual(JSON.parse(JSON.stringify(project.androidNativeModules)), nativeModules);
     assert.equal(f.calls.length, before);
+    const modelCount = f.modelCalls.length;
     await f.action('debug', undefined, 'phone');
     assert.equal(f.debugCalls.length, 0);
+    assert.equal(f.modelCalls.length, modelCount);
+    assert.equal(f.calls.length, before);
     assert.match(f.notifications.at(-1), /Android 内置调试功能暂未实现/);
     await f.action('stop');
   }
@@ -296,11 +303,14 @@ test('android-build source discovery forwards exact selected project module and 
   const moduleRoot = path.join(f.root, 'remapped-module'), java = path.join(moduleRoot, 'custom-java'), kotlin = path.join(moduleRoot, 'custom-kotlin'), jni = path.join(moduleRoot, 'jni');
   for (const dir of [java, kotlin, jni]) fs.mkdirSync(dir, { recursive: true });
   f.sourceModel = { moduleRoot, applicationId: 'com.example.paid', roots: [{ path: java, kind: 'java' }, { path: kotlin, kind: 'kotlin' }, { path: jni, kind: 'jniLibs' }, { path: path.join(moduleRoot, 'not-generated'), kind: 'java' }] };
-  await f.action('refresh'); await f.action('target', ':feature:deep:PaidDebug'); await f.action('debug', undefined, 'phone');
+  await f.action('refresh'); await f.action('target', ':feature:deep:PaidDebug');
+  const before = f.calls.length;
+  const project = await f.controller.resolveCurrentDebugProject('com.example.paid', f.root, new AbortController().signal);
   const selection = f.modelCalls[0].selection;
   assert.deepEqual(JSON.parse(JSON.stringify(selection)), { projectRoot: f.root, modulePath: ':feature:deep', variant: 'paidDebug', wrapper: path.join(f.root, 'gradlew') });
-  assert.equal(f.debugCalls.length, 0); assert.match(f.notifications.at(-1), /Android 内置调试功能暂未实现/);
-  assert.ok(f.calls[f.modelCalls[0].commandsBefore - 1].args.includes(':feature:deep:installPaidDebug'));
+  assert.equal(project.androidModuleRoot, moduleRoot);
+  assert.deepEqual(Array.from(project.androidSourceRoots), [java, kotlin]);
+  assert.equal(f.debugCalls.length, 0); assert.equal(f.calls.length, before);
   await f.controller.dispose();
 });
 
@@ -309,25 +319,28 @@ test('android-build source discovery supports root Android modules without a dou
   const f = fixture(t); f.tasks = 'assembleDebug - APK\ninstallDebug - install\nassemble - aggregate\n';
   const dir = path.join(f.root, 'build', 'outputs', 'apk', 'debug'); fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'output-metadata.json'), JSON.stringify({ variantName: 'debug', applicationId: 'com.example.root' }));
-  await f.action('refresh'); assert.equal(f.last().target, ':Debug'); await f.action('debug', undefined, 'phone');
-  assert.equal(f.modelCalls[0].selection.modulePath, ':'); assert.equal(f.debugCalls.length, 0); assert.match(f.notifications.at(-1), /Android 内置调试功能暂未实现/);
+  await f.action('refresh'); assert.equal(f.last().target, ':Debug');
+  const project = await f.controller.resolveCurrentDebugProject('com.example.root', f.root, new AbortController().signal);
+  assert.equal(f.modelCalls[0].selection.modulePath, ':'); assert.equal(project.androidModuleRoot, f.root); assert.equal(f.debugCalls.length, 0);
   await f.controller.dispose();
 });
 
-// authoritative metadata：AGP applicationId 冲突、目录类型及 IO/模型错误均显式失败；可选 ID 缺失与 [] 仍有效。
-test('android-build source discovery rejects mismatched identity and real filesystem errors before debug', async t => {
+// authoritative metadata：独立provider对AGP applicationId冲突、目录类型及IO/模型错误显式失败，且无安装或调试副作用。
+test('android-build provider source discovery rejects mismatched identity and real filesystem errors', async t => {
   for (const scenario of ['mismatch', 'backend', 'file', 'permission']) {
     const f = fixture(t); await f.action('refresh');
     if (scenario === 'mismatch') f.sourceModel = { applicationId: 'com.other.app' };
     if (scenario === 'backend') f.discoverSources = async () => { throw new Error('AGP source discovery failed'); };
     if (scenario === 'file') f.sourceModel = { roots: [{ path: f.metadata, kind: 'java' }] };
     if (scenario === 'permission') f.discoverSources = async () => { throw Object.assign(new Error('source EACCES'), { code: 'EACCES' }); };
-    await assert.rejects(f.action('debug', undefined, 'phone'), /does not match|discovery failed|not a directory|EACCES/);
-    assert.equal(f.debugCalls.length, 0); assert.equal(f.last().running, false); assert.equal(f.last().status, 'Failed'); await f.controller.dispose();
+    const before = f.calls.length;
+    await assert.rejects(f.controller.resolveCurrentDebugProject('com.example.app', f.root, new AbortController().signal), /does not match|discovery failed|not a directory|EACCES/);
+    assert.equal(f.calls.length, before); assert.equal(f.controller.operation, undefined);
+    assert.equal(f.debugCalls.length, 0); assert.equal(f.last().running, false); await f.controller.dispose();
   }
 });
 
-// source runner：真实 projectModel 临时脚本归运行操作所有，取消等待 child close，不能提前清理或启动调试。
+// source runner：真实projectModel临时脚本归提供方查询所有，取消等待child close，不能提前清理或启动调试。
 for (const platform of ['linux', 'win32']) test('android-build source discovery cancellation waits for owned close on ' + platform, async t => {
   const f = fixture(t, platform); await f.action('refresh');
   let entered, script; const ready = new Promise(resolve => { entered = resolve; });
@@ -335,7 +348,7 @@ for (const platform of ['linux', 'win32']) test('android-build source discovery 
     script = args[1]; assert.equal(suppliedSignal, signal); f.hold = true; f.closeOnKill = false;
     const pending = runner(command, args, cwd, signal); entered(); return pending;
   }, signal);
-  const pending = f.action('debug', undefined, 'phone'); const rejected = assert.rejects(pending, /cancelled/); await ready;
+  const pending = f.controller.resolveCurrentDebugProject('com.example.app', f.root, new AbortController().signal); const rejected = assert.rejects(pending, /cancelled/); await ready;
   assert.equal(fs.existsSync(script), true);
   let stopped = false; const stop = f.action('stop').then(() => { stopped = true; });
   await new Promise(resolve => setImmediate(resolve)); assert.equal(stopped, false); assert.equal(fs.existsSync(script), true);

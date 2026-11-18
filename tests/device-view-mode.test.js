@@ -86,5 +86,5 @@ test('Processes icon follows Explorer inside the separated group and setting sch
   assert.ok(html.indexOf('id="build-explorer"')<html.indexOf('id="build-processes"'));
   assert.ok(html.indexOf('class="build-view-separator"')<html.indexOf('class="build-view-modes"'));
   assert.ok(html.includes('codicon-server-process'));
-  assert.deepEqual(require('../package.json').contributes.configuration.properties['android.deviceViewMode'].enum,['mirror','explorer','processes','hidden']);
+  assert.deepEqual(require('../package.json').contributes.configuration.properties['android-ide.deviceViewMode'].enum,['mirror','explorer','processes','hidden']);
 });

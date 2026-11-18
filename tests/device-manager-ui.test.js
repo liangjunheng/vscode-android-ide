@@ -7,7 +7,7 @@ const { transformSync } = require('esbuild');
 const pkg = require('../package.json');
 const runningSource = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
 
-// 转译真实TS，注入宿主AbortController与计时器供连接所有权使用，仅替换宿主/设备依赖；node --test tests/device-manager-ui.test.js验证设备切换、清理、标题栏配对和激活接线，不引入调试器。
+// 在现有 Node 运行器中转译实际 TS 模块；只替换宿主/设备依赖，不新增生产导出。
 function load(name, dependencies) {
   const src = fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8');
   const module = { exports: {} };
@@ -28,7 +28,6 @@ test('mirror selection clears previous frames and never falls back to another ph
   let stopped = 0;
   mirror.view = { visible: true, webview: { postMessage: (m) => messages.push(m) } };
   mirror.pickMode = () => 'screencap';
-  // 替身启动成功后持有活动循环，符合mirrorConnected契约；设备回归断言切换/清空与错误，不将已启动流伪装断开。
   mirror.startScreencap = () => { started.push(mirror.serial); mirror.loop = {}; };
   mirror.session = { stop: () => stopped++ };
   await mirror.select({ serial: 'phone' });
@@ -48,7 +47,7 @@ test('mirror selection clears previous frames and never falls back to another ph
   await assert.rejects(mirror.show({ serial: 'phone' }), /adb unavailable/);
   await assert.rejects(mirror.refresh(), /adb unavailable/);
   await mirror.onMessage({ type: 'openDM' });
-  assert.deepEqual(commands.at(-1), ['android.addDevice']);
+  assert.deepEqual(commands.at(-1), ['android-ide.addDevice']);
   mirror.view.visible = false;
   await mirror.select({ serial: 'other' });
   assert.equal(mirror.serial, 'other');
@@ -58,26 +57,51 @@ test('mirror selection clears previous frames and never falls back to another ph
 
 // npm test：无设备验证标题栏布局、Wi-Fi 深浅主题资源及创建后顺序；断言注册项和刷新错误提示。
 test('title selector replaces device list and registers only the mirror view', async () => {
-  assert.deepEqual(pkg.contributes.views.androidTools.map(v => v.id), ['android.runningDevice']);
+  assert.deepEqual(pkg.contributes.views.androidTools.map(v => v.id), ['android-ide.runningDevice']);
   assert.equal(pkg.contributes.views.androidTools[0].name, 'Device Tools');
   const menus = pkg.contributes.menus['view/title'];
-  assert.ok(menus.every(m => m.when === 'view == android.runningDevice'));
-  const pair = pkg.contributes.commands.find(c => c.command === 'android.pairDevice');
+  assert.ok(menus.every(m => m.when === 'view == android-ide.runningDevice'));
+  const pair = pkg.contributes.commands.find(c => c.command === 'android-ide.pairDevice');
   for (const theme of ['light', 'dark']) {
     assert.equal(pair.icon[theme], 'media/icons/pair-over-wifi-' + theme + '.svg');
     const svg = fs.readFileSync(path.join(__dirname, '..', pair.icon[theme]), 'utf8');
     assert.ok(svg.includes('<svg') && !svg.includes('currentColor'));
   }
-  assert.equal(menus.find(m => m.command === 'android.createAvd').group, 'navigation@1');
-  assert.equal(menus.find(m => m.command === 'android.pairDevice').group, 'navigation@2');
+  assert.equal(menus.find(m => m.command === 'android-ide.createAvd').group, 'navigation@1');
+  assert.equal(menus.find(m => m.command === 'android-ide.pairDevice').group, 'navigation@2');
   assert.match(runningSource, /id=\"open-dm\"/);
   assert.match(runningSource, /send\(\{type:'openDM'\}\)/);
-  const handlers = {}, views = [], errors = [];
-  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) } };
+  assert.match(runningSource, /#tab\{[^}]*border:1px solid var\(--vscode-dropdown-border/);
+  assert.match(runningSource, /#tab\{[^}]*border-radius:6px/);
+  assert.match(runningSource, /#tab select\{background:transparent/);
+  assert.match(runningSource, /#tab select:hover,#tab select:active\{background:transparent\}/);
+  assert.match(runningSource, /#tab \.dot\{display:none\}/);
+  assert.ok(runningSource.includes('id=\"tic-d\"') && runningSource.includes('id=\"tic-l\"'), 'leading device icons remain');
+  const dropdowns = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
+  assert.match(dropdowns, /select::picker\(select\)\{[^}]*min-width:anchor-size\(width\)/);
+  const handlers = {}, views = [], errors = [], debugRegistrations = [];
+  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { debugRegistrations.push([type, factory]); return { dispose() {} }; } } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
-  assert.deepEqual(views, ['android.runningDevice', 'android.logcat']);
-  await handlers['android.refresh']();
+  // 通过真实TS转译加载JVM/Native/Mixed及自有runtime helper，确保完整依赖链可解析并注册真实工厂；本用例不启动后端或设备命令。
+  const localConfig = load('projectLocalConfig', { vscode });
+  const runtimeExecutable = load('android-debugger/runtimeExecutable', {});
+  const toolchain = load('android-debugger/toolchain', { vscode, '../projectLocalConfig': localConfig, './runtimeExecutable': runtimeExecutable });
+  const transport = load('android-debugger/dapTransport', {});
+  const smartSocket = load('adbSmartSocket', {});
+  const nativeToolchain = load('android-debugger/native-debugger/nativeToolchain', { '../runtimeExecutable': runtimeExecutable });
+  const nativeTarget = load('android-debugger/native-debugger/nativeTarget', {});
+  const nativeSymbols = load('android-debugger/native-debugger/nativeSymbols', {});
+  const ledgerBoundary = { openAdapterLedger: async () => undefined, reconcileAdapterLedger: async () => undefined };
+  const nativeAdapter = load('android-debugger/native-debugger/adapter', { vscode, '../../adbSmartSocket': smartSocket, '../toolchain': toolchain, '../dapTransport': transport, '../adapterLedger': ledgerBoundary, './nativeToolchain': nativeToolchain, './nativeTarget': nativeTarget, './nativeSymbols': nativeSymbols, '../../projectLocalConfig': localConfig, '../../sdk': { sdkRoot: () => 'sdk' } });
+  const mixedAdapter = load('android-debugger/jvm-native-debugger/adapter', { vscode, '../dapTransport': transport });
+  const adapter = load('android-debugger/jvm-debugger/adapter', { vscode, '../../adbSmartSocket': smartSocket, '../toolchain': toolchain, '../dapTransport': transport, '../native-debugger/adapter': nativeAdapter, '../jvm-native-debugger/adapter': mixedAdapter, '../adapterLedger': { openAdapterLedger: async () => undefined } });
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './android-debugger/jvm-debugger/adapter': adapter, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  assert.deepEqual(views, ['android-ide.runningDevice', 'android-ide.logcat']);
+  // 回归调试注册接线：真实适配器解析后必须注册 android-tools 类型，不能以空模块或吞错跳过。
+  assert.equal(debugRegistrations.length, 1);
+  assert.equal(debugRegistrations[0][0], 'android-tools');
+  assert.equal(typeof debugRegistrations[0][1].createDebugAdapterDescriptor, 'function');
+  await handlers['android-ide.refresh']();
   assert.match(errors[0], /adb unavailable/);
 });
 
@@ -90,31 +114,31 @@ test('picker includes connected devices and exposes unavailable states', async (
   const sdk = { listDevices: async () => { if (failure) throw failure; return devices; }, listAvds: () => [avd] };
   load('deviceManager', { vscode, './sdk': sdk }).registerDeviceManager({ extensionPath: '', subscriptions: [] }, () => {});
   choose = list => list.find(i => i.device?.serial === 'usb');
-  await handlers['android.addDevice']();
+  await handlers['android-ide.addDevice']();
   assert.equal(items.filter(i => i.device).length, 4);
-  assert.equal(calls.at(-1)[0], 'android.mirrorDevice');
+  assert.equal(calls.at(-1)[0], 'android-ide.mirrorDevice');
   assert.equal(calls.at(-1)[1].serial, 'usb');
   choose = list => list.find(i => i.device?.state === 'unauthorized');
-  await handlers['android.addDevice']();
+  await handlers['android-ide.addDevice']();
   assert.match(warnings.at(-1), /allow USB debugging/);
   choose = list => list.find(i => i.device?.state === 'offline');
-  await handlers['android.addDevice']();
+  await handlers['android-ide.addDevice']();
   assert.match(warnings.at(-1), /offline/);
   const count = calls.length;
   choose = undefined;
-  await handlers['android.addDevice']();
+  await handlers['android-ide.addDevice']();
   assert.equal(calls.length, count);
   choose = list => list.find(i => i.pair);
-  await handlers['android.addDevice']();
-  assert.equal(calls.at(-1)[0], 'android.pairDevice');
+  await handlers['android-ide.addDevice']();
+  assert.equal(calls.at(-1)[0], 'android-ide.pairDevice');
   choose = list => list.find(i => i.avd);
-  await handlers['android.addDevice']();
-  assert.equal(calls.at(-1)[0], 'android.startAvd');
+  await handlers['android-ide.addDevice']();
+  assert.equal(calls.at(-1)[0], 'android-ide.startAvd');
   devices = [{ serial: 'emulator-5554', avdName: 'Pixel', state: 'device' }];
-  await handlers['android.addDevice']();
-  assert.equal(calls.at(-1)[0], 'android.mirrorDevice');
+  await handlers['android-ide.addDevice']();
+  assert.equal(calls.at(-1)[0], 'android-ide.mirrorDevice');
   failure = new Error('ADB discovery failed');
-  await handlers['android.addDevice']();
+  await handlers['android-ide.addDevice']();
   assert.match(errors.at(-1), /ADB discovery failed/);
 });
 
@@ -123,7 +147,8 @@ test('SDK discovers PATH adb and preserves device states and errors', async () =
   let configured = '', failure = false;
   const commands = [];
   const sdk = load('sdk', {
-    vscode: { workspace: { getConfiguration: () => ({ get: () => configured }) } },
+    vscode: { workspace: { getConfiguration: () => { throw new Error('SDK path must not read VS Code settings'); } } },
+    './projectLocalConfig': { readProjectLocalConfig: root => { assert.equal(root, undefined); return { sdkPath: configured || undefined }; } },
     fs: { existsSync: p => configured && p === configured },
     child_process: { execFile: (cmd, args, options, callback) => {
       commands.push(cmd);

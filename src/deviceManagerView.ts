@@ -47,6 +47,7 @@ export class DeviceManagerView implements vscode.WebviewViewProvider {
     return out;
   }
 
+  // 创建宿主可折叠列表；无设备执行 npm test，布局回归断言卡片根节点与标题栏无重复按钮。
   // 菜单加载共享深浅色样式；npm test dropdown 接线及 LOGCAT_BROWSER=1 dropdown 的 .menu 断言验证资源与视觉契约。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
@@ -59,17 +60,24 @@ export class DeviceManagerView implements vscode.WebviewViewProvider {
     w.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
 <link rel="stylesheet" href="${w.asWebviewUri(vscode.Uri.joinPath(codicons, 'codicon.css'))}">
 <link rel="stylesheet" href="${u('devicemanager', 'main.css')}"><link rel="stylesheet" href="${u('dropdowns.css')}"></head><body>
-<div id="bar"></div><div id="head"></div><div id="list"></div>
+<div id="head"></div><div id="list"></div>
 <script src="${u('devicemanager', 'main.js')}"></script></body></html>`;
     w.onDidReceiveMessage((m) => this.onMessage(m));
     view.onDidChangeVisibility(() => { if (view.visible) { this.startPolling(); } else { this.stopPolling(); } });
     view.onDidDispose(() => { this.stopPolling(); this.view = undefined; });
   }
 
+  // 输入卡片 ID，映射节点后同步镜像选择；npm test 的桥接回归断言在线、离线和清空参数。
   private onMessage(m: any) {
     switch (m.type) {
       case 'ready': this.post({ type: 'init', icons: this.icons() }); this.sig = ''; this.startPolling(); break;
       case 'cmd': vscode.commands.executeCommand(m.cmd, m.id ? this.nodes.get(m.id) : undefined); break;
+      case 'select': {
+        const node = this.nodes.get(m.id);
+        const device = node?.kind === 'avd' ? node.running : node;
+        vscode.commands.executeCommand('android-ide.selectDevice', device);
+        break;
+      }
     }
   }
 
@@ -102,7 +110,7 @@ export class DeviceManagerView implements vscode.WebviewViewProvider {
     if (!this.view) { return; }
     let devices: Device[] = [];
     try { devices = await listDevices(); } catch { /* adb unavailable */ }
-    const mirrored = await Promise.resolve(vscode.commands.executeCommand<string | undefined>('android.mirroredSerial')).catch(() => undefined);
+    const mirrored = await Promise.resolve(vscode.commands.executeCommand<string | undefined>('android-ide.mirroredSerial')).catch(() => undefined);
     const rows: Row[] = [];
     const nodes = new Map<string, any>();
     for (const avd of listAvds()) {

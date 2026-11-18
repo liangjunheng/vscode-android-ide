@@ -5,35 +5,38 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-// 执行真实activate配置及Build/Explorer接线；Node>=22 VM回归断言恢复、工作区优先、资源归属和provider延迟取值/undefined/错误传播，保留HEAD配置命名空间。
+// 执行真实activate配置及Build/Explorer接线；Node>=22 VM回归断言命名空间读写、恢复、资源归属和只读provider的延迟取值/错误传播。
 function fixture() {
   const f = { value: false, workspaceValue: undefined, workspaceMode: undefined, globalMode: undefined, writes: [], applied: [], errors: [], instances: [], subscriptions: [], fail: false };
   const listener = { disposed: false, dispose() { this.disposed = true; } };
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2 },
     workspace: {
-      getConfiguration: () => ({
+      getConfiguration: section => { assert.equal(section, 'android-ide'); return ({
         get: (key, fallback) => key === 'mirrorVisible' ? f.value : fallback,
         inspect: key => key === 'deviceViewMode' ? { workspaceValue: f.workspaceMode, globalValue: f.globalMode } : { workspaceValue: f.workspaceValue },
         update: async (key, value, target) => { if (f.fail) throw new Error('read-only settings'); f.writes.push({ key, value, target }); if (key === 'mirrorVisible') f.value = value; else if (key === 'deviceViewMode') { if (target === 2) f.workspaceMode = value; else f.globalMode = value; } },
-      }),
+      }); },
       onDidChangeConfiguration: fn => { f.listener = fn; return listener; },
     },
+    debug: { registerDebugAdapterDescriptorFactory() {} },
     commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {}, showErrorMessage: error => f.errors.push(error) },
   };
   class Running {
     constructor(ext, action, preference) { this.preference = preference; f.instances.push(this); }
     async applyDeviceViewMode(visible) { if (f.rejectApply) throw new Error('stream failed'); f.applied.push(visible); }
   }
-  const deps = { './deviceExplorer': { DeviceExplorerController: class {
-    // 保存provider但激活时不读取；真实activate闭包回归验证Build尚未构造时无访问。
-    constructor(post, currentApplicationId) { this.currentApplicationId = currentApplicationId; f.explorer = this; }
+  const deps = { './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './deviceExplorer': { DeviceExplorerController: class {
+    // 保存只读provider但激活时不取值，wiring回归验证Build尚未创建时无访问。
+    constructor(post, currentApplicationId, resolveDebugProject) { this.currentApplicationId = currentApplicationId; this.resolveDebugProject = resolveDebugProject; f.explorer = this; }
     async dispose() {}
   } }, vscode, './runningDevices': { RunningDeviceView: Running }, './androidBuild': { AndroidBuildController: class {
-    // 记录Build实例与读取次数，闭包回归断言取值不缓存且缺失状态可传播。
+    // 记录实例和读取次数，供真实activate的闭包回归检查当前选择与错误不被缓存/吞掉。
     constructor() { f.build = this; this.reads = 0; this.applicationId = 'com.example.app'; }
-    // 返回当前包名/undefined或真实错误；wiring回归断言读取次数与原异常。
+    // 返回替身当前ID或抛metadata错误；wiring回归断言调用次数和相同异常。
     currentApplicationId() { this.reads++; if (this.error) throw this.error; return this.applicationId; }
+    // 精确记录Attach提供方入参，wiring回归验证signal与当前模型结果不被缓存或吞错。
+    async resolveCurrentDebugProject(...args) { this.debugProjectArgs = args; if (this.debugProjectError) throw this.debugProjectError; return this.debugProject; }
     dispose() {}
   } }, './logcat': { LogcatView: class {} }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} };
   const module = { exports: {} };
@@ -66,7 +69,7 @@ test('mirror configuration changes sync live and own the settings subscription',
   f.listener({ affectsConfiguration: key => false });
   assert.deepEqual(f.applied, []);
   f.value = true;
-  f.listener({ affectsConfiguration: key => key === 'android.mirrorVisible' });
+  f.listener({ affectsConfiguration: key => key === 'android-ide.mirrorVisible' });
   assert.deepEqual(f.applied, ['mirror']);
   assert.equal(f.writes.length, 0);
   f.rejectApply = true;
@@ -79,7 +82,7 @@ test('mirror configuration changes sync live and own the settings subscription',
 
 // npm test：VS Code 布尔配置与 CSS 专用 20px 图标声明可被现有运行器发现并严格断言。
 test('mirror configuration schema and enlarged Logcat icon are registered', () => {
-  const schema = require('../package.json').contributes.configuration.properties['android.mirrorVisible'];
+  const schema = require('../package.json').contributes.configuration.properties['android-ide.mirrorVisible'];
   assert.equal(schema.type, 'boolean'); assert.equal(schema.default, true); assert.equal(schema.scope, 'window');
   const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'utf8');
   assert.match(css, /#build-logcat svg\{width:20px;height:20px;max-width:100%;flex:none\}/);
@@ -92,8 +95,21 @@ test('Processes mode persists across activation and respects live workspace conf
   f.activate();assert.equal(f.instances.at(-1).preference.mode,'processes');
   f.workspaceMode='explorer';await f.instances.at(-1).preference.saveMode('processes');assert.equal(f.writes.at(-1).target,2);
   f.activate();assert.equal(f.instances.at(-1).preference.mode,'processes');
-  const writes=f.writes.length;f.workspaceMode='hidden';f.listener({affectsConfiguration:key=>key==='android.deviceViewMode'});assert.deepEqual(f.applied,['hidden']);assert.equal(f.writes.length,writes);
+  const writes=f.writes.length;f.workspaceMode='hidden';f.listener({affectsConfiguration:key=>key==='android-ide.deviceViewMode'});assert.deepEqual(f.applied,['hidden']);assert.equal(f.writes.length,writes);
   f.fail=true;await assert.rejects(f.instances.at(-1).preference.saveMode('mirror'),/read-only/);assert.equal(f.workspaceMode,'hidden');
+});
+
+// Node>=22执行真实activate，Attach提供方延迟读取当前Build并保留原包名/工作区/signal及失败对象。
+test('extension wires Attach project provider lazily with exact identity and cancellation', async () => {
+  const f = fixture(); f.activate();
+  assert.equal(f.build.debugProjectArgs, undefined);
+  assert.equal(typeof f.explorer.resolveDebugProject, 'function');
+  const signal = new AbortController().signal;
+  f.build.debugProject = { androidProjectRoot: '/workspace', androidModuleRoot: '/workspace/app', androidVariant: 'debug', androidSourceRoots: [] };
+  assert.equal(await f.explorer.resolveDebugProject('com.example.app', '/workspace', signal), f.build.debugProject);
+  assert.deepEqual(Array.from(f.build.debugProjectArgs), ['com.example.app', '/workspace', signal]);
+  f.build.debugProjectError = new Error('Selected package mismatch');
+  await assert.rejects(f.explorer.resolveDebugProject('com.other.app', '/other', signal), error => error === f.build.debugProjectError);
 });
 
 // Node>=22执行真实activate：不在构造阶段访问Build，Explorer读取当前ID及缺失undefined，真实metadata故障仍原样传播。

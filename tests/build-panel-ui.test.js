@@ -7,7 +7,7 @@ const { transformSync } = require('esbuild');
 const js = fs.readFileSync(path.join(__dirname, '../media/build-panel.js'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'utf8');
 
-// 执行完整面板脚本，输入初始可见状态并记录DOM/消息；node --test tests/build-panel-ui.test.js断言三模式互斥、宿主确认、按钮状态和空列表，不伪造旧Wi-Fi控件绑定。
+// 执行面板完整脚本并记录真实 DOM 状态与宿主消息；npm test 回归涵盖按钮、状态、选择及空列表。
 function fixture(initialVisible = true) {
   const nodes = {}, sent = [];
   let receive;
@@ -16,12 +16,13 @@ function fixture(initialVisible = true) {
   return { get, sent, receive: data => receive({ data }) };
 }
 
-// npm test：截图面板在无项目/设备、执行中、错误时呈现正确按钮状态，实际执行所有 UI 动作并断言消息。
+// npm test：实际脚本验证无项目/设备、busy和错误按钮状态；已移除工具不再绑定，构建和Logcat消息保持。
 test('build panel UI renders safe options and routes all commands', () => {
   const f = fixture(), get = f.get;
   assert.equal(f.sent[0].action, 'refresh');
   assert.equal(f.sent[1].type, 'getMirrorVisibility');
   assert.equal(get('build-run').disabled, true);
+  assert.equal(get('build-profiler').onclick, undefined);
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
   assert.equal(f.sent.at(-1).type, 'logcat');
@@ -43,7 +44,6 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-mirror')['aria-pressed'], 'false');
   assert.equal(get('build-mirror').title, 'Show mirroring');
   get('build-mirror').onclick();
-  assert.equal(f.sent.at(-1).type, 'setDeviceViewMode');
   assert.equal(f.sent.at(-1).mode, 'mirror');
   f.receive({ type: 'mirrorVisibility', visible: true });
   assert.equal(get('build-mirror')['aria-pressed'], 'true');
@@ -52,18 +52,6 @@ test('build panel UI renders safe options and routes all commands', () => {
   get('build-target').onchange();
   assert.equal(f.sent.at(-1).action, 'target');
   for (const action of ['run', 'build', 'install', 'debug', 'refresh', 'output']) { get('build-' + action).onclick(); assert.equal(f.sent.at(-1).action, action); }
-  for (const mode of ['explorer', 'processes', 'mirror']) {
-    get('build-' + mode).onclick();
-    assert.equal(f.sent.at(-1).type, 'setDeviceViewMode');
-    assert.equal(f.sent.at(-1).mode, mode);
-    f.receive({ type: 'deviceViewMode', mode });
-    for (const candidate of ['mirror', 'explorer', 'processes']) assert.equal(get('build-' + candidate)['aria-pressed'], String(candidate === mode));
-    assert.equal(get('device-explorer').hidden, mode === 'mirror');
-    get('build-' + mode).onclick(); assert.equal(f.sent.at(-1).mode, 'hidden');
-    f.receive({ type: 'deviceViewMode', mode: 'hidden' });
-    for (const candidate of ['mirror', 'explorer', 'processes']) assert.equal(get('build-' + candidate)['aria-pressed'], 'false');
-    assert.equal(get('device-explorer').hidden, true);
-  }
   assert.equal(get('build-wifi').onclick, undefined);
   assert.equal(f.sent.some(message => message.type === 'pairDevice'), false);
   f.receive({ ...state, busy: true, status: 'Gradle :app:installDebug' });
@@ -87,7 +75,7 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-run').disabled, true);
 });
 
-// npm test：实际投屏类接入可选构建处理器，不增加旧测试依赖；断言当前 serial、Wi-Fi、状态投递和页面资源结构。
+// npm test：真实模板断言构建栏仅七项且以Logcat结尾；保留设备视图、配对及构建宿主接线。
 test('build panel bridge routes selected serial and publishes snapshots', async () => {
   const module = { exports: {} }, calls = [];
   const vscode = { Uri: { file: p => p, joinPath: (...p) => p.join('/') }, commands: { executeCommand: (...args) => { calls.push(args); } } };
@@ -103,37 +91,57 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   await receive({ type: 'buildPanel', action: 'install' });
   assert.deepEqual(calls.at(-1), ['install', 'phone']);
   await receive({ type: 'pairDevice' });
-  assert.equal(calls.at(-1)[0], 'android.pairDevice');
+  assert.equal(calls.at(-1)[0], 'android-ide.pairDevice');
   view.publishBuildState({ type: 'buildState', status: 'Ready' });
   assert.equal(calls.at(-1).status, 'Ready');
   for (const id of ['build-project', 'build-target', 'build-run', 'build-install', 'build-debug', 'build-status']) assert.ok(webview.html.includes('id="' + id + '"'));
   assert.ok(webview.html.includes('build-panel.js'));
-  const rowStart = webview.html.indexOf('<div class="build-device-row">'), actionsStart = webview.html.indexOf('<div class="build-actions">');
-  assert.ok(rowStart >= 0 && actionsStart > rowStart);
-  const row = webview.html.slice(rowStart, actionsStart), actions = webview.html.slice(actionsStart, webview.html.indexOf('id="build-status"'));
-  const positions = ['dev', 'build-mirror', 'build-explorer', 'build-processes'].map(id => row.indexOf('id="' + id + '"'));
-  assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])));
-  assert.equal(row.includes('id="build-output"'), false); assert.equal(row.includes('id="build-logcat"'), false);
-  assert.ok(actions.indexOf('id="build-output"') >= 0 && actions.indexOf('id="build-logcat"') > actions.indexOf('id="build-output"'));
-  assert.equal(actions.includes('id="build-mirror"'), false); assert.equal(webview.html.includes('id="build-wifi"'), false);
+  const output = webview.html.indexOf('id="build-output"'), logcat = webview.html.indexOf('id="build-logcat"'), mirror = webview.html.indexOf('id="build-mirror"');
+  assert.ok(mirror < output && output < logcat);
+  const deviceRow = webview.html.slice(webview.html.indexOf('<div class="build-device-row">'), webview.html.indexOf('<div class="build-actions">'));
+  const actionRow = webview.html.slice(webview.html.indexOf('<div class="build-actions">'), webview.html.indexOf('<div class="build-status"'));
+  assert.ok(deviceRow.indexOf('id="dev"') < deviceRow.indexOf('id="build-mirror"'));
+  for (const id of ['build-mirror', 'build-explorer', 'build-processes']) {
+    assert.equal(deviceRow.split('id="' + id + '"').length, 2);
+    assert.equal(actionRow.includes('id="' + id + '"'), false);
+  }
+  assert.equal(webview.html.includes('id="build-wifi"'), false);
+  assert.equal(js.includes("get('build-wifi')"), false);
   assert.ok(css.includes('body.mirror-hidden #wrap'));
   assert.ok(css.includes('repeat(6,minmax(16px,26px))'));
-  assert.ok(css.includes('.build-view-modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))'));
+  const buttons = [...actionRow.matchAll(/<button id="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(buttons, ['build-run', 'build-build', 'build-install', 'build-debug', 'build-refresh', 'build-output', 'build-logcat']);
+  assert.equal(webview.html.includes('build-profiler'), false);
+  assert.ok(webview.html.includes('class="build-view-separator"'));
+  assert.ok(webview.html.includes('class="build-view-modes"'));
+  assert.ok(webview.html.includes('id="build-explorer"'));
   assert.ok(webview.html.indexOf('build-panel.css') > webview.html.indexOf('</style>'));
   assert.ok(css.includes('min-width:0'));
   assert.ok(css.includes('@media(max-width:260px)'));
 });
-// npm test：实际 activate 接线验证构建动作参数、状态回传和控制器加入扩展资源列表。
+// npm test：实际activate断言已移除命令不再注册，同时保留构建动作、状态、控制器和调试工厂。
 test('build panel integration owns controller and connects both directions', async () => {
-  const calls = [], module = { exports: {} }, subscriptions = [];
+  const calls = [], registrations = [], commandNames = [], module = { exports: {} }, subscriptions = [];
   let running, build;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
   class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } dispose() {} }
-  const deps = { vscode: { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {} } }, './deviceExplorer': { DeviceExplorerController: class { async dispose() {} } }, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {} };
+  const debugFactory = {};
+  const extensionContext = { extensionPath: 'extension-root', subscriptions };
+  const factoryContexts = [];
+  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; } } };
+  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: context => { factoryContexts.push(context); return debugFactory; } } };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
-  module.exports.activate({ extensionPath: '', subscriptions });
+  module.exports.activate(extensionContext);
   assert.ok(subscriptions.includes(build));
+  assert.equal(commandNames.includes('android-ide.openProfiler'), false);
+  assert.ok(commandNames.includes('android-ide.showLogcat'));
+
+  // 回归扩展调试接线：activate 必须以 android-tools 类型注册准确工厂，避免调试入口静默缺失。
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0][0], 'android-tools');
+  assert.equal(registrations[0][1], debugFactory);
+  assert.equal(factoryContexts[0], extensionContext);
   await running.action({ action: 'build' }, 'phone');
   assert.deepEqual(calls.at(-1), ['build', 'phone']);
   build.post({ type: 'buildState', status: 'Ready' });

@@ -204,7 +204,7 @@ export class AndroidBuildController implements vscode.Disposable {
   private async discoverDebugProject(operation: Operation, project: Project, target: Target, packageName: string): Promise<AndroidDebugProject> {
     const variant = target.variant[0].toLowerCase() + target.variant.slice(1);
     const model = await discoverVariantSources({ projectRoot: project.root, modulePath: target.module ? ':' + target.module : ':', variant, wrapper: project.wrapper },
-      (command, args, cwd) => this.run(operation, command, args, cwd, process.env, args[1]), operation.controller.signal);
+      (command: string, args: string[], cwd: string) => this.run(operation, command, args, cwd, process.env, args[1]), operation.controller.signal);
     this.check(operation);
     if (model.applicationId !== undefined && model.applicationId !== packageName) throw new Error('Source index applicationId does not match selected APK metadata');
     const androidSourceRoots = model.roots.filter(root => root.kind === 'java' || root.kind === 'kotlin').flatMap(root => {
@@ -266,6 +266,11 @@ export class AndroidBuildController implements vscode.Disposable {
     const config = action === 'debug' ? await this.debugConfiguration(project) : undefined;
     this.check(operation);
     if (action === 'debug' && !config) return 'Debug cancelled';
+    // 内置后端暂为空实现：在任何设备安装或源码发现前明确告知用户；debugger-stub/build 回归断言无会话和无设备副作用。
+    if (action === 'debug' && config!.type === 'android-tools') {
+      await startAndroidDebugging(vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root)), config!, { serial });
+      return 'Android 内置调试功能暂未实现';
+    }
     const online = await this.run(operation, adbPath(), ['-s', serial, 'get-state'], project.root);
     if (online.trim() !== 'device') throw new Error('Device is not online: ' + serial);
     await this.run(operation, project.wrapper, [target.install, '--console=plain'], project.root, { ...process.env, ANDROID_SERIAL: serial });

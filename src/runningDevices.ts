@@ -117,7 +117,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
   // 输入在线设备并聚焦镜像，选择变化时通知日志侧，等待连接结果；npm test 选择器与 device selection sync 断言同步和失败传播。
   async show(d?: Device) {
-    await vscode.commands.executeCommand('android.runningDevice.focus');
+    await vscode.commands.executeCommand('android-ide.runningDevice.focus');
     if (d && d.serial !== this.serial) { return this.select(d); }
     this.post({ type: 'select', serial: this.serial });
     return this.restart();
@@ -152,7 +152,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 只在首次切出时安排60秒断开，反复切其他视图不重置期限；view-idle回归精确验证59999/60000ms边界。
   private idleMirror(): void {
     if (this.mirrorIdle || !(this.mirrorConnection || this.session || this.emu || this.loop)) { return; }
-    this.mirrorIdle = setTimeout(() => { this.mirrorIdle = undefined; if (!this.mirrorVisible || !this.view?.visible) { this.stop(); } }, 60000);
+    this.mirrorIdle = setTimeout(() => { this.mirrorIdle = undefined; if (!this.mirrorVisible || !this.view?.visible) { this.stop(); this.post({ type: 'loading' }); } }, 60000);
     this.mirrorIdle.unref?.();
   }
 
@@ -305,13 +305,14 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private fallback(mode: Mode, reason: string) {
     this.stop();
     this.forced = mode;
-    this.post({ type: 'error', text: reason });
-    if (this.mirrorVisible && this.view?.visible) { void this.restart().then(() => this.post({ type: 'error', text: reason })).catch(error => this.post({ type: 'error', text: String(error) })); }
+    // 回退成功后由 mode=screencap 重新进入加载态；不要把启动诊断再次覆盖到投屏画面。
+    if (this.mirrorVisible && this.view?.visible) { void this.restart().catch(error => this.post({ type: 'error', text: String(error) })); }
   }
 
+  // 按 android-ide.mirrorIntervalMs 启动截图计时器；需活动镜像会话，无返回值，停止逻辑拥有计时器。配置前缀回归核验读取位置。
   private startScreencap() {
     this.post({ type: 'mode', mode: 'screencap' });
-    const every = vscode.workspace.getConfiguration('android').get<number>('mirrorIntervalMs', 150);
+    const every = vscode.workspace.getConfiguration('android-ide').get<number>('mirrorIntervalMs', 150);
     this.loop = setInterval(() => this.capture(), every);
   }
 
@@ -361,11 +362,12 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 处理下拉切换和空态入口；npm test 的下拉回归断言设备选择消息及 openDM 委托。
   // 配置握手/保存回归见 mirror preference；设备展开走幂等恢复，刷新目录但不重启在线投屏。
   // npm test 的 device-selection-sync.test.js 严格断言展开查询次数、默认/断开选择、双向同步及无设备日志入口。
+  // 仅分派现存设备工具入口；build-panel-ui的bridge回归断言工具栏与Logcat/构建接线一致。
   private async onMessage(m: any) {
     const s = this.serial;
     switch (m.type) {
       case 'buildPanel': if (this.buildAction) { return this.buildAction(m, s); } return;
-      case 'pairDevice': return vscode.commands.executeCommand('android.pairDevice');
+      case 'pairDevice': return vscode.commands.executeCommand('android-ide.pairDevice');
       case 'explorer': if (!this.explorer) { throw new Error('Device Explorer is unavailable'); } return this.explorer.handle(m);
       case 'setDeviceViewMode': return this.setDeviceViewMode(m.mode);
       case 'getMirrorVisibility': this.postViewMode(); return;
@@ -376,11 +378,11 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
       case 'discoverDevices': return this.restart();
       case 'select': return this.select(m.serial ? { serial: m.serial } : undefined);
       case 'refresh': this.forced = undefined; return this.restart();
-      case 'ext': if (s) { vscode.commands.executeCommand('android.extendedControls', { serial: s }); } return;
-      case 'logcat': return vscode.commands.executeCommand('android.showLogcat', s ? { serial: s } : undefined);
+      case 'ext': if (s) { vscode.commands.executeCommand('android-ide.extendedControls', { serial: s }); } return;
+      case 'logcat': return vscode.commands.executeCommand('android-ide.showLogcat', s ? { serial: s } : undefined);
       case 'reboot': if (s) { return this.reboot(s); } return;
       case 'wake': if (s) { await adb(s, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); } return;
-      case 'openDM': vscode.commands.executeCommand('android.addDevice'); return;
+      case 'openDM': vscode.commands.executeCommand('android-ide.addDevice'); return;
       case 'viewport': this.viewport = { w: Math.max(200, m.w), h: Math.max(200, m.h) }; if (this.mirrorVisible && this.view?.visible) { this.emu?.setViewport(this.viewport); } return;
       case 'ack': this.inflight = false; return this.flush();
       case 'rotate': if (this.emu) { this.emu.rotate(m.dir); return; } if (s) { return this.rotate(s, m.dir); } return;
@@ -482,11 +484,12 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   }
 }
 
-// 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标随宽度缩小且最大 24px，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
+// 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标始终按投屏宽度比例缩放，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
 // 生成当前设备名称和全设备下拉 UI；npm test 的 DOM 回归执行 renderDevices 并断言状态、禁用项和空态。
 // 输入资源和模式，在设备选择框后输出投屏/Explorer/Processes图标组，不生成Wi-Fi按钮；build-panel-ui与device-view-mode回归验证同排顺序、移除绑定与四态恢复。
 // 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
 // 共享下拉资源随页面生成；npm test 的 dropdown 接线断言及 LOGCAT_BROWSER=1 dropdown 回归验证图标、主题和原生选择。
+// 构建动作栏以Show Logcat结尾；build-panel-ui回归严格断言七个按钮及已移除入口不再渲染。
 function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; processesStyle: string; explorerScript: string; explorerStyle: string; dropdownStyle: string }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource};">
@@ -519,7 +522,7 @@ button svg{width:20px;height:20px}
 #screen,#cv{max-width:100%;max-height:100%;object-fit:contain;object-position:top center;border-radius:8px;cursor:default;user-select:none;outline:none}
 #screen{display:none}
 #stage{display:flex;flex-direction:column;flex:none;min-width:0;gap:0}
-#navigation{--nav-icon-max:24px;--nav-icon-ratio:0.08;--nav-padding:4px;--nav-icon-size:24px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;flex:none}
+#navigation{--nav-icon-ratio:0.064;--nav-padding:4px;--nav-icon-size:0px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;flex:none}
 #navigation button{width:100%;height:auto;min-width:0;border-radius:0;padding:var(--nav-padding) 0}
 #navigation button svg{width:var(--nav-icon-size);height:var(--nav-icon-size);max-width:100%;flex:none}
 #frame{display:block;position:relative;flex:none;background:#000}
@@ -547,7 +550,7 @@ body.empty #empty{display:flex}
 <div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
 <div class="build-surface">
 <div class="build-target-row"><i class="codicon codicon-package" aria-hidden="true"></i><select id="build-target" aria-label="Module and build variant" title="Module and build variant"><option value="">No Android variants</option></select></div>
-<div class="build-device-row"><div id="tab"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><button type="button"><selectedcontent></selectedcontent></button><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
+<div class="build-device-row"><div id="tab"><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><button type="button"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><selectedcontent></selectedcontent></button><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
 <div class="build-actions"><button id="build-run" title="Build, install and run"><i id="build-run-icon" class="codicon codicon-play"></i><span id="build-run-label">Run</span></button><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-debug" title="Debug app" aria-label="Debug app"><i class="codicon codicon-debug-alt"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button></div>
 <div class="build-status" role="status" aria-live="polite"><i id="build-progress" class="codicon"></i><span id="build-status">No Gradle project</span></div>
 </div></div>
@@ -590,12 +593,13 @@ function layout(){
  if(on!==skinOn||on){skinOn=on;frame.classList.toggle('skin',on)}
  const w=on?skin.lw:live?(fw||cv.width):1080,h=on?skin.lh:live?(fh||cv.height):1920;
  const css=getComputedStyle(navigation),padding=2*parseFloat(css.getPropertyValue('--nav-padding'));
- const iconMax=parseFloat(css.getPropertyValue('--nav-icon-max')),ratio=parseFloat(css.getPropertyValue('--nav-icon-ratio'));
- // 未达图标上限时，画面高与图标高都正比于宽度；达到上限后仅扣除固定图标高。
- let s=w&&h?Math.min(W/w,Math.max(0,H-padding)/(h+w*ratio)):0;
- if(w*s*ratio>iconMax)s=Math.min(W/w,Math.max(0,H-padding-iconMax)/h);
- const icon=Math.min(iconMax,w*s*ratio),availableH=Math.max(0,H-padding-icon);
- navigation.style.setProperty('--nav-icon-size',icon+'px');
+ const ratio=parseFloat(css.getPropertyValue('--nav-icon-ratio'));
+ // 图标始终按投屏宽度比例缩放，同时用上下留白约束整体高度。
+ const s=w&&h?Math.min(W/w,Math.max(0,H-padding)/(h+w*ratio)):0;
+ const icon=w*s*ratio,availableH=Math.max(0,H-padding-icon);
+ const iconSize=icon+'px';
+ navigation.style.setProperty('--nav-icon-size',iconSize);
+ navigation.querySelectorAll('svg').forEach((svg) => { svg.style.width=iconSize; svg.style.height=iconSize; });
  frame.style.width=stage.style.width=w*s+'px';frame.style.height=h*s+'px';
  if(!on){for(const el of[cv,img])for(const k of['left','top','width','height','border-radius'])el.style.removeProperty(k);
   return W>0&&availableH>0?{w:W,h:availableH}:null}
@@ -730,7 +734,8 @@ addEventListener('message',({data:m})=>{
  else if(m.type==='recording'){rec.classList.toggle('on',m.on);rec.title=m.on?'Stop recording':'Record screen';clearInterval(tm);timer.textContent='';if(m.on){const t0=Date.now();tm=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timer.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500)}}
  else if(m.type==='frame'){fw=m.w;fh=m.h;img.src='data:image/png;base64,'+m.data;layout();msg.textContent=m.w+'×'+m.h}
  else if(m.type==='mode'){setMode(m.mode);spsKey=undefined;if(m.mode==='scrcpy'&&typeof VideoDecoder==='undefined')send({type:'noDecoder'})}
- else if(m.type==='devices')renderDevices(m);
+ else if(m.type==='loading')setPresentation('loading');
+  else if(m.type==='devices')renderDevices(m);
  else if(m.type==='select'){dev.value=m.serial}
  else if(m.type==='skin')setSkin(m.skin);
  else if(m.type==='compose')compose(m);

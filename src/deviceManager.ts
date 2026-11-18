@@ -14,11 +14,12 @@ function enableHostGpu(dir: string) {
   }
 }
 
+// 输入 AVD 名称，读取 android-ide 的 GPU/内嵌设置并返回启动参数；需可用 SDK，配置前缀回归核验读取，启动失败继续向调用方传播。
 async function launchArgs(name: string): Promise<string[]> {
   const avd = listAvds().find((a) => a.name === name);
-  if (avd && vscode.workspace.getConfiguration('android').get<boolean>('fixSoftwareRendering', true)) { enableHostGpu(avd.dir); }
+  if (avd && vscode.workspace.getConfiguration('android-ide').get<boolean>('fixSoftwareRendering', true)) { enableHostGpu(avd.dir); }
   const args = ['-avd', name];
-  if (vscode.workspace.getConfiguration('android').get<boolean>('embeddedEmulator', true)) {
+  if (vscode.workspace.getConfiguration('android-ide').get<boolean>('embeddedEmulator', true)) {
     args.push('-qt-hide-window', '-grpc', String(await freePort()));
   }
   return args;
@@ -33,6 +34,7 @@ async function pickAvd(n?: Node): Promise<Avd | undefined> {
   return pick?.avd;
 }
 
+// 注册 android-ide 设备命令且不提供旧别名；输入扩展上下文及变更回调，订阅交上下文释放。configuration-prefix 回归核验清单与真实注册一致。
 export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: () => void) {
   const reg = (id: string, fn: (...a: any[]) => any) => ctx.subscriptions.push(vscode.commands.registerCommand(id, fn));
   const guard = (fn: (...a: any[]) => Promise<void>) => async (...a: any[]) => {
@@ -40,32 +42,32 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
     onChange();
   };
 
-  reg('android.startAvd', guard(async (n) => {
+  reg('android-ide.startAvd', guard(async (n) => {
     const a = await pickAvd(n); if (!a) { return; }
     spawnDetached(emulatorPath(), await launchArgs(a.name));
     vscode.window.setStatusBarMessage(`Starting ${a.name}…`, 5000);
   }));
-  reg('android.coldBootAvd', guard(async (n) => {
+  reg('android-ide.coldBootAvd', guard(async (n) => {
     const a = await pickAvd(n); if (!a) { return; }
     spawnDetached(emulatorPath(), [...(await launchArgs(a.name)), '-no-snapshot-load']);
   }));
-  reg('android.stopAvd', guard(async (n) => {
+  reg('android-ide.stopAvd', guard(async (n) => {
     if (n?.kind === 'avd' && n.running) { await adb(n.running.serial, 'emu', 'kill'); }
   }));
-  reg('android.wipeAvd', guard(async (n) => {
+  reg('android-ide.wipeAvd', guard(async (n) => {
     const a = await pickAvd(n); if (!a) { return; }
     if ((await vscode.window.showWarningMessage(`Wipe data of ${a.name}?`, { modal: true }, 'Wipe')) === 'Wipe') {
       spawnDetached(emulatorPath(), [...(await launchArgs(a.name)), '-wipe-data']);
     }
   }));
-  reg('android.deleteAvd', guard(async (n) => {
+  reg('android-ide.deleteAvd', guard(async (n) => {
     const a = await pickAvd(n); if (!a) { return; }
     if ((await vscode.window.showWarningMessage(`Delete ${a.name}?`, { modal: true }, 'Delete')) === 'Delete') {
       await run(avdmanagerPath(), ['delete', 'avd', '-n', a.name]);
     }
   }));
 
-  reg('android.createAvd', guard(async () => {
+  reg('android-ide.createAvd', guard(async () => {
     const images = installedSystemImages();
     if (!images.length) {
       vscode.window.showErrorMessage('No system image installed. Run: sdkmanager "system-images;android-34;google_apis;arm64-v8a"');
@@ -85,7 +87,7 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
       run(avdmanagerPath(), ['create', 'avd', '-n', name, '-k', img.id, '-d', hw, '--force'], 'no\n'));
   }));
 
-  reg('android.editAvd', guard(async (n) => {
+  reg('android-ide.editAvd', guard(async (n) => {
     const a = await pickAvd(n); if (!a) { return; }
     const file = path.join(a.dir, 'config.ini');
     if (!fs.existsSync(file)) { return; }
@@ -120,7 +122,7 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
   }));
 
   // 标题栏选择器包含真机、模拟器及未授权/离线状态；npm test 选择器回归断言选择、取消、配对、启动和错误提示。
-  reg('android.addDevice', guard(async () => {
+  reg('android-ide.addDevice', guard(async () => {
     const devices = await listDevices();
     const icon = (n: string) => vscode.Uri.file(path.join(ctx.extensionPath, 'media', 'icons', n));
     type Item = vscode.QuickPickItem & { avd?: Avd; device?: Device; pair?: boolean };
@@ -145,7 +147,7 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
     ];
     const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select a device' });
     if (!pick) { return; }
-    if (pick.pair) { await vscode.commands.executeCommand('android.pairDevice'); return; }
+    if (pick.pair) { await vscode.commands.executeCommand('android-ide.pairDevice'); return; }
     if (pick.device) {
       if (pick.device.state !== 'device') {
         await vscode.window.showWarningMessage(pick.device.state === 'unauthorized'
@@ -153,15 +155,15 @@ export function registerDeviceManager(ctx: vscode.ExtensionContext, onChange: ()
           : 'Device is ' + pick.device.state + '. Check its USB or Wi-Fi connection.');
         return;
       }
-      await vscode.commands.executeCommand('android.mirrorDevice', pick.device);
+      await vscode.commands.executeCommand('android-ide.mirrorDevice', pick.device);
       return;
     }
     const running = devices.find((d) => d.avdName === pick.avd!.name);
-    if (running) { await vscode.commands.executeCommand('android.mirrorDevice', running); }
-    else { await vscode.commands.executeCommand('android.startAvd', { kind: 'avd', avd: pick.avd }); }
+    if (running) { await vscode.commands.executeCommand('android-ide.mirrorDevice', running); }
+    else { await vscode.commands.executeCommand('android-ide.startAvd', { kind: 'avd', avd: pick.avd }); }
   }));
 
-  reg('android.pairDevice', guard(async () => {
+  reg('android-ide.pairDevice', guard(async () => {
     const addr = await vscode.window.showInputBox({ title: 'Device address', placeHolder: '192.168.1.20:5555' });
     if (addr) { vscode.window.showInformationMessage((await adb(undefined, 'connect', addr)).trim()); }
   }));

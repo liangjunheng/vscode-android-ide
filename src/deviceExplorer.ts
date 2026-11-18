@@ -3,7 +3,8 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { DeviceExplorerFiles, ExplorerEntry } from './deviceExplorerFiles';
-import { ProcessesController } from './processes';
+import { ProcessesController, type DebugProjectResolver } from './processes';
+import { readProjectLocalConfig } from './projectLocalConfig';
 
 interface Upload { local: string; remote: string; handle: fs.FileHandle; expected: number; written: number; }
 interface Scope { serial: string; view: 'files' | 'processes'; connection: AbortController; idleTimer?: NodeJS.Timeout; controller: AbortController; files: DeviceExplorerFiles; processes: ProcessesController; tasks: Set<Promise<void>>; uploads: Map<string, Upload>; directories: Map<string, ExplorerEntry[]>; writer?: Promise<void>; }
@@ -28,9 +29,9 @@ export class DeviceExplorerController {
   private transition: Promise<void> = Promise.resolve();
   private disposed = false;
 
-  // 输入消息投递器及只读Build当前包名提供方，不主动连接；提供方缺失或返回undefined才读取工作区候选，过滤语义不变。
+  // 输入投递器、只读Build包名及精确调试项目提供方，不主动连接；Attach project回归断言模型贯穿Processes，文件定位fallback语义不变。
   // 回归：Node>=22，node --test tests/device-explorer-controller.test.js；locateApp断言有目标零picker、缺目标候选单选/取消、目录结果及错误，生命周期断言隐藏无后端调用。
-  constructor(private post: (message: unknown) => void, private currentApplicationId?: () => string | undefined) {}
+  constructor(private post: (message: unknown) => void, private currentApplicationId?: () => string | undefined, private resolveDebugProject?: DebugProjectResolver) {}
 
   // 设备/活动视图切换取消命令，独立连接按用户要求闲置60秒才释放；view-idle/controller回归验证复用、失效及设备归属。
   setContext(serial: string | undefined, visible: boolean, view: 'files' | 'processes' = 'files'): Promise<void> {
@@ -41,7 +42,7 @@ export class DeviceExplorerController {
     return task;
   }
 
-  // 同设备切回复用连接，切换设备关闭旧会话，新会话读取 android 包过滤；输入设备与视图，无返回值。controller/view-idle 回归覆盖配置、生命周期和异常。
+  // 同设备切回复用连接，切换设备关闭旧会话，新会话读取 android-ide 包过滤；输入设备与视图，无返回值。controller/view-idle 回归覆盖配置、生命周期和异常。
   private async changeContext(serial: string | undefined, visible: boolean, view: 'files' | 'processes'): Promise<void> {
     if (serial !== this.serial || this.disposed) { await this.closeScope(); this.serial = serial; }
     const active = visible && serial && !this.disposed ? serial : undefined;
@@ -66,10 +67,10 @@ export class DeviceExplorerController {
     }
     const controller = new AbortController(), connection = new AbortController();
     const scope: Scope = { serial: active, view, controller, connection, files: new DeviceExplorerFiles(active),
-      processes: new ProcessesController(active, connection.signal, message => { if (!connection.signal.aborted && this.scope === scope) { this.post(message); } }),
+      processes: new ProcessesController(active, connection.signal, message => { if (!connection.signal.aborted && this.scope === scope) { this.post(message); } }, this.resolveDebugProject),
       tasks: new Set(), uploads: new Map(), directories: new Map() };
     this.scopes.set(view, scope); this.scope = scope;
-    this.filter = vscode.workspace.getConfiguration('android').get<boolean>('explorer.packageFilter', false);
+    this.filter = vscode.workspace.getConfiguration('android-ide').get<boolean>('explorer.packageFilter', false);
     this.state(); void this.handle({ type: 'explorer', action: 'refresh' });
   }
 
@@ -109,7 +110,7 @@ export class DeviceExplorerController {
       capabilities: ProcessesController.capabilities() });
   }
 
-  // 命令归作用域所有；设置入口使用 android.explorer，输入宿主消息，无返回值。controller 回归核验新命名空间和动作归属、失败及取消；locateApp的writer互斥/取消证据见定位共享回归映射。
+  // 命令归作用域所有；设置入口使用 android-ide.explorer，输入宿主消息，无返回值。controller 回归核验新命名空间和动作归属、失败及取消；locateApp的writer互斥/取消证据见定位共享回归映射。
   async handle(message: any): Promise<void> {
     if (!message || message.type !== 'explorer' || typeof message.action !== 'string') { throw new Error('Invalid Device Explorer message'); }
     if (message.action === 'ready') {
@@ -120,7 +121,7 @@ export class DeviceExplorerController {
       }
       return;
     }
-    if (message.action === 'settings') { await vscode.commands.executeCommand('workbench.action.openSettings', 'android.explorer'); return; }
+    if (message.action === 'settings') { await vscode.commands.executeCommand('workbench.action.openSettings', 'android-ide.explorer'); return; }
     if (message.action === 'cancel') { const serial = this.scope?.serial, view = this.tab; await this.setContext(undefined, false, view); await this.setContext(serial, true, view); return; }
     const scope = this.scope;
     if (!scope) { this.state(); return; }
@@ -260,7 +261,7 @@ export class DeviceExplorerController {
     return [...new Set<string>(message.paths.map(remotePath))];
   }
 
-  // 在活动作用域执行文件/进程动作，过滤偏好写入 android；输入作用域和消息，无返回值。定位Files限定步骤见定位共享回归映射。
+  // 在活动作用域执行文件/进程动作，过滤偏好写入 android-ide；输入作用域和消息，无返回值。定位Files限定步骤见定位共享回归映射。
   // 五按钮共享映射：Node>=22 VM+后端替身，node --test tests/device-explorer-controller.test.js；toolbar file commands publish created uploaded deleted refreshed and downloaded results触发新建目录/上传/下载/删除/刷新，断言父快照、落地字节及完成状态；toolbar file commands preserve cancellation and surface operation failures断言对话框取消零写入、后端错误可见及无伪完成。
   private async execute(scope: Scope, message: any): Promise<void> {
     this.check(scope);
@@ -272,7 +273,7 @@ export class DeviceExplorerController {
     if (message.action === 'refresh' || message.action === 'filter') {
       if (message.action === 'filter') {
         if (typeof message.enabled !== 'boolean') { throw new Error('Invalid package filter'); }
-        await vscode.workspace.getConfiguration('android').update('explorer.packageFilter', message.enabled, vscode.ConfigurationTarget.Global);
+        await vscode.workspace.getConfiguration('android-ide').update('explorer.packageFilter', message.enabled, vscode.ConfigurationTarget.Global);
         this.check(scope); this.filter = message.enabled;
       }
       await this.readApplicationIds(scope);
@@ -320,12 +321,12 @@ export class DeviceExplorerController {
     return values.map(value => { const uri = vscode.Uri.parse(value); if (uri.scheme !== 'file') { throw new Error('Only local file uploads are supported'); } return uri; });
   }
 
-  // 下载或打开选中项，下载目录读取 android 配置；输入活动作用域、远端路径和打开标志，无返回值。下载落地字节/完成状态、取消与错误步骤见execute五按钮共享映射。
+  // 下载或打开选中项；下载目录读取项目本机 JSON，未配置时保留 Downloads 默认值。回归：node --test tests/device-explorer-controller.test.js。
   private async download(scope: Scope, paths: string[], open: boolean): Promise<void> {
     let directory: string | undefined;
     if (open) { directory = await this.cacheDirectory(); }
     else {
-      const configured = vscode.workspace.getConfiguration('android').get<string>('explorer.downloadLocation', '');
+      const configured = readProjectLocalConfig().downloadDirectory ?? '';
       if (configured && !(await fs.stat(configured)).isDirectory()) { throw new Error('Download location must be an existing directory'); }
       const selected = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, title: 'Save device files to', defaultUri: vscode.Uri.file(configured || path.join(os.homedir(), 'Downloads')) });
       this.check(scope); directory = selected?.[0]?.fsPath;

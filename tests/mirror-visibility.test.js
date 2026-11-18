@@ -27,11 +27,11 @@ test('mirror controls use bundled Android Studio Logcat icon and selected device
   const f = fixture();
   assert.equal(f.view.icons().logcat, fs.readFileSync(path.join(__dirname, '../media/icons/logcat.svg'), 'utf8'));
   await f.view.onMessage({ type: 'logcat' });
-  assert.equal(f.calls[0][0], 'android.showLogcat');
+  assert.equal(f.calls[0][0], 'android-ide.showLogcat');
   assert.equal(f.calls[0][1], undefined);
   f.view.serial = 'phone';
   await f.view.onMessage({ type: 'logcat' });
-  assert.equal(f.calls[0][0], 'android.showLogcat');
+  assert.equal(f.calls[0][0], 'android-ide.showLogcat');
   assert.equal(f.calls[1][1].serial, 'phone');
 });
 

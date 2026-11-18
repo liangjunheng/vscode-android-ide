@@ -207,6 +207,25 @@ test('virtual offsets and follow state use one measured coordinate model', () =>
   assert.equal(vm.runInContext('rowAt(900)',ctx),0);
 });
 
+// npm test dropdown：检查四类Webview资源接线、原生语义和主题覆盖；实际级联与键盘由LOGCAT_BROWSER=1 dropdown浏览器回归验证。
+test('dropdown styles connect every Webview and retain native selection semantics', () => {
+  const shared = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
+  for (const name of ['logcat', 'deviceManagerView', 'extendedControls']) {
+    const source = fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8');
+    assert.ok(source.includes("u('dropdowns.css')"), name);
+    assert.ok(source.includes('localResourceRoots: [media, codicons]'), name);
+  }
+  const running = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
+  assert.ok(running.includes("dropdownStyle: art('../dropdowns.css')"));
+  assert.ok(running.includes('href="${art.dropdownStyle}"'));
+  for (const selector of ['.menu', '#menu', '.explorer-menu', '#sugg', 'select::picker(select)', 'option::checkmark']) assert.ok(shared.includes(selector), selector);
+  for (const token of ['--vscode-menu-background', '--vscode-menu-foreground', '--vscode-focusBorder', 'vscode-light', 'vscode-dark', 'vscode-high-contrast-light', 'forced-colors:active', '@supports (appearance:base-select)', 'appearance:auto']) assert.ok(shared.includes(token), token);
+  assert.ok(shared.includes('max-width:calc(100vw - 8px)'));
+  assert.ok(shared.includes('body :is(button,select,input):focus:not(:focus-visible){outline:0!important;box-shadow:none!important}'));
+  assert.ok(shared.includes('option:disabled'));
+  assert.ok(shared.includes('overflow-wrap:anywhere'));
+});
+
 // npm test 执行实际同步函数；模拟计算行高，断言行高变化与重复通知，滚动位置由布局层统一管理。
 test('font changes update height without direct scroll writes', () => {
   const start = js.indexOf('  function syncFontMetrics() {');
@@ -231,23 +250,4 @@ test('font changes update height without direct scroll writes', () => {
   assert.equal(vm.runInContext('H', ctx), 30);
   assert.ok(js.includes('new MutationObserver(syncFontMetrics).observe(document.body'));
   assert.ok(js.includes('let H = parseFloat(getComputedStyle(sc).lineHeight)'));
-});
-
-// npm test dropdown：检查四类Webview资源接线、原生语义和主题覆盖；实际级联与键盘由LOGCAT_BROWSER=1 dropdown浏览器回归验证。
-test('dropdown styles connect every Webview and retain native selection semantics', () => {
-  const shared = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
-  for (const name of ['logcat', 'deviceManagerView', 'extendedControls']) {
-    const source = fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8');
-    assert.ok(source.includes("u('dropdowns.css')"), name);
-    assert.ok(source.includes('localResourceRoots: [media, codicons]'), name);
-  }
-  const running = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
-  assert.ok(running.includes("dropdownStyle: art('../dropdowns.css')"));
-  assert.ok(running.includes('href="${art.dropdownStyle}"'));
-  for (const selector of ['.menu', '#menu', '.explorer-menu', '#sugg', 'select::picker(select)', 'option::checkmark']) assert.ok(shared.includes(selector), selector);
-  for (const token of ['--vscode-menu-background', '--vscode-menu-foreground', '--vscode-focusBorder', 'vscode-light', 'vscode-dark', 'vscode-high-contrast-light', 'forced-colors:active', '@supports (appearance:base-select)', 'appearance:auto']) assert.ok(shared.includes(token), token);
-  assert.ok(shared.includes('max-width:calc(100vw - 8px)'));
-  assert.ok(shared.includes('body :is(button,select,input):focus:not(:focus-visible){outline:0!important;box-shadow:none!important}'));
-  assert.ok(shared.includes('option:disabled'));
-  assert.ok(shared.includes('overflow-wrap:anywhere'));
 });
