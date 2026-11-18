@@ -84,6 +84,29 @@ adb devices -l
 
 After installation, set `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or set `sdkPath` in `.vscode/android-ide.local.json`. The extension reports the executable path and the missing dependency when discovery fails.
 
+Use this layout inside the SDK directory (`<sdk-root>`):
+
+```text
+<sdk-root>/
+  platform-tools/adb                 # Devices, Logcat, Explorer, physical-device mirror
+  emulator/emulator                  # Start and manage Android emulators
+  cmdline-tools/latest/bin/
+    sdkmanager                       # Install SDK packages and system images
+    avdmanager                       # Create and edit AVD definitions
+  system-images/<api>/<tag>/<abi>/   # Emulator system images
+```
+
+The extension does not copy these dependencies into the project or VSIX. Project-specific paths belong in `.vscode/android-ide.local.json`; this file is intentionally ignored by Git:
+
+```json
+{
+  "sdkPath": "C:/Android/Sdk",
+  "downloadDirectory": "C:/Android/downloads"
+}
+```
+
+The scrcpy server is the exception: it is bundled at `resources/scrcpy-server.jar` inside the extension and is pushed to the selected Android device at runtime. Optional external debugger executables may be configured under `debugger.adbPath`, `debugger.lldbDapPath`, and `debugger.ndkPath`.
+
 ## Configuration
 
 Settings, commands, and view IDs use the android-ide.* namespace exclusively. The previous android.* namespace is not supported.
