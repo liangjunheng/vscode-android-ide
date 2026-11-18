@@ -219,6 +219,15 @@ test('Device Tools browser clips long device labels', {skip:!enabled,timeout:600
       await page.mouse('mouseReleased',p.x,p.y);await page.frames();assert.equal(await page.evaluate('document.getElementById('+JSON.stringify(id)+').matches(":open")'),true);
       assert.equal(await page.evaluate(border),'rgb(0, 122, 204)',id+' open');await page.key('Escape');
     }
+    // 原生 picker 只能通过打开状态读取 option 几何；首个 option 必须与选择按钮左边缘对齐。
+    for(const id of ['dev','build-target']){
+      const p=await page.evaluate('(()=>{const s=document.getElementById(\"'+id+'\"),r=s.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
+      await page.mouse('mousePressed',p.x,p.y);await page.frames();await page.mouse('mouseReleased',p.x,p.y);await page.frames();
+      const geometry=await page.evaluate('(()=>{const s=document.getElementById(\"'+id+'\"),o=s.options[0],sr=s.getBoundingClientRect(),or=o.getBoundingClientRect(),p=getComputedStyle(s,\"::picker(select)\");return{open:s.matches(\":open\"),selectLeft:sr.left,optionLeft:or.left,inset:parseFloat(p.borderLeftWidth)+parseFloat(p.paddingLeft)}})()');
+      assert.equal(geometry.open,true,id+' picker open');
+      assert.ok(Math.abs(geometry.optionLeft-geometry.inset-geometry.selectLeft)<1,JSON.stringify({id,...geometry}));
+      await page.key('Escape');await page.frames();
+    }
   }
 });
 

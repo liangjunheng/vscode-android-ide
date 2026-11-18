@@ -47,8 +47,8 @@ body #build-project option,body #build-target option{background:var(--popup-bg);
   #header select::picker-icon{position:static;flex:0 0 16px;margin-inline-start:0;pointer-events:none}
   /* Device Tools 的标签独立收缩，图标与箭头不参与文字裁剪；Device Tools browser 回归验证长名称和目录刷新。 */
   body #tab #dev{flex:1 1 0;width:0;min-width:0;box-sizing:border-box;gap:8px}
-  #tab>span{flex:none}
-  #tab #dev>button{display:flex;flex:1;min-width:0;width:0;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:start;justify-content:flex-start;overflow:hidden;box-shadow:none}
+  #tab #dev>button>span{flex:none}
+  #tab #dev>button{display:flex;flex:1;min-width:0;width:0;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;text-align:start;justify-content:flex-start;overflow:hidden;box-shadow:none;gap:6px}
   #tab #dev>button:hover,#tab #dev>button:active{background:transparent}
   #tab selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #tab #dev::picker-icon{flex:0 0 16px;margin-inline-start:0;pointer-events:none}
