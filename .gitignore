@@ -4,3 +4,8 @@ dist
 *.vsix
 .DS_Store
 .vscode/android-ide.local.json
+
+# Local test fixtures and bundled runtime assets are not uploaded.
+.test-artifacts/
+tests/fixtures/
+tools/
