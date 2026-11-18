@@ -12,7 +12,7 @@
   // D: upload input displays nested causes and clears old failures on success；输入嵌套读取错误后成功重传，断言完整原因与旧alert消失。
   // E: host context events clear hovered upload targets；拖入后发送设备/连接/状态消息，断言目标为null且类清除。
   // F: upload owns one batch and cancels pending ACK on view or device change / upload aborts owned FileReader before any stale chunk can be sent；断言切换中止且无旧分块。
-  const state = { serial: '', deviceName: '', tab: document.body.dataset?.deviceViewMode === 'processes' ? 'processes' : 'files', filter: false, capabilities: {}, busy: false, message: '', error: '', directories: new Map(), expanded: new Set(['/']), processes: [], selected: [], processSelected: null, sort: { key: 'packageName', asc: true }, menu: null, transfer: null, dragTarget: null, fileColumns: ['180px', 'max-content', 'max-content', '90px'] };
+  const state = { serial: '', deviceName: '', tab: document.body.dataset?.deviceViewMode === 'processes' ? 'processes' : 'files', filter: false, capabilities: {}, busy: false, message: '', error: '', directories: new Map(), expanded: new Set(['/']), processes: [], selected: [], processSelected: null, sort: { key: 'packageName', asc: true }, menu: null, transfer: null, dragTarget: null, loading: false, fileColumns: ['180px', 'max-content', 'max-content', '90px'] };
   // 一个视图复用排序器；目录回归断言选择和重复展开不重新构造或排序元数据。
   const fileCollator = new Intl.Collator(undefined, { sensitivity: 'base' });
   // 输入时间戳/日期字符串，输出本地YYYY-MM-DD HH:mm:ss；缺失/无效返回空白，不改变时区。
@@ -154,7 +154,7 @@ function filesView(previous) {
   if (!state.serial) children.push(text('div', 'No device selected', 'state'));
   else {
     const rows = visibleEntries();
-    if (!rows.length && !state.busy) children.push(text('div', 'Empty directory', 'state'));
+    if (!rows.length && !state.busy && !state.loading) children.push(text('div', 'Empty directory', 'state'));
     for (const entry of rows) children.push(fileRow(entry, entry.depth, existing.get(entry.path)));
   }
   for (let index = 0; index < children.length; index++) if (list.children[index] !== children[index]) list.insertBefore(children[index], list.children[index] || null);
@@ -390,9 +390,12 @@ function filesView(previous) {
     if (m.type === 'explorerState') {
       if (m.serial !== state.serial) { state.directories.clear(); state.expanded = new Set(['/']); state.selected = []; state.processes = []; state.processSelected = null; }
       if (m.tab !== state.tab || m.serial !== state.serial) { closeMenu(); state.error = ''; state.message = ''; state.busy = false; }
-      Object.assign(state, m); state.capabilities = m.capabilities || {}; state.tab = m.tab || state.tab; render();
+      Object.assign(state, m); state.capabilities = m.capabilities || {}; state.tab = m.tab || state.tab;
+      // Files切入且当前设备尚未收到根目录快照时先显示Loading，避免把未加载状态误报为空目录；收到/缓存根快照后交给真实进度消息结束加载。
+      if (state.tab === 'files' && state.serial && state.active !== false && !state.directories.has('/')) { state.loading = true; }
+      render();
     } else if (m.type === 'explorerReveal') { revealAppDirectory(m); }
-    else if (m.type === 'explorerFiles') { state.error = m.error || ''; if (!m.error) updateDirectory(m); render(); }
+    else if (m.type === 'explorerFiles') { state.error = m.error || ''; if (!m.error) { updateDirectory(m); if (safeRemote(m.path || '/') === '/') state.loading = false; } render(); }
     else if (m.type === 'explorerProcesses') { state.error = m.error || ''; state.processes = m.processes || []; render(); }
     else if (m.type === 'explorerProgress') { state.busy = !!m.busy; state.message = m.message || ''; if(m.error) state.error = m.error; render(); }
     else if (m.type === 'explorerUploadAck') uploadAck(m);
@@ -408,7 +411,7 @@ function filesView(previous) {
     const surface = state.tab === 'files' ? filesView(previous) : window.DeviceProcessesView.render({ state, action, renderParent: render, button, text });
     if (!previous) root.appendChild(surface); else if (previous !== surface) root.replaceChild(surface, previous);
     const progress = root.querySelector('.progress');
-    if (state.busy) { if (progress) progress.textContent = state.message || 'Busy'; else root.appendChild(text('div', state.message || 'Busy', 'progress')); }
+    if (state.busy || state.loading) { if (progress) progress.textContent = state.message || (state.loading ? 'Loading' : 'Busy'); else root.appendChild(text('div', state.message || (state.loading ? 'Loading' : 'Busy'), 'progress')); }
     else progress?.remove();
   }
   // 键盘导航支持上下左右、Enter、进程复制和菜单取消，保持固定行选择。

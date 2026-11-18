@@ -152,7 +152,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 只在首次切出时安排60秒断开，反复切其他视图不重置期限；view-idle回归精确验证59999/60000ms边界。
   private idleMirror(): void {
     if (this.mirrorIdle || !(this.mirrorConnection || this.session || this.emu || this.loop)) { return; }
-    this.mirrorIdle = setTimeout(() => { this.mirrorIdle = undefined; if (!this.mirrorVisible || !this.view?.visible) { this.stop(); this.post({ type: 'loading' }); } }, 60000);
+    this.mirrorIdle = setTimeout(() => { this.mirrorIdle = undefined; if (!this.mirrorVisible || !this.view?.visible) { this.stop(); } }, 60000);
     this.mirrorIdle.unref?.();
   }
 
@@ -730,7 +730,6 @@ addEventListener('message',({data:m})=>{
  else if(m.type==='recording'){rec.classList.toggle('on',m.on);rec.title=m.on?'Stop recording':'Record screen';clearInterval(tm);timer.textContent='';if(m.on){const t0=Date.now();tm=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timer.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500)}}
  else if(m.type==='frame'){fw=m.w;fh=m.h;img.src='data:image/png;base64,'+m.data;layout();msg.textContent=m.w+'×'+m.h}
  else if(m.type==='mode'){setMode(m.mode);spsKey=undefined;if(m.mode==='scrcpy'&&typeof VideoDecoder==='undefined')send({type:'noDecoder'})}
- else if(m.type==='loading')setPresentation('loading');
  else if(m.type==='devices')renderDevices(m);
  else if(m.type==='select'){dev.value=m.serial}
  else if(m.type==='skin')setSkin(m.skin);

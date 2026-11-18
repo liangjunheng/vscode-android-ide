@@ -6,6 +6,16 @@ function boot(options={}){const sent=[];const nodes={};const created=[];function
 // CSS回归直接读取独立Processes资源，验证窄面板左右padding和卡片间距不会只依赖浏览器矩阵。
 test('Processes CSS keeps compact balanced list spacing',()=>{assert.match(processesCss,/\.process-list\{[^}]*padding:2px[^}]*scrollbar-gutter:stable both-edges\}/);assert.match(processesCss,/\.process-card\{[^}]*margin:0 0 10px;padding:5px/);});
 
+// 进入Files时根目录尚未返回显示Loading，收到空根目录及完成进度后才显示Empty directory。
+test('Explorer shows loading before the initial root snapshot',()=>{
+  const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
+  assert.equal(b.root.children[2].textContent,'Loading');
+  b.api.receive({type:'explorerFiles',path:'/',entries:[]});
+  assert.equal(b.root.children[1].children[2].children[1].textContent,'Empty directory');
+  b.api.receive({type:'explorerProgress',busy:false});
+  assert.equal(b.root.children[1].children[2].children[1].textContent,'Empty directory');
+});
+
 test('Explorer sends ready and preserves expanded tree while safely rendering names',()=>{const b=boot();assert.equal(b.sent[0].type,'explorer');assert.equal(b.sent[0].action,'ready');b.api.receive({type:'explorerState',serial:'s',deviceName:'<Phone>',tab:'files'});b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/A',name:'A',kind:'directory'},{path:'/z<bad>',name:'<bad>',kind:'file'}]});b.api.state.expanded.add('/A');b.api.receive({type:'explorerFiles',path:'/A',entries:[{path:'/A/x',name:'x',kind:'file'}]});assert.equal(b.api.state.expanded.has('/A'),true);assert.equal(b.root.children[0].children[0].textContent.includes('<Phone>'),true);assert.equal(b.root.children[0].children.length,1)});
 test('Explorer protocol exposes tab and process selection ordering',()=>{const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'processes'});b.api.receive({type:'explorerProcesses',processes:[{pid:2,name:'z'},{pid:1,name:'A'}]});assert.equal(b.api.state.processes[0].pid,2);assert.equal(b.root.children.length>0,true);b.api.state.processSelected=1;b.ctx.document.dispatchEvent?.({})});
 // 通过真实文件行事件验证目录单击、空名称回退，以及独立拖放目标保留普通选择，避免无名项或悬停覆盖选择。
@@ -243,7 +253,9 @@ test('processes default to package name ordering',()=>{
 test('file table owns header and rows in one scroll container including empty state',()=>{
   const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files'});
   let list=b.root.children[1].children[2];assert.equal(list.className,'file-list');
-  assert.equal(list.children[0].className,'file-head');assert.equal(list.children[1].textContent,'Empty directory');
+  assert.equal(list.children[0].className,'file-head');assert.equal(b.root.children[2].textContent,'Loading');
+  b.api.receive({type:'explorerFiles',path:'/',entries:[]});
+  list=b.root.children[1].children[2];assert.equal(list.children[1].textContent,'Empty directory');
   b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/a',name:'a',kind:'file'}]});
   list=b.root.children[1].children[2];assert.equal(list.children[0].className,'file-head');assert.equal(list.children[1].className,'file-row');
   assert.equal(list.children.filter(e=>e.className==='file-head').length,1);

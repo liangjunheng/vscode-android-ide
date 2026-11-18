@@ -327,9 +327,6 @@ test('mirror loading ends on actual first frames and handles errors and reconnec
   c.setMode('emulator');
   assert.equal(c.frame.dataset.state, 'loading');
   assert.equal(f.nodes['placeholder-text'].textContent, '正在加载...');
-  f.message({ type: 'loading' });
-  assert.equal(c.frame.dataset.state, 'loading');
-  assert.equal(f.nodes.placeholder.hidden, false);
 });
 
 
