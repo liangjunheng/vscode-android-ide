@@ -52,7 +52,8 @@ test('Native manifest and F5 configuration do not require a JVM adapter', () => 
   assert.deepEqual(p.contributes.debuggers.map(d => d.type), ['android-tools', 'lldb']);
   assert.deepEqual(p.extensionDependencies, ['vadimcn.vscode-lldb']);
   const parent = p.contributes.debuggers[0];
-  assert.equal(parent.initialConfigurations[0].name, '[内置] Android Native'); assert.equal(parent.initialConfigurations[0].request, 'launch'); assert.equal(parent.initialConfigurations[0].androidMode, 'native');
+  const initial = parent.initialConfigurations[0];
+  assert.equal(initial.name, '[内置] Android Native'); assert.equal(initial.request, 'launch'); assert.equal(initial.androidMode, 'native'); assert.equal(initial.mode, 'native'); assert.equal(initial.target, 'select'); assert.deepEqual(initial.native, {});
   for (const entry of Object.values(parent.configurationAttributes)) {
     assert.deepEqual(entry.properties.androidMode.enum, ['native']);
     assert.equal(entry.properties.java, undefined); assert.equal(entry.properties.kotlin, undefined);
