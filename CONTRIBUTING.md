@@ -6,14 +6,14 @@ Thanks for helping! Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 
 - **Node.js 22+** and npm (`.nvmrc` pins 22; required by `@vscode/vsce` 4).
 - **VS Code 1.85+**.
-- **Android SDK** with `platform-tools`, `emulator`, `cmdline-tools` and at least one system image, to test against real emulators. Set `ANDROID_HOME` or the `android.sdkPath` setting.
+- **Android SDK** with `platform-tools`, `emulator`, `cmdline-tools` and at least one system image, to test against real emulators. Set `ANDROID_HOME` or `sdkPath` in the project-local `.vscode/android-ide.local.json`; machine paths are not VS Code settings.
 - Optional: a physical Android device with USB debugging, to test the scrcpy path.
 
 ## Getting started
 
 ```bash
 git clone <your fork>
-cd device-tools-for-android
+cd vscode-android-ide
 npm install
 npm run compile      # bundle src/ into dist/ with esbuild
 ```
@@ -50,4 +50,4 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 1. Update `version` in `package.json` and `CHANGELOG.md`.
 2. Tag `vX.Y.Z` and push the tag. The `Release` workflow publishes to the VS Code Marketplace (`VSCE_PAT` secret) and Open VSX (`OVSX_PAT` secret) and attaches the `.vsix` to a GitHub release.
-3. First time only: create the `MehdiBrahmi` publisher at https://marketplace.visualstudio.com/manage (it must match the `publisher` field in `package.json`).
+3. First time only: create the `liangjunheng` publisher at https://marketplace.visualstudio.com/manage (it must match the `publisher` field in `package.json`).

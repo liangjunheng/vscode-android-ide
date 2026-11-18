@@ -1,76 +1,121 @@
-# Device Tools for Android
+# VSCode Android IDE
 
-Device tooling for Android inside VS Code, inspired by the tools found in Android Studio: **Running Devices**, **Device Manager** and **Logcat**, without leaving your editor. Works with Flutter, Kotlin, React Native, or any project that targets Android.
-
-> Not affiliated with Google or JetBrains. "Android" is a trademark of Google LLC.
+VSCode Android IDE brings Android development tools into VS Code. Manage emulators and physical devices, mirror screens, browse files and processes, stream Logcat, and access debugger configuration entries without leaving the editor. The built-in debugger backend is temporarily unimplemented.
 
 ## Features
 
+### Devices and emulators
+
+- Discover Android emulators and connected devices through the Android SDK and adb.
+- Create, edit, start, cold boot, stop, wipe, and delete AVDs.
+- Pair physical devices over Wi-Fi.
+- Show device state, model, API level, transport type, authorization state, and errors.
+- Synchronize device selection across the picker, mirror, Explorer, Processes, and Logcat.
+
 ### Running Devices
 
-![Running Devices](media/screenshots/running-devices.png)
+- Mirror emulator screens through emulator gRPC.
+- Mirror physical devices through scrcpy with screenshot fallback.
+- Send touch, swipe, keyboard, back, home, overview, power, volume, rotation, screenshot, and recording actions.
+- Open emulator Extended Controls when supported.
+- Switch between Mirror, Files, Processes, and Hidden modes.
 
-- Live screen of Android emulators and physical devices, with touch, scroll, keyboard, back/home/overview, power, volume and rotation controls.
-- Emulators are streamed through the emulator gRPC API (same approach as Android Studio). Physical devices use scrcpy. A screenshot loop is the last resort.
-- **Device frame (skin)** around the screen when the AVD has one, toggled from the ⋮ menu.
-- Screenshot (with *Rectangular*, *Display Shape* or *Show Device Frame* when the AVD has a skin) and screen recording.
-- **Extended Controls** (location, battery, cellular…) opened natively when the emulator supports it.
-- `+` button to start a virtual device or pair a device over Wi-Fi.
+### Device Explorer and Processes
 
-### Device Manager
-
-![Device Manager](media/screenshots/device-manager.png)
-
-- Table of your AVDs and connected devices (name, API, type).
-- Create, edit, start, cold boot, stop, wipe data and delete AVDs.
-- Start/stop progress indicators, like Android Studio.
+- Browse remote Android file systems and transfer files or directories.
+- Create, rename, remove, download, upload, and open remote entries.
+- Preserve empty directories during recursive transfers.
+- Track debuggable processes through JDWP and show PID, package, VM, ABI, user ID, and debugger state.
+- Retain the debugger selection entry; built-in debugging is currently a placeholder. Stop processes, force-stop applications, clear app data, and uninstall packages.
 
 ### Logcat
 
-![Logcat](media/screenshots/logcat.png)
+- Stream Logcat from the selected device.
+- Search and filter by tag, package, process, message, line, level, age, crash, and stack trace.
+- Support exact, regex, negated, grouped, and combined filter expressions.
+- Use autocomplete, history, favorites, match-case, whole-word, and regex options.
+- Pause, restart, soft-wrap, navigate stack traces, take screenshots, and record the device screen.
+- Keep active and paused buffers bounded by a configurable UTF-8 byte limit.
 
-- **Search in the log** (`Cmd/Ctrl+F` or the magnifier button): highlights every match, shows the `n/total` counter, and jumps with `Enter` / `Shift+Enter` (or the arrows). Options: match case (`Cc`), whole word (`W`) and regex (`.*`).
-- Studio-like filter language: `tag:`, `package:`, `process:`, `message:`, `line:`, `level:`, `age:`, `is:crash`, `is:stacktrace`, with `=` (exact) and `~` (regex) variants, `-` negation, parentheses, `&`/`|`.
-- Autocompletion of keys and values (tags and packages seen in the logs), filter history with match counts, favorites, match case.
-- Standard and compact formats, soft-wrap, pause, restart, stack trace navigation, screenshot and recording buttons.
-- Soft-wrap uses the available log viewport without hiding older buffered lines. Scroll to the End is a selected follow-mode toggle; clicking a log or scrolling up exits follow mode. The find bar occupies only the log area, leaving the left toolbar in place.
+### Debugging
+
+- Keep the built-in Android debugger interface and Java/Kotlin registration available for future implementation.
+- Built-in Kotlin/Java, Native, and JVM+Native choices currently display an explicit not-implemented notice and do not start a debug backend.
+- Existing external launch configurations continue to use their VS Code debug adapters.
 
 ## Requirements
 
-- VS Code 1.95 or later (Chromium support for integer-aligned Logcat line heights).
-- The **Android SDK** (platform-tools, emulator, and cmdline-tools for creating AVDs). It is found through the `android.sdkPath` setting, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the default install location.
-- No other install is needed: scrcpy's server is bundled.
-- Tested on macOS (Apple Silicon). Linux and Windows are expected to work but are less tested.
+- VS Code 1.95 or later.
+- Node.js 22 or later for development and packaging.
+- Android SDK with platform-tools, emulator, and command-line tools.
+- An installed Android system image for emulator workflows.
+- A physical device with USB debugging for device workflows.
+- LLDB and NDK tools for native debugging features.
 
-## Settings
+The extension discovers the Android SDK from project-local configuration first, then ANDROID_HOME, ANDROID_SDK_ROOT, and standard installation locations. The scrcpy server is bundled.
 
-| Setting | Default | Description |
-|---|---|---|
-| `android.sdkPath` | `""` | Android SDK path. |
-| `android.embeddedEmulator` | `true` | Launch emulators without their own window (`-qt-hide-window -grpc <port>`) and show them in Running Devices. |
-| `android.fixSoftwareRendering` | `true` | Before launching an AVD with `hw.gpu.enabled=no` (the `avdmanager` default, very slow), switch it to host GPU by editing its `config.ini`. |
-| `android.mirrorIntervalMs` | `150` | Delay between captures in screenshot fallback mode. |
-| `android.logcat.maxBytes` | `1048576` (1 MiB) | UTF-8 message content budget per active/paused buffer; oldest records are evicted. Range: 65536 to 67108864 bytes. Reopen the Logcat view after changing. Replaces `android.logcat.maxEntries`. This is not a total JavaScript heap limit. |
+## Configuration
 
-## What the extension changes on your machine
+Settings, commands, and view IDs use the android-ide.* namespace exclusively. The previous android.* namespace is not supported.
 
-- Pushes `scrcpy-server` to `/data/local/tmp` on devices mirrored with scrcpy.
-- Launches emulators with `-grpc <free port>`. The gRPC endpoint is local only.
-- May edit `~/.android/avd/<name>.avd/config.ini` (GPU settings, see above). Disable with `android.fixSoftwareRendering`.
-- Reads emulator state from the SDK's `avd/running/*.ini` files (gRPC port and token, which are required to attach to emulators started by Android Studio).
-- No telemetry. No network access other than to your local emulators and `adb`.
+| Setting | Default | Purpose |
+|---|---:|---|
+| android-ide.embeddedEmulator | true | Start emulators without their own window and show them in Running Devices. |
+| android-ide.mirrorVisible | true | Enable the device mirror surface. |
+| android-ide.deviceViewMode | mirror | Select mirror, explorer, processes, or hidden. |
+| android-ide.explorer.packageFilter | false | Filter Explorer packages and processes by project application IDs. |
+| android-ide.mirrorIntervalMs | 150 | Screenshot fallback interval in milliseconds. |
+| android-ide.logcat.maxBytes | 1048576 | Logcat UTF-8 buffer limit from 65536 to 67108864 bytes. |
+| android-ide.fixSoftwareRendering | true | Enable host GPU settings for AVDs created with software rendering. |
+
+## Project-local configuration
+
+Machine-specific paths belong in .vscode/android-ide.local.json at the project root. The extension validates this file with its bundled schema. The file is ignored by source control and is not synchronized by VS Code Settings Sync.
+
+Example configuration fields: sdkPath, downloadDirectory, debugger.adbPath, debugger.lldbDapPath, and debugger.ndkPath. Relative paths resolve from the project root. Empty or missing values use automatic discovery and defaults.
+
+## Commands
+
+All extension commands use the android-ide.* prefix. Common commands include android-ide.refresh, android-ide.addDevice, android-ide.startAvd, android-ide.stopAvd, android-ide.createAvd, android-ide.deleteAvd, android-ide.mirrorDevice, android-ide.showLogcat, and android-ide.extendedControls.
+
+## Development
+
+```bash
+npm ci
+npm run compile
+npm run typecheck
+npm test
+```
+
+- npm run compile: bundle the extension with esbuild.
+- npm run watch: rebuild on source changes.
+- npm run typecheck: run strict TypeScript checking.
+- npm test: run the Node.js test suite.
+- npm run package: build the VSIX package.
+- npm run vscode:prepublish: typecheck, build production bundles, and verify runtime content.
+
+Press F5 in VS Code to launch an Extension Development Host. Reload the host after rebuilding when the extension bundle changes.
+
+## Safety and privacy
+
+- adb, emulator, SDK, and debugger tools run locally.
+- Explorer operations are scoped to the selected device and reject unsafe paths.
+- File transfers validate local and remote paths before writing.
+- No telemetry is sent. Network traffic is limited to local Android tooling and connected devices.
+- Do not commit project-local SDK paths, device logs, screenshots, or generated test artifacts.
 
 ## Troubleshooting
 
-- **Nothing in Device Manager**: set `android.sdkPath`, then run *Device Tools: Refresh*.
-- **Emulator feels slow**: make sure `android.fixSoftwareRendering` is on, or set `hw.gpu.mode=auto` in the AVD.
-- **Extended Controls open in a VS Code panel instead of the native window**: the emulator must be started by this extension (`-qt-hide-window`) or support the UI controller service.
-- **Physical device shows no live video**: authorize USB debugging on the device; otherwise the screenshot fallback is used.
+- If no devices appear, verify the Android SDK, adb authorization, and the project-local SDK path or environment variables.
+- If an emulator is slow, enable android-ide.fixSoftwareRendering or set the AVD GPU mode to auto.
+- If physical-device video is unavailable, authorize USB debugging and verify scrcpy support.
+- If a debugger cannot start, verify project-local adb, LLDB, NDK, and runtime tool paths.
+- If a setting appears ineffective, confirm that its key starts with android-ide. and reload the Extension Development Host.
 
-## Credits
+## Architecture
 
-Icons come from Android Studio and the IntelliJ Platform (Apache-2.0); see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Screen mirroring of physical devices uses [scrcpy](https://github.com/Genymobile/scrcpy).
+The TypeScript backend is under src/. Webview clients are under media/. Device communication is isolated behind SDK, adb, emulator gRPC, scrcpy, JDWP, and file-transfer modules. See docs/ARCHITECTURE.md for module boundaries and lifecycle details.
 
 ## License
 
-[MIT](LICENSE)
+MIT. Third-party licenses and notices are documented in NOTICE and THIRD_PARTY_NOTICES.md.

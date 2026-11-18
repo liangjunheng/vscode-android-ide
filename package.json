@@ -1,18 +1,18 @@
 {
-  "name": "vscode-android-tools-pro",
-  "displayName": "VSCode Android Tools Pro",
-  "description": "Mirror and control Android emulators and devices, manage virtual devices (AVDs) and browse Logcat without leaving VS Code.",
+  "name": "vscode-android-ide",
+  "displayName": "VSCode Android IDE",
+  "description": "A VS Code Android IDE for managing devices, emulators, Logcat, and debugging without leaving your editor.",
   "version": "1.0.0",
   "publisher": "liangjunheng",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MehdiBrahmi/vscode-device-tools-for-android.git"
+    "url": "https://github.com/liangjunheng/vscode-android-ide.git"
   },
   "bugs": {
-    "url": "https://github.com/MehdiBrahmi/vscode-device-tools-for-android/issues"
+    "url": "https://github.com/liangjunheng/vscode-android-ide/issues"
   },
-  "homepage": "https://github.com/MehdiBrahmi/vscode-device-tools-for-android#readme",
+  "homepage": "https://github.com/liangjunheng/vscode-android-ide#readme",
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#1e1f22",
@@ -53,7 +53,7 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc -p . --noEmit",
-    "vscode:prepublish": "npm run typecheck && node esbuild.js --production",
+    "vscode:prepublish": "npm run typecheck && node esbuild.js --production && node scripts/verify-runtime.mjs",
     "package": "vsce package",
     "test": "node --test tests/*.test.js",
     "clean": "rm -rf dist *.vsix"
@@ -79,64 +79,64 @@
       "androidTools": [
         {
           "type": "webview",
-          "id": "android.runningDevice",
+          "id": "android-ide.runningDevice",
           "name": "Device Tools"
         }
       ],
       "androidLogcat": [
         {
           "type": "webview",
-          "id": "android.logcat",
+          "id": "android-ide.logcat",
           "name": "Logcat"
         }
       ]
     },
     "commands": [
       {
-        "command": "android.refresh",
+        "command": "android-ide.refresh",
         "title": "Device Tools: Refresh",
         "icon": "$(refresh)"
       },
       {
-        "command": "android.createAvd",
+        "command": "android-ide.createAvd",
         "title": "Device Tools: Create Virtual Device",
         "icon": "$(add)"
       },
       {
-        "command": "android.startAvd",
+        "command": "android-ide.startAvd",
         "title": "Device Tools: Start Emulator",
         "icon": "$(play)"
       },
       {
-        "command": "android.coldBootAvd",
+        "command": "android-ide.coldBootAvd",
         "title": "Device Tools: Cold Boot Emulator"
       },
       {
-        "command": "android.stopAvd",
+        "command": "android-ide.stopAvd",
         "title": "Device Tools: Stop Emulator",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "android.editAvd",
+        "command": "android-ide.editAvd",
         "title": "Device Tools: Edit Virtual Device",
         "icon": "$(edit)"
       },
       {
-        "command": "android.wipeAvd",
+        "command": "android-ide.wipeAvd",
         "title": "Device Tools: Wipe Data"
       },
       {
-        "command": "android.deleteAvd",
+        "command": "android-ide.deleteAvd",
         "title": "Device Tools: Delete Virtual Device",
         "icon": "$(trash)"
       },
       {
-        "command": "android.mirrorDevice",
+        "command": "android-ide.mirrorDevice",
         "title": "Device Tools: Show in Running Devices",
         "icon": "$(device-mobile)"
       },
       {
-        "command": "android.pairDevice",
+        "command": "android-ide.pairDevice",
         "title": "Device Tools: Connect Device over Wi-Fi (adb connect)",
         "icon": {
           "light": "media/icons/pair-over-wifi-light.svg",
@@ -144,15 +144,15 @@
         }
       },
       {
-        "command": "android.showLogcat",
+        "command": "android-ide.showLogcat",
         "title": "Device Tools: Show Logcat"
       },
       {
-        "command": "android.extendedControls",
+        "command": "android-ide.extendedControls",
         "title": "Device Tools: Extended Controls"
       },
       {
-        "command": "android.addDevice",
+        "command": "android-ide.addDevice",
         "title": "Device Tools: Select Device",
         "icon": "$(device-mobile)"
       }
@@ -160,58 +160,92 @@
     "menus": {
       "view/title": [
         {
-          "command": "android.createAvd",
-          "when": "view == android.runningDevice",
+          "command": "android-ide.createAvd",
+          "when": "view == android-ide.runningDevice",
           "group": "navigation@1"
         },
         {
-          "command": "android.pairDevice",
-          "when": "view == android.runningDevice",
+          "command": "android-ide.pairDevice",
+          "when": "view == android-ide.runningDevice",
           "group": "navigation@2"
         },
         {
-          "command": "android.refresh",
-          "when": "view == android.runningDevice",
+          "command": "android-ide.refresh",
+          "when": "view == android-ide.runningDevice",
           "group": "navigation@3"
         }
       ]
     },
+    "debuggers": [
+      {
+        "type": "android-tools",
+        "label": "Android Tools JVM Debugger",
+        "languages": [
+          "java",
+          "kotlin"
+        ],
+        "initialConfigurations": []
+      }
+    ],
     "configuration": {
-      "title": "Device Tools for Android",
+      "title": "VSCode Android IDE",
       "properties": {
-        "android.sdkPath": {
-          "type": "string",
-          "default": "",
-          "description": "Android SDK path (defaults to ANDROID_HOME / ANDROID_SDK_ROOT / ~/Library/Android/sdk)."
-        },
-        "android.embeddedEmulator": {
+        "android-ide.embeddedEmulator": {
           "type": "boolean",
           "default": true,
           "description": "Start emulators without their own window and display them in the Running Devices view (gRPC)."
         },
-        "android.mirrorVisible": { "type": "boolean", "scope": "window", "default": true, "description": "Show device mirroring in Device Tools. The mirror toggle saves this setting and restores it after extension restart." },
-        "android.deviceViewMode": { "type": "string", "scope": "window", "enum": ["mirror", "explorer", "processes", "hidden"], "default": "mirror", "description": "Active Device Tools surface. Mirroring, Device Explorer files, and Processes are mutually exclusive; hidden closes all three. Explicit values take precedence over android.mirrorVisible." },
-        "android.explorer.downloadLocation": { "type": "string", "scope": "window", "default": "", "description": "Existing local directory for Device Explorer downloads. Empty uses the system Downloads directory." },
-        "android.explorer.packageFilter": { "type": "boolean", "scope": "window", "default": false, "description": "Filter Device Explorer app entries and processes by application IDs in the current project." },
-        "android.mirrorIntervalMs": {
+        "android-ide.mirrorVisible": {
+          "type": "boolean",
+          "scope": "window",
+          "default": true,
+          "description": "Show device mirroring in Device Tools. The mirror toggle saves this setting and restores it after extension restart."
+        },
+        "android-ide.deviceViewMode": {
+          "type": "string",
+          "scope": "window",
+          "enum": [
+            "mirror",
+            "explorer",
+            "processes",
+            "hidden"
+          ],
+          "default": "mirror",
+          "description": "Active Device Tools surface. Mirroring, Device Explorer files, and Processes are mutually exclusive; hidden closes all three. Explicit values take precedence over android-ide.mirrorVisible."
+        },
+        "android-ide.explorer.packageFilter": {
+          "type": "boolean",
+          "scope": "window",
+          "default": false,
+          "description": "Filter Device Explorer app entries and processes by application IDs in the current project."
+        },
+        "android-ide.mirrorIntervalMs": {
           "type": "number",
           "default": 150,
           "description": "Minimum delay between screen captures in the screenshot fallback mode (physical devices without scrcpy support)."
         },
-        "android.logcat.maxBytes": {
+        "android-ide.logcat.maxBytes": {
           "type": "number",
           "default": 1048576,
           "minimum": 65536,
           "maximum": 67108864,
           "description": "Maximum UTF-8 bytes of Logcat content kept in memory (default matches Android Studio)."
         },
-        "android.fixSoftwareRendering": {
+        "android-ide.fixSoftwareRendering": {
           "type": "boolean",
           "default": true,
           "description": "Before launching an AVD that has hw.gpu.enabled=no (the avdmanager default, very slow), switch it to host GPU rendering by editing its config.ini."
         }
       }
-    }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": [
+          "/.vscode/android-ide.local.json"
+        ],
+        "url": "./schemas/android-ide.local.schema.json"
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
@@ -222,7 +256,12 @@
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.7",
-    "@grpc/proto-loader": "^0.8.1"
+    "@grpc/proto-loader": "^0.8.1",
+    "@vscode/debugadapter": "1.68.0",
+    "@xmldom/xmldom": "0.9.12",
+    "long": "5.3.2",
+    "unzipper": "0.12.5",
+    "xpath": "0.0.36"
   },
   "author": {
     "name": "liangjunheng"
