@@ -305,8 +305,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private fallback(mode: Mode, reason: string) {
     this.stop();
     this.forced = mode;
-    this.post({ type: 'error', text: reason });
-    if (this.mirrorVisible && this.view?.visible) { void this.restart().then(() => this.post({ type: 'error', text: reason })).catch(error => this.post({ type: 'error', text: String(error) })); }
+    // 截图回退会进入新的加载态；不要把启动诊断写回投屏，避免初始化时错误文案覆盖投屏。
+    if (this.mirrorVisible && this.view?.visible) { void this.restart().catch(error => this.post({ type: 'error', text: String(error) })); }
   }
 
   private startScreencap() {
