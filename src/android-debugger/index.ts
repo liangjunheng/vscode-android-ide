@@ -89,12 +89,12 @@ export function findAndroidDebugConfiguration(folder?: vscode.WorkspaceFolder, a
 /**
  * 启动扩展已注册的调试后端；内置 android-tools 模式暂时只提示未实现并返回 undefined。
  * 前置条件：配置已通过 findAndroidDebugConfiguration，调用方已确认目标仍然存在；外部配置返回 false 时抛出拒绝错误。
- * 功能点与回归：Debug/Attach 统一经过此入口，拒绝时抛出可见错误，避免进程动作伪成功。
+ * 功能点与回归：node --test tests/debugger-stub.test.js 断言内置三模式提示/零启动，外部成功、拒绝与失败及订阅回收。
  */
 export async function startAndroidDebugging(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, target: AndroidDebugTarget): Promise<vscode.DebugSession | undefined> {
   // 内置调试器暂时保留源码但不启动后端；点击内置 Debug/Attach 只给出明确通知，不访问设备或创建调试资源。
   if (config?.type === 'android-tools') {
-    await vscode.window.showInformationMessage?.('Android 内置调试功能暂未实现');
+    await vscode.window.showInformationMessage('Android 内置调试功能暂未实现');
     return undefined;
   }
   if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
