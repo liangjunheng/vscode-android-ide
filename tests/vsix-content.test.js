@@ -15,7 +15,7 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
   fs.copyFileSync(path.join(__dirname, '../.vscodeignore'), path.join(root, '.vscodeignore'));
   const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
-  const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/jvm/src/debugMain.js', 'dist/extension.js.map', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'runtime/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE'];
+  const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/native-debugger/upstream/src/debugMain.js', 'dist/extension.js.map', 'dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'runtime/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE', 'android-debugger/jvm/adapter.js'];
   for (const file of included.concat(excluded)) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), file === 'README.md' ? '# Package fixture' : file === 'LICENSE' ? 'MIT License - Copyright (c) fixture' : 'fixture');
@@ -97,6 +97,7 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
   assert.equal([...files].some(name => name.startsWith('runtime/')), false);
   assert.equal(files.has('resources/scrcpy-server.jar'), false);
   assert.equal(files.has('resources/scrcpy-LICENSE.txt'), false);
+  for (const legacy of ['dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'android-debugger/jvm/adapter.js']) assert.equal(files.has(legacy), false, 'Legacy JVM asset leaked: ' + legacy);
   const output = path.join(os.tmpdir(), 'vscode-android-tools-runtime-' + process.pid + '.vsix');
   t.after(() => fs.rmSync(output, { force: true }));
   await vsce.createVSIX({ cwd: root, packagePath: output, dependencies: false });
@@ -107,6 +108,7 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
     for (const entry of info.dependencies.platformTools.files) assert.ok(archive.has('extension/resources/platform-tools/' + host + '/' + entry.path), 'archive omitted: ' + host + '/' + entry.path);
   }
   assert.equal([...archive].some(name => name.startsWith('extension/runtime/')), false);
+  for (const legacy of ['dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'android-debugger/jvm/adapter.js']) assert.equal(archive.has('extension/' + legacy), false, 'Legacy JVM archive leaked: ' + legacy);
   const unpacked = fs.mkdtempSync(path.join(os.tmpdir(), 'android-packaged-root-'));
   t.after(() => fs.rmSync(unpacked, { recursive: true, force: true }));
   const contents = await require('unzipper').Open.file(output);
@@ -118,7 +120,7 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
     if (relative.startsWith('runtime/') || relative.startsWith('media/') || relative.startsWith('resources/') || relative.startsWith('schemas/')) assert.deepEqual(bytes, fs.readFileSync(path.join(root, relative)), 'Development/package resource mismatch: ' + relative);
   }
   // 无源码、node_modules或SDK的临时安装根，执行真正生产bundle的激活，比较开发构建注册结果。
-  const development = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/extension.ts')], bundle: true, write: false, format: 'cjs', platform: 'node', external: ['vscode'] }).outputFiles[0].text;
+  const development = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/extension.ts')], bundle: true, write: false, format: 'cjs', platform: 'node', external: ['vscode', 'sharp'] }).outputFiles[0].text;
   const developmentState = await activateBundle(development, root);
   const productionState = await activateBundle(fs.readFileSync(path.join(unpacked, 'dist/extension.js'), 'utf8'), unpacked);
   assert.deepEqual(productionState, developmentState);
@@ -129,23 +131,37 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
 // 输入实际bundle文本和安装根，在宿主API边界替换VS Code但禁止访问源码相对模块；返回真实注册项。
 // Node>=22执行本文件：生产/开发注册项相同，资源逐字节相同，且停用后释放控制器。
 async function activateBundle(source, extensionPath) {
-  const state = { commands: [], views: [], debuggers: [] };
+  const state = { commands: [], views: [], debuggers: [], providers: [], dynamicNames: [] };
+  const factories = new Map();
   const disposable = () => ({ dispose() {} });
   const vscode = {
     Uri: { file: filename => ({ fsPath: filename }) },
     workspace: { isTrusted: true, workspaceFolders: [], getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: disposable },
-    window: { createOutputChannel: () => ({ appendLine() {}, dispose() {}, show() {} }), registerWebviewViewProvider: id => { state.views.push(id); return disposable(); } },
+    window: { createOutputChannel: () => ({ appendLine() {}, dispose() {}, show() {} }), registerWebviewViewProvider: id => { state.views.push(id); return disposable(); }, showErrorMessage: async () => undefined },
     commands: { registerCommand: id => { state.commands.push(id); return disposable(); } },
-    debug: { registerDebugAdapterDescriptorFactory: id => { state.debuggers.push(id); return disposable(); } },
+    DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
+    DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2},
+    debug: {
+      registerDebugAdapterDescriptorFactory: (id, factory) => { state.debuggers.push(id); factories.set(id, factory); return disposable(); },
+      registerDebugConfigurationProvider: (id,provider,trigger) => { state.providers.push(id); if(trigger===2) { assert.equal(provider.resolveDebugConfiguration,undefined); state.dynamicNames.push(...provider.provideDebugConfigurations().map(config=>config.name)); } return disposable(); },
+      onDidStartDebugSession: disposable,
+      onDidTerminateDebugSession: disposable,
+    },
   };
   const module = { exports: {} };
   new Function('module', 'exports', 'require', '__dirname', '__filename', source)(module, module.exports, id => {
     if (id === 'vscode') return vscode;
+    assert.notEqual(id, 'sharp', 'Activation must not load optional image binaries');
     assert.equal(id.startsWith('.'), false, 'Bundle tried to import a source module: ' + id);
     return require(id);
   }, path.join(extensionPath, 'dist'), path.join(extensionPath, 'dist/extension.js'));
   const context = { extensionPath, subscriptions: [] };
   module.exports.activate(context);
+  // 通过真实 Native 描述符等待异步注册结算，再释放父适配器；不创建后端进程或连接设备。
+  const descriptor = await factories.get('android-tools').createDebugAdapterDescriptor({ id: 'packaged-activation-check', configuration: {} });
+  await descriptor.implementation.dispose();
+  assert.deepEqual(state.providers.sort(), ['android-tools', 'android-tools', 'lldb']);
+  assert.deepEqual(state.dynamicNames,['[内置] Android Native']);
   for (const owned of context.subscriptions) await owned?.dispose?.();
   module.exports.deactivate();
   for (const entries of Object.values(state)) entries.sort();

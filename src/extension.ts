@@ -5,7 +5,7 @@ import { DeviceExplorerController } from './deviceExplorer';
 import { LogcatView } from './logcat';
 import { openExtendedControls } from './extendedControls';
 import { AndroidBuildController } from './androidBuild';
-import { createAndroidDebugAdapterFactory } from './android-debugger/jvm-debugger/adapter';
+import { createAndroidDebugAdapterFactory } from './android-debugger/native-debugger/adapter';
 import { initializeRuntimeContext, resetRuntimeContext } from './runtimeContext';
 
 // 注册共享设备区域及配置监听，以延迟只读闭包将 Build 当前选择提供给 Explorer；输入扩展上下文，订阅交其释放，无返回值。
@@ -44,7 +44,7 @@ export function activate(ctx: vscode.ExtensionContext) {
   const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined));
   const refresh = () => running.refresh().catch(error => vscode.window.showErrorMessage(String(error)));
   ctx.subscriptions.push(
-    vscode.debug.registerDebugAdapterDescriptorFactory('android-tools', createAndroidDebugAdapterFactory(ctx)),
+    vscode.debug.registerDebugAdapterDescriptorFactory('android-tools', createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined)),
     build, explorer, running,
     // 监听只应用不写回，订阅由ctx释放；device-view-mode/mirror-configuration回归断言过滤和错误展示。
     vscode.workspace.onDidChangeConfiguration(event => {

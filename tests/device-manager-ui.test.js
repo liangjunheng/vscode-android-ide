@@ -79,28 +79,30 @@ test('title selector replaces device list and registers only the mirror view', a
   assert.ok(runningSource.includes('id=\"tic-d\"') && runningSource.includes('id=\"tic-l\"'), 'leading device icons remain');
   const dropdowns = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
   assert.match(dropdowns, /select::picker\(select\)\{[^}]*min-width:anchor-size\(width\)/);
-  const handlers = {}, views = [], errors = [], debugRegistrations = [];
-  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { debugRegistrations.push([type, factory]); return { dispose() {} }; } } };
+  const handlers = {}, views = [], errors = [], debugRegistrations = [], debugProviders = [];
+  const vscode = { DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2}, workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; } }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { debugRegistrations.push([type, factory]); return { dispose() {} }; }, registerDebugConfigurationProvider: (type, provider, trigger) => { debugProviders.push([type, provider, trigger]); return { dispose() {} }; }, onDidStartDebugSession: () => ({ dispose() {} }), onDidTerminateDebugSession: () => ({ dispose() {} }) } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
-  // 通过真实TS转译加载JVM/Native/Mixed及自有runtime helper，确保完整依赖链可解析并注册真实工厂；本用例不启动后端或设备命令。
-  const localConfig = load('projectLocalConfig', { vscode });
-  const runtimeExecutable = load('android-debugger/runtimeExecutable', {});
-  const toolchain = load('android-debugger/toolchain', { vscode, '../projectLocalConfig': localConfig, './runtimeExecutable': runtimeExecutable });
-  const transport = load('android-debugger/dapTransport', {});
-  const smartSocket = load('adbSmartSocket', {});
-  const nativeToolchain = load('android-debugger/native-debugger/nativeToolchain', { '../runtimeExecutable': runtimeExecutable });
-  const nativeTarget = load('android-debugger/native-debugger/nativeTarget', {});
-  const nativeSymbols = load('android-debugger/native-debugger/nativeSymbols', {});
-  const ledgerBoundary = { openAdapterLedger: async () => undefined, reconcileAdapterLedger: async () => undefined };
-  const nativeAdapter = load('android-debugger/native-debugger/adapter', { vscode, '../../adbSmartSocket': smartSocket, '../toolchain': toolchain, '../dapTransport': transport, '../adapterLedger': ledgerBoundary, './nativeToolchain': nativeToolchain, './nativeTarget': nativeTarget, './nativeSymbols': nativeSymbols, '../../projectLocalConfig': localConfig, '../../sdk': { sdkRoot: () => 'sdk' } });
-  const mixedAdapter = load('android-debugger/jvm-native-debugger/adapter', { vscode, '../dapTransport': transport });
-  const adapter = load('android-debugger/jvm-debugger/adapter', { vscode, '../../adbSmartSocket': smartSocket, '../toolchain': toolchain, '../dapTransport': transport, '../native-debugger/adapter': nativeAdapter, '../jvm-native-debugger/adapter': mixedAdapter, '../adapterLedger': { openAdapterLedger: async () => undefined } });
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './android-debugger/jvm-debugger/adapter': adapter, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  // 通过真实 Native adapter 转译加载；仅隔离其直接上游/工具链边界，本用例不启动后端或设备命令。
+  const adapter = load('android-debugger/native-debugger/adapter', {
+    vscode,
+    '@vscode/debugadapter': { LoggingDebugSession: class {}, TerminatedEvent: class {}, OutputEvent: class {} },
+    '@vscode/debugprotocol': {},
+    '../index': load('android-debugger/index',{vscode}),
+    './upstream/src/android': {},
+    './upstream/src/targetPicker': { activate() {}, pickTarget: async () => ({ udid: 'phone' }), getLastOrPickTarget: async () => ({ udid: 'phone' }), getTargetFromUDID: async udid => ({ udid }), setCurrentTarget() {}, resetCurrentTarget() {} },
+    './upstream/src/debugConfigProvider': { AndroidDebugConfigurationProvider: class {}, LLDBDebugConfigurationProvider: class {} },
+    './upstream/src/debugAdapter': { DebugAdapterDescriptorFactory: class { createDebugAdapterDescriptor() {} } },
+    './upstream/src/targetCommand': { activate() {}, pickAndroidProcess() {}, getBestAbi() {}, getBestMappedAbi() {}, getPackageNameForPid: async () => 'app', resumeWaitingProcess() {}, setAbiResolutionInfo() {}, setProcessPickerInfo() {}, resetAbiResolutionInfo() {}, resetProcessPickerInfo() {} },
+    './nativeToolchain': { resolveNativeToolchain: () => ({ adb: 'adb', sdkRoot: '', ndkRoot: '' }) },
+    './nativeTarget': { resolveLauncherActivity: async () => 'MainActivity', adbExec: async () => '' },
+  });
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './android-debugger/native-debugger/adapter': adapter, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
   assert.deepEqual(views, ['android-ide.runningDevice', 'android-ide.logcat']);
-  // 回归调试注册接线：真实适配器解析后必须注册 android-tools 类型，不能以空模块或吞错跳过。
-  assert.equal(debugRegistrations.length, 1);
-  assert.equal(debugRegistrations[0][0], 'android-tools');
-  assert.equal(typeof debugRegistrations[0][1].createDebugAdapterDescriptor, 'function');
+  // extension 注册唯一 android-tools descriptor；factory 注册 Native providers/commands，不启动后端或设备命令。
+  assert.deepEqual(debugRegistrations.map(item => item[0]), ['android-tools']);
+  assert.deepEqual(debugProviders.map(item => item[0]).sort(), ['android-tools', 'android-tools', 'lldb'].sort());
+  const dynamic=debugProviders.find(item=>item[2]===2); assert.equal(dynamic[0],'android-tools'); assert.equal(dynamic[1].provideDebugConfigurations()[0].name,'[内置] Android Native'); assert.equal(dynamic[1].resolveDebugConfiguration,undefined);
+  assert.equal(typeof debugRegistrations.find(item => item[0] === 'android-tools')[1].createDebugAdapterDescriptor, 'function');
   await handlers['android-ide.refresh']();
   assert.match(errors[0], /adb unavailable/);
 });

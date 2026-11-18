@@ -6,10 +6,9 @@
 !LICENSE
 !NOTICE
 !THIRD_PARTY_NOTICES.md
-!dist/*.js
-!dist/*.json
-!dist/*.txt
-!dist/kotlin-debug-adapter.jar
+!dist/extension.js
+!dist/runtime-js-dependencies.json
+!dist/THIRD_PARTY_NOTICES.txt
 !media/*.*
 !media/!(screenshots)/**
 !resources/**

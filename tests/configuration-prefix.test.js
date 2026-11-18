@@ -10,7 +10,8 @@ test('compiler typecheck covers every extension source and excludes external mat
   const root=path.resolve(__dirname,'..'),source=path.join(root,'src'),compiler=path.join(path.dirname(require.resolve('typescript/package.json')),'bin','tsc');
   const result=require('node:child_process').spawnSync(process.execPath,[compiler,'--showConfig','-p',root],{encoding:'utf8'});assert.equal(result.status,0,result.stderr||result.stdout);
   const config=JSON.parse(result.stdout);assert.equal(config.compilerOptions.strict,true);assert.equal(path.resolve(root,config.compilerOptions.rootDir),source);
-  const expected=[...fs.globSync('src/**/*.ts',{cwd:root})].map(p=>path.resolve(root,p)).sort(),files=config.files.map(p=>path.resolve(root,p));
+  const snapshotRoots = ['src/android-debugger/native-debugger/upstream/'];
+  const expected=[...fs.globSync('src/**/*.ts',{cwd:root})].filter(p=>{const normalized=p.replaceAll(String.fromCharCode(92),'/');return !snapshotRoots.some(prefix=>normalized.startsWith(prefix));}).map(p=>path.resolve(root,p)).sort(),files=config.files.map(p=>path.resolve(root,p));
   assert.ok(expected.length>0);assert.deepEqual(files.sort(),expected);
   assert.ok(files.every(file=>{const relative=path.relative(source,file);return !relative.startsWith('..')&&!path.isAbsolute(relative);}));
 });
@@ -18,10 +19,14 @@ test('compiler typecheck covers every extension source and excludes external mat
 // npm test：清单仅注册新前缀的设置、命令和视图，调试配置归入debugger子空间。
 test('android-ide configuration schema replaces command and view identities', () => {
   const p = require('../package.json');
-  assert.deepEqual(Object.keys(p.contributes.configuration.properties).sort(), [
-    'deviceViewMode', 'embeddedEmulator', 'explorer.packageFilter',
-    'fixSoftwareRendering', 'logcat.maxBytes', 'mirrorIntervalMs', 'mirrorVisible',
-  ].map(key => 'android-ide.' + key).sort());
+  const properties = p.contributes.configuration.properties;
+  assert.deepEqual(Object.keys(properties).filter(key => key.startsWith('android-ide.')).sort(), [
+    'android-ide.deviceViewMode', 'android-ide.embeddedEmulator', 'android-ide.explorer.packageFilter',
+    'android-ide.fixSoftwareRendering', 'android-ide.logcat.maxBytes', 'android-ide.mirrorIntervalMs', 'android-ide.mirrorVisible',
+  ].sort());
+  const declaredSettings = new Set(['android-debug.sdkRoot', 'android-debug.ndkRoot', 'android-debug.abiSupported', 'android-debug.abiMap']);
+  for (const key of Object.keys(properties).filter(key => key.startsWith('android-debug.'))) assert.equal(declaredSettings.has(key), true, key);
+  assert.deepEqual([...declaredSettings].sort(), Object.keys(properties).filter(key => key.startsWith('android-debug.')).sort());
   assert.ok(p.contributes.commands.some(c => c.command === 'android-ide.refresh'));
   assert.ok(p.contributes.views.androidTools.some(v => v.id === 'android-ide.runningDevice'));
 });
@@ -72,12 +77,12 @@ test('runtime registers only android-ide commands and views', () => {
     vscode, './deviceManager': deviceManager,
     './runningDevices': { RunningDeviceView: Provider }, './deviceExplorer': { DeviceExplorerController: Provider },
     './androidBuild': { AndroidBuildController: Provider }, './logcat': { LogcatView: Provider },
-    './extendedControls': {}, './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) },
+    './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) },
   });
   extension.activate({ extensionPath: '', subscriptions: [] });
   const p = require('../package.json');
   for (const id of commands) assert.ok(id.startsWith('android-ide.'), id);
-  for (const c of p.contributes.commands) assert.ok(commands.has(c.command), c.command);
+  for (const c of p.contributes.commands.filter(c => c.command.startsWith('android-ide.'))) assert.ok(commands.has(c.command), c.command);
   const declared = Object.values(p.contributes.views).flat().map(view => view.id).sort();
   assert.deepEqual([...views].sort(), declared);
   for (const id of views) assert.ok(id.startsWith('android-ide.'), id);

@@ -161,38 +161,74 @@ test('process actions require owned rows and distinguish kill from force stop', 
   } finally { await f.close(); }
 });
 
-// 内置Attach保留三模式入口但只提示：在任意模型图下均不查询提供方、不创建会话或发布操作完成。
-test('Android attach built-in modes report placeholder before querying project models', async () => {
-  for (const mode of ['kotlin-java', 'native', 'jvm-native']) {
-    const f = await fixture({ quickPick: items => items.find(item => item.config?.androidMode === mode) });
-    try {
-      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
-      f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
-      assert.equal(f.posts.findLast(m => m.type === 'explorerState').capabilities.debug, true);
-      await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42, androidModuleRoot: '/forged', androidVariant: 'release' });
-      const picker = f.calls.find(call => call[0] === 'picker');
-      assert.deepEqual(picker[1].map(item => item.config.androidMode), ['kotlin-java', 'native', 'jvm-native']);
-      assert.deepEqual(f.calls.filter(call => call[0] === 'information'), [['information', 'Android 内置调试功能暂未实现']]);
-      assert.equal(f.calls.some(call => call[0] === 'debugProject' || call[0] === 'debug'), false);
-      assert.equal(f.posts.some(message => message.error || message.message === 'Process action complete'), false);
-    } finally { await f.close(); }
-  }
+// 内置 Native Attach 直接传递真实设备/PID/package/workspace root/canonical ABI；不查询 Build project model。
+test('Android attach built-in Native starts direct Run and Debug without project-model lookup', async () => {
+  const f = await fixture({ quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+  try {
+    await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+    f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app', abi: 'armeabi-v7a' }]);
+    await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42, androidModuleRoot: '/forged', androidVariant: 'release' });
+    const picker = f.calls.find(call => call[0] === 'picker');
+    assert.deepEqual(picker[1].map(item => item.config.androidMode), ['native']);
+    assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
+    const launched = f.calls.find(call => call[0] === 'debug')[2];
+    assert.equal(launched.type, 'android-tools'); assert.equal(launched.request, 'attach');
+    assert.equal(launched.androidMode, 'native'); assert.equal(launched.serial, 'phone');
+    assert.equal(launched.pid, 42); assert.equal(launched.processId, 42); assert.equal(launched.packageName, 'com.example.app');
+    assert.equal(launched.native.abi, 'armeabi-v7a');
+    assert.equal(launched.androidProjectRoot, f.temp);
+    assert.equal(launched.androidModuleRoot, undefined); assert.equal(launched.androidVariant, undefined); assert.equal(launched.androidSourceRoots, undefined);
+    const commandIndex = f.calls.findIndex(call => call[0] === 'command' && call[1] === 'workbench.view.debug');
+    const debugIndex = f.calls.findIndex(call => call[0] === 'debug');
+    assert.ok(commandIndex >= 0 && commandIndex < debugIndex);
+    assert.equal(f.posts.some(message => message.error || message.message === 'Process action complete'), false);
+  } finally { await f.close(); }
 });
 
-// 模型提供方尚未接入内置Attach：缺失、抛错及可选Native图均不能被访问，不能以空模型伪启动。
-test('Attach placeholder does not consume unavailable failing or native project models', async () => {
-  for (const provider of [undefined, async () => { throw new Error('Must not query placeholder model'); }, async () => ({ androidNativeModules: [] })]) {
-    let queries = 0;
-    const f = await fixture({ resolveDebugProject: provider === undefined ? undefined : async (...args) => { queries++; return provider(...args); } });
+// 未知包名交真实PID的Native provider解析，UI位数标签不能当ABI。
+test('Android attach forwards unknown package for device discovery and does not guess ABI display labels', async () => {
+  const f = await fixture({ resolveDebugProject: async () => { throw new Error('unknown package must not query an unrelated model'); }, quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+  try {
+    await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+    f.processState.onUpdate([{ pid: 42, name: 'unknown', abi: '64-bit (arm64)' }]);
+    await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+    const config = f.calls.find(call => call[0] === 'debug')[2];
+    assert.equal(config.pid, 42); assert.equal(config.serial, 'phone'); assert.equal(config.packageName, undefined); assert.equal(config.native.abi, undefined); assert.equal(config.androidProjectRoot, f.temp);
+    assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
+  } finally { await f.close(); }
+});
+
+// 内置Native Attach直接启动并忽略项目模型提供方；即使提供方缺失或失败，也不阻断真实会话。
+test('Android attach Native skips project-model lookup and starts a direct session', async () => {
+  const cases = [
+    { resolveDebugProject: undefined },
+    { resolveDebugProject: async () => { throw new Error('Gradle model must not be queried'); } },
+  ];
+  for (const options of cases) {
+    const f = await fixture({ ...options, quickPick: items => items.find(item => item.config?.androidMode === 'native') });
     try {
       await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
       f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
       await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
-      assert.equal(queries, 0); assert.equal(f.calls.some(call => call[0] === 'debug'), false);
-      assert.equal(f.calls.find(call => call[0] === 'information')[1], 'Android 内置调试功能暂未实现');
+      const launched = f.calls.find(call => call[0] === 'debug')[2];
+      assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
+      assert.equal(launched.type, 'android-tools'); assert.equal(launched.request, 'attach');
+      assert.equal(launched.androidMode, 'native'); assert.equal(launched.serial, 'phone');
+      assert.equal(launched.pid, 42); assert.equal(launched.processId, 42);
+      assert.equal(launched.packageName, 'com.example.app'); assert.equal(launched.androidProjectRoot, f.temp);
       assert.equal(f.posts.some(message => message.error), false);
     } finally { await f.close(); }
   }
+  const f = await fixture({ nativeModules: [], quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+  try {
+    await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+    f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
+    await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+    const launched = f.calls.find(call => call[0] === 'debug')[2];
+    assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
+    assert.equal(launched.androidMode, 'native'); assert.equal(launched.androidProjectRoot, f.temp);
+    assert.equal(launched.androidNativeModules, undefined);
+  } finally { await f.close(); }
 });
 
 // 配置选择仍是异步取消边界：选取期间PID消失、作用域取消或关闭选择，不得继续提示、查询模型或启动过期PID。
@@ -235,7 +271,7 @@ test('Attach project leaves external configurations and their project mapping un
 
 // 匹配注册也不等于会话成功，startDebugging=false须明确报错而非进程操作成功。
 test('Android debugger refusal remains a visible error with registered support',async()=>{
-  const f=await fixture({debugResult:false,quickPick:items=>items.find(item=>item.config?.type==='android')});try{f.config.launch.push({name:'Attach',type:'android',request:'attach'});f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app'}]);await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android debug adapter did not start/);assert.equal(f.posts.some(m=>m.message==='Process action complete'),false);}finally{await f.close();}
+  const f=await fixture({debugResult:false,quickPick:items=>items.find(item=>item.config?.type==='android')});try{f.config.launch.push({name:'Attach',type:'android',request:'attach'});f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app'}]);await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android debug (?:adapter|session) did not start/);assert.equal(f.posts.some(m=>m.message==='Process action complete'),false);}finally{await f.close();}
 });
 
 // 同设备切换只取消活动操作并独立保留连接，Files重放缓存不重复读取；旧tab消息仍拒绝，精确60秒释放见view-idle。

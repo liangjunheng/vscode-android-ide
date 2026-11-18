@@ -14,6 +14,11 @@ is in THIRD_PARTY_NOTICES.md. Main items:
 - media/codicons: Microsoft Codicons (CC-BY-4.0) and code (MIT).
 - media/logcat/fonts: JetBrains Mono, SIL Open Font License 1.1.
 - @grpc/grpc-js, @grpc/proto-loader: Apache License 2.0; protobufjs: BSD-3-Clause.
+- Android Debug Native source integration: MIT; its original source license is
+  retained under src/android-debugger/native-debugger/upstream and reproduced in
+  dist/THIRD_PARTY_NOTICES.txt. CodeLLDB is an external VS Code extension dependency.
+- The current bundled npm closure and precise license provenance are recorded in
+  dist/runtime-js-dependencies.json and dist/THIRD_PARTY_NOTICES.txt.
 
 "Android" and the Android robot are trademarks of Google LLC. This extension is not
 affiliated with, endorsed by, or sponsored by Google or JetBrains.

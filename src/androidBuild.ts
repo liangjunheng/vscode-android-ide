@@ -4,14 +4,15 @@ import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
 import { adbPath } from './sdk';
 import { selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
-import { discoverVariantSources, NativeSourceModule } from './android-debugger/projectModel';
+import { discoverVariantSources, NativeSourceModule } from './androidProjectModel';
 
 interface Project { id: string; label: string; root: string; wrapper: string; tasks: string[]; }
+interface ApkMetadata { applicationId: string; elements?: unknown; }
 interface Target { id: string; label: string; module: string; variant: string; assemble: string; install: string; }
 interface Operation { controller: AbortController; done: Promise<void>; }
 interface OwnedProcess { child: ChildProcess; closed: Promise<void>; termination?: Promise<void>; }
 /** 当前 Build 选择解析出的调试源码身份，不包含设备或会话状态。 */
-export interface AndroidDebugProject { androidProjectRoot: string; androidModuleRoot: string; androidVariant: string; androidSourceRoots: string[]; androidNativeModules?: NativeSourceModule[]; }
+export interface AndroidDebugProject { androidProjectRoot: string; androidModuleRoot: string; androidVariant: string; androidSourceRoots: string[]; androidNativeModules?: NativeSourceModule[]; packageName?: string; androidAbiSupported?: string[]; }
 const LIMIT = 256 * 1024;
 class Cancelled extends Error { constructor() { super('Operation cancelled'); } }
 
@@ -43,7 +44,7 @@ function buildTargets(tasks: string[]): Target[] {
 
 // 只解析所选项目/模块/变体的APK metadata；匹配缺失返回undefined，坏JSON/非法ID及IO故障原样抛错，不扫描其他模块。
 // 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言隔离、切换及缺失/损坏区别，metadata and launcher failures断言run/debug仍拒绝缺失。
-function applicationIdFor(project: Project, target: Target): string | undefined {
+function apkMetadataFor(project: Project, target: Target): ApkMetadata | undefined {
   const base = path.join(project.root, ...target.module.split(':'), 'build', 'outputs', 'apk');
   // 递归收集所选模块APK目录内metadata路径；目录不存在为空，其他IO异常不吞，current application ID回归覆盖缺失与多变体。
   const visit = (dir: string): string[] => {
@@ -57,12 +58,33 @@ function applicationIdFor(project: Project, target: Target): string | undefined 
     const meta = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (String(meta.variantName || meta.variant || '').toLowerCase() !== target.variant.toLowerCase()) continue;
     if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(meta.applicationId || '')) throw new Error('Invalid applicationId in ' + file);
-    return meta.applicationId;
+    return meta;
   }
   return undefined;
 }
 
-// 构建运行/调试要求已有所选目标metadata，缺失必须抛错；输入项目/目标，输出唯一包名，不将缺失伪装成功。
+// 保留其他调用方的只读包名契约；android-build.test.js验证多根/模块/变体选择与坏metadata传播。
+function applicationIdFor(project: Project, target: Target): string | undefined { return apkMetadataFor(project, target)?.applicationId; }
+
+// 仅从完整ABI split输出集合读取构建约束；universal/缺失保持未知，不用单个split误判整个应用。
+// 回归：node --test tests/android-build.test.js验证split、universal、缺失及非法ABI，Native provider再结合设备实际ABI。
+function nativeAbisFor(meta: ApkMetadata | undefined): string[] | undefined {
+  if (meta?.elements === undefined) return undefined;
+  if (!Array.isArray(meta.elements)) throw new Error('Invalid Native APK elements metadata');
+  const abis = new Set<string>();
+  for (const element of meta.elements) {
+    if (!element || typeof element !== 'object') throw new Error('Invalid Native APK output metadata');
+    if (element.filters === undefined) return undefined;
+    if (!Array.isArray(element.filters)) throw new Error('Invalid Native APK filters metadata');
+    const filters = element.filters.filter((filter: any) => filter?.filterType === 'ABI');
+    if (!filters.length) return undefined;
+    if (filters.length !== 1 || !['armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'].includes(filters[0].value)) throw new Error('Invalid Native APK ABI metadata');
+    abis.add(filters[0].value);
+  }
+  return abis.size ? [...abis] : undefined;
+}
+
+// 构建运行/外部调试要求所选目标metadata；Native允许先从AGP/设备自动解析。
 // 回归：Node>=22，node --test tests/android-build.test.js；metadata and launcher failures验证run/debug缺失报错，run installs selected package验证所选包名及顺序。
 function packageFor(project: Project, target: Target): string {
   const applicationId = applicationIdFor(project, target);
@@ -87,15 +109,30 @@ export class AndroidBuildController implements vscode.Disposable {
   // 保存状态出口并创建输出；npm test output 回归断言显示、截断及释放。
   constructor(private post: (message: any) => void) { this.output = vscode.window.createOutputChannel('Android Build'); }
 
-  // 只读取得当前项目/模块/变体的APK applicationId；无有效选择/对应metadata返回undefined供Explorer候选fallback，释放/不可信/坏metadata仍抛错。
+  // 只读所选项目/模块/变体applicationId，可限定所属workspace；未知交Native/Explorer后备解析，真实故障不吞。
   // 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言多根/模块/变体隔离、切换、零副作用、缺失undefined及真实故障抛错。
-  currentApplicationId(): string | undefined {
+  private currentApkMetadata(workspaceRoot?: string): ApkMetadata | undefined {
     if (this.disposed) throw new Error('Android build controller is disposed');
     if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
     const project = this.projects.find(p => p.id === this.projectId);
     const target = buildTargets(project?.tasks || []).find(t => t.id === this.targetId);
     if (!project || !target) return undefined;
-    return applicationIdFor(project, target);
+    if (workspaceRoot !== undefined) {
+      const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
+      if (!owner || path.resolve(owner.uri.fsPath) !== path.resolve(workspaceRoot)) return undefined;
+    }
+    return apkMetadataFor(project, target);
+  }
+
+  // 只读包名，不因Native ABI筛选改变Explorer行为；android-build.test.js验证当前ID与workspace隔离。
+  currentApplicationId(workspaceRoot?: string): string | undefined { return this.currentApkMetadata(workspaceRoot)?.applicationId; }
+
+  // 给Native提供一次读取的所选Gradle包名/ABI约束；android-build.test.js验证split/universal与错误传播。
+  currentNativeDebugMetadata(workspaceRoot?: string): { packageName: string; abiSupported?: string[] } | undefined {
+    const metadata = this.currentApkMetadata(workspaceRoot);
+    if (!metadata) return undefined;
+    const abiSupported = nativeAbisFor(metadata);
+    return { packageName: metadata.applicationId, ...(abiSupported ? { abiSupported } : {}) };
   }
 
   // 发布后端拥有的完整快照；npm test refresh/install/run/error 断言选择和状态。
@@ -190,28 +227,31 @@ export class AndroidBuildController implements vscode.Disposable {
     if (!targets.some(t => t.id === this.targetId)) this.targetId = targets.find(t => t.variant.toLowerCase() === 'debug')?.id || targets[0]?.id || '';
   }
 
-  // 由统一调试选择器展示内置三模式和已注册外部配置；取消不触发安装或调试。
+  // 由统一调试选择器展示内置Native和外部配置；取消不触发安装或调试。回归：android-build.test.js。
   private async debugConfiguration(project: Project): Promise<vscode.DebugConfiguration | undefined> {
     const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
     return selectAndroidDebugConfiguration(folder);
   }
 
   /**
-   * 读取精确项目/模块/变体的 AGP 模型，返回现存 Java/Kotlin 根、真实 moduleRoot 和可选 Native 依赖图身份；不重建路径。
+   * 读取精确AGP模型的applicationId、源码根、moduleRoot和Native图；已知APK包名必须匹配，未知时优先AGP包名。
    * nativeModules 缺失保持未知/旧契约，显式 [] 保持已知无 Native 模块；不构建、不安装、不猜约定目录。
    * 回归：node --test tests/android-build.test.js；source discovery/provider native graph 用例验证精确身份、缺失/空图、ID冲突、IO失败与取消。
    */
-  private async discoverDebugProject(operation: Operation, project: Project, target: Target, packageName: string): Promise<AndroidDebugProject> {
+  private async discoverDebugProject(operation: Operation, project: Project, target: Target, packageName?: string): Promise<AndroidDebugProject> {
     const variant = target.variant[0].toLowerCase() + target.variant.slice(1);
     const model = await discoverVariantSources({ projectRoot: project.root, modulePath: target.module ? ':' + target.module : ':', variant, wrapper: project.wrapper },
       (command: string, args: string[], cwd: string) => this.run(operation, command, args, cwd, process.env, args[1]), operation.controller.signal);
     this.check(operation);
-    if (model.applicationId !== undefined && model.applicationId !== packageName) throw new Error('Source index applicationId does not match selected APK metadata');
+    if (packageName !== undefined && model.applicationId !== undefined && model.applicationId !== packageName) throw new Error('Source index applicationId does not match selected APK metadata');
     const androidSourceRoots = model.roots.filter(root => root.kind === 'java' || root.kind === 'kotlin').flatMap(root => {
       try { if (!fs.statSync(root.path).isDirectory()) throw new Error('Android source root is not a directory: ' + root.path); return [root.path]; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
     });
+    const androidAbiSupported = nativeAbisFor(apkMetadataFor(project, target));
     return { androidProjectRoot: project.root, androidModuleRoot: model.moduleRoot, androidVariant: variant, androidSourceRoots,
+      ...(androidAbiSupported ? { androidAbiSupported } : {}),
+      ...((model.applicationId ?? packageName) ? { packageName: model.applicationId ?? packageName } : {}),
       ...(model.nativeModules === undefined ? {} : { androidNativeModules: model.nativeModules }) };
   }
 
@@ -255,7 +295,8 @@ export class AndroidBuildController implements vscode.Disposable {
     return result!;
   }
 
-  // 执行所选项目/模块/变体任务；node --test tests/android-build.test.js断言安装顺序、设备包名及内置调试会话的源码归属，自定义配置不注入内部模块字段。
+  // 内置Native直接调试现有应用，只读metadata且不运行Gradle安装/源码发现；其他动作保留原流程。
+  // 回归：Node>=22运行node --test tests/android-build.test.js，断言内置零Gradle/零模型、准确设备包名/ABI、缺metadata设备解析及取消/停止。
   private async execute(operation: Operation, action: string, serial?: string): Promise<string> {
     if (action === 'refresh') { await this.discover(operation); return this.projects.length ? 'Ready' : 'No Gradle project'; }
     const project = this.projects.find(p => p.id === this.projectId);
@@ -266,44 +307,46 @@ export class AndroidBuildController implements vscode.Disposable {
     const config = action === 'debug' ? await this.debugConfiguration(project) : undefined;
     this.check(operation);
     if (action === 'debug' && !config) return 'Debug cancelled';
-    // 内置后端暂为空实现：在任何设备安装或源码发现前明确告知用户；debugger-stub/build 回归断言无会话和无设备副作用。
-    if (action === 'debug' && config!.type === 'android-tools') {
-      await startAndroidDebugging(vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root)), config!, { serial });
-      return 'Android 内置调试功能暂未实现';
-    }
     const online = await this.run(operation, adbPath(), ['-s', serial, 'get-state'], project.root);
     if (online.trim() !== 'device') throw new Error('Device is not online: ' + serial);
-    await this.run(operation, project.wrapper, [target.install, '--console=plain'], project.root, { ...process.env, ANDROID_SERIAL: serial });
+    const nativeDebug = action === 'debug' && config?.type === 'android-tools';
+    if (!nativeDebug) await this.run(operation, project.wrapper, [target.install, '--console=plain'], project.root, { ...process.env, ANDROID_SERIAL: serial });
     if (action === 'install') return 'Install succeeded';
-    const packageName = packageFor(project, target);
+    const metadata = nativeDebug ? apkMetadataFor(project, target) : undefined;
+    let packageName = nativeDebug ? config!.packageName ?? metadata?.applicationId : packageFor(project, target);
     this.check(operation);
     if (action === 'run') {
+      if (!packageName) throw new Error('No applicationId for selected variant');
       const result = await this.run(operation, adbPath(), ['-s', serial, 'shell', 'monkey', '-p', packageName, '-c', 'android.intent.category.LAUNCHER', '1'], project.root);
       if (/monkey aborted|no activities found|error:/i.test(result)) throw new Error(result);
     } else {
       const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
       let debugConfig = config!;
-      if (config!.type === 'android-tools') debugConfig = { ...config!, ...await this.discoverDebugProject(operation, project, target, packageName) };
+      if (nativeDebug) {
+        const abiSupported = config!.androidAbiSupported ?? nativeAbisFor(metadata);
+        debugConfig = { ...config!, androidProjectRoot: config!.androidProjectRoot ?? project.root, ...(abiSupported ? { androidAbiSupported: abiSupported } : {}) };
+      }
+      packageName ||= debugConfig.packageName;
       const requested = { ...debugConfig, serial, packageName };
       const listener = vscode.debug.onDidStartDebugSession(session => {
-        if (session.configuration.name === requested.name && session.configuration.type === requested.type && session.configuration.serial === serial && session.configuration.packageName === packageName) this.debugSession = session;
+        if (session.configuration.name === requested.name && session.configuration.type === requested.type && session.configuration.serial === serial && (packageName === undefined || session.configuration.packageName === packageName)) this.debugSession = session;
       });
       try {
         const mode = config!.androidMode === 'kotlin-java' || config!.androidMode === 'native' || config!.androidMode === 'jvm-native'
           ? config!.androidMode
           : undefined;
-        this.debugSession = await startAndroidDebugging(folder, debugConfig, { serial, packageName, ...(mode ? { mode } : {}) });
+        this.debugSession = await startAndroidDebugging(folder, debugConfig, { serial, packageName, signal: operation.controller.signal, ...(mode ? { mode } : {}) });
         const ok = !!this.debugSession;
-        if (!ok) {
-          if (requested.type === 'android-tools') return 'Android 内置调试功能暂未实现';
-          throw new Error('Debug adapter rejected the configuration.');
-        }
+        if (!ok) throw new Error('Debug adapter rejected the configuration.');
+        packageName ||= this.debugSession?.configuration.packageName;
+        if (!packageName) throw new Error('Debug session did not resolve applicationId');
         this.check(operation);
       } catch (error) {
         if (this.debugSession) { await vscode.debug.stopDebugging(this.debugSession); this.debugSession = undefined; }
         throw error;
       } finally { listener.dispose(); }
     }
+    if (!packageName) throw new Error('No applicationId for selected variant');
     this.launched = { serial, packageName, cwd: project.root };
     return action === 'debug' ? 'Debug started' : 'Running';
   }

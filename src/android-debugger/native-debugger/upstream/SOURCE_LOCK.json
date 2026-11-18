@@ -1,0 +1,66 @@
+{
+  "source": "E:/vscode-android-debug-main",
+  "upstreamCommit": "unavailable-working-tree",
+  "algorithm": "sha256",
+  "files": [
+    {
+      "path": "source/src/android.ts",
+      "sha256": "2189c227d14a805b81f935c9207fef9e287d42e898df9b32bd2cb975e31e8550"
+    },
+    {
+      "path": "source/src/androidPaths.ts",
+      "sha256": "4744916417280f7beeddf45db878abc499e4835dee749da3fa749eaf33966eb5"
+    },
+    {
+      "path": "source/src/commonTypes.ts",
+      "sha256": "6acec00313958bf1e83e1eb41e23c4b7f393deca8fc68d19ad12a5530969edc9"
+    },
+    {
+      "path": "source/src/debugAdapter.ts",
+      "sha256": "c120bd949f6efe2bd845f4245129065e4f1794cc45301e7b148e0255d07006a0"
+    },
+    {
+      "path": "source/src/debugConfigProvider.ts",
+      "sha256": "0d569c7580112b31da1698fb81b83f660a36f5bf3d85074794946ef995c5db77"
+    },
+    {
+      "path": "source/src/debugLifecycleManager.ts",
+      "sha256": "ef673b8dc76ae43f0f716e0444a1e1926f7b66c9154ff4e768012609ced7d743"
+    },
+    {
+      "path": "source/src/extensionDependencies.ts",
+      "sha256": "0a4ef4e2953dd07e6858117558535153e3e8c3976da121174bafc0f7e3c8a5d3"
+    },
+    {
+      "path": "source/src/jdwp.ts",
+      "sha256": "b4868528f95a147d74263f365a9737f887c162081cf345b8707c048b8a6b5f6d"
+    },
+    {
+      "path": "source/src/logger.ts",
+      "sha256": "710fc864d4391eaa54d1f745442ead242049e6ccdfb941e4196cf566d510d0a6"
+    },
+    {
+      "path": "source/src/targetCommand.ts",
+      "sha256": "1fb0eb97d597ccfb5724eee38a19884b679a79369e7ca448911cf95cefb0b786"
+    },
+    {
+      "path": "source/src/targetPicker.ts",
+      "sha256": "32f1ec0d128a64c92c30ebe1fbc93244c5d836719b89a9e980fb830b22ca45f5"
+    },
+    {
+      "path": "source/src/utils.ts",
+      "sha256": "06460a6e9b311d535e0f223556d539606f53b9c69dd27a4f44caa0e800b636e7"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "baa73fd2bb93e4674b871b0674da9ce894eedbd7ef7d95433626bbc3fd465946"
+    }
+  ],
+  "adaptations": [
+    "Native parent uses the migrated original DebugAdapterDescriptorFactory and DebugAdapter method structure; only the Native branch is active. Host callbacks prepare and release CodeLLDB server resources.",
+    "launchActivity is resolved through cmd package when omitted.",
+    "ADB/NDK resolution delegates to this extension sdk.ts/projectLocalConfig.",
+    "cleanup waits server/forward and aggregates errors; no swallowed failure.",
+    "JVM/Kotlin/profiler are excluded from native registration."
+  ]
+}

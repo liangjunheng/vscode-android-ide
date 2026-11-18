@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { DeviceExplorerProcesses, ExplorerProcess } from './deviceExplorerProcesses';
 import { selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
-import type { NativeSourceModule } from './android-debugger/projectModel';
+import type { NativeSourceModule } from './androidProjectModel';
 
 /** Build 提供的精确项目模型及可选运行时Native依赖；Attach project回归断言身份/signal和nativeModules缺失、空数组及原始producer元组贯穿提供方。 */
 
@@ -77,7 +77,8 @@ export class ProcessesController {
   // 只释放自己已有的tracker，不等待当前创建任务自身；view-idle回归验证stop只执行一次。
   private async stopTracker(): Promise<void> { const stop = this.stopWatching; this.stopWatching = undefined; await stop?.(); }
 
-  // 动作使用激活signal；内置Attach仅提示暂未实现，外部配置不注入项目字段；controller/stub回归断言无内置启动、外部会话及PID归属。
+  // 动作使用激活signal；内置Native Attach直接绑定设备/PID，不查询Gradle模型，外部配置不注入项目字段。
+  // 回归：Node>=22运行 node --test tests/device-explorer-controller.test.js，断言Native零模型查询、设备/PID/ABI、外部隔离及取消。
   async handle(message: any, signal: AbortSignal = this.signal): Promise<void> {
     this.check(signal);
     if (!ProcessesController.handles(message.action)) { throw new Error('Unknown Processes action'); }
@@ -91,14 +92,15 @@ export class ProcessesController {
       this.check(signal);
       if (!this.rows.includes(row)) { throw new Error('Selected process is no longer available'); }
       if (!config) return;
-      const selected = config;
+      let selected = config;
       if (config.type === 'android-tools') {
-        // 保留内置 Attach 入口，暂不发现模型或创建调试会话；debugger-stub 回归核验提示且零后端调用。
-        await startAndroidDebugging(folder, config, { serial: this.serial, pid: row.pid, packageName: row.packageName });
-        return;
+        // 直接附加现有进程，不为调试触发Gradle源码模型；符号目录保留配置原值。
+        selected = { ...config, androidProjectRoot: config.androidProjectRoot ?? folder.uri.fsPath };
+        const abi = row.abi && ['armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'].includes(row.abi) ? row.abi : undefined;
+        if (abi && (!selected.native?.abi || selected.native.abi === 'select')) selected = { ...selected, native: { ...selected.native, abi } };
       }
-      const mode = config.type === 'android-tools' && (config.androidMode === 'kotlin-java' || config.androidMode === 'native' || config.androidMode === 'jvm-native') ? config.androidMode : undefined;
-      await startAndroidDebugging(folder, selected, { serial: this.serial, processId: row.pid, pid: row.pid, packageName: row.packageName, ...(mode ? { mode } : {}) });
+      const mode = selected.type === 'android-tools' && (selected.androidMode === 'kotlin-java' || selected.androidMode === 'native' || selected.androidMode === 'jvm-native') ? selected.androidMode : undefined;
+      await startAndroidDebugging(folder, selected, { serial: this.serial, processId: row.pid, pid: row.pid, packageName: row.packageName, signal, ...(mode ? { mode } : {}) });
       return;
     }
     const answer = await vscode.window.showWarningMessage(message.action + ' ' + (row.name || row.pid) + '?', { modal: true }, 'Continue');

@@ -6,5 +6,8 @@
 
 # Vendored payload hashes require exact upstream bytes on every checkout.
 resources/platform-tools/*/* -text
+resources/licenses/** -text
+src/android-debugger/native-debugger/upstream/source/** -text
+src/android-debugger/native-debugger/upstream/LICENSE -text
 # Upstream license documents are opaque payloads, not locally formatted text.
 resources/platform-tools/*/NOTICE.txt -diff

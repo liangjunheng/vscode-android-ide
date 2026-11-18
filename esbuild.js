@@ -11,7 +11,8 @@ const options = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
   outfile: 'dist/extension.js',
-  external: ['vscode'],
+  // Appium 将图像处理作为可选功能延迟 require；调试器不调用它，保留缺少 sharp 时原有的明确错误。
+  external: ['vscode', 'sharp'],
   format: 'cjs',
   platform: 'node',
   target: 'node18',
@@ -21,7 +22,6 @@ const options = {
   metafile: true,
 };
 
-// 内置 debugger 暂时为空实现；保留调试源文件以便恢复，不将其后端加入默认扩展构建。
 const builds = [options];
 // 汇总当前扩展入口的输入闭包，输出离线许可全文与索引；失败会阻止构建和发布。
 function noticesPlugin(entry) {
@@ -35,7 +35,9 @@ function noticesPlugin(entry) {
         completedMetafiles.set(entry, result.metafile);
         if (completedMetafiles.size !== builds.length) return;
         const notices = buildBundledNotices(process.cwd(), [...completedMetafiles.values()]);
-        fs.writeFileSync(path.join('dist', 'THIRD_PARTY_NOTICES.txt'), notices.text);
+        // Native 源码许可随当前 bundle 发布；native-build.test.js 断言全文与缺失许可阻断。
+        const nativeLicense = fs.readFileSync('src/android-debugger/native-debugger/upstream/LICENSE', 'utf8');
+        fs.writeFileSync(path.join('dist', 'THIRD_PARTY_NOTICES.txt'), notices.text + '\n## Android Native Debugger\n\n' + nativeLicense);
         fs.writeFileSync(path.join('dist', 'runtime-js-dependencies.json'), JSON.stringify({ schemaVersion: 1, packages: notices.packages }, null, 2));
       });
     },

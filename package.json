@@ -50,9 +50,15 @@
     "vscjava.vscode-java-debug",
     "vscjava.vscode-gradle"
   ],
+  "extensionDependencies": [
+    "vadimcn.vscode-lldb"
+  ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onDebugResolve:android-tools",
+    "onDebugDynamicConfigurations:android-tools",
+    "onDebugResolve:lldb"
   ],
   "scripts": {
     "compile": "node esbuild.js",
@@ -160,6 +166,11 @@
         "command": "android-ide.addDevice",
         "title": "Device Tools: Select Device",
         "icon": "$(device-mobile)"
+      },
+      {
+        "command": "android-debug.resumeWaitingProcess",
+        "title": "Resume process waiting for debugger",
+        "category": "Android Debug"
       }
     ],
     "menus": {
@@ -184,12 +195,356 @@
     "debuggers": [
       {
         "type": "android-tools",
-        "label": "Android Tools JVM Debugger",
+        "label": "Android Native",
         "languages": [
-          "java",
-          "kotlin"
+          "c",
+          "cpp"
         ],
-        "initialConfigurations": []
+        "variables": {
+          "pickAndroidProcess": "android-debug.pickAndroidProcess",
+          "abi": "android-debug.getBestAbi",
+          "mappedAbi": "android-debug.getBestMappedAbi"
+        },
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "serial": {
+                "type": "string",
+                "description": "Android device serial. Omit to select a device."
+              },
+              "pid": {
+                "type": [
+                  "integer",
+                  "string"
+                ],
+                "description": "Process id for attach."
+              },
+              "processId": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "packageName": {
+                "type": "string"
+              },
+              "launchActivity": {
+                "type": "string"
+              },
+              "apkPath": {
+                "type": "string"
+              },
+              "androidMode": {
+                "type": "string",
+                "enum": [
+                  "native"
+                ],
+                "default": "native"
+              },
+              "androidProjectRoot": {
+                "type": "string"
+              },
+              "androidSourceRoots": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "native": {
+                "description": "Configuration for native debugger.",
+                "type": "object",
+                "properties": {
+                  "abiSupported": {
+                    "description": "List of ABIs supported by the app",
+                    "type": "array",
+                    "items": {
+                      "enum": [
+                        "armeabi",
+                        "armeabi-v7a",
+                        "arm64-v8a",
+                        "x86",
+                        "x86_64"
+                      ]
+                    },
+                    "default": [
+                      "armeabi-v7a",
+                      "arm64-v8a",
+                      "x86",
+                      "x86_64"
+                    ]
+                  },
+                  "abi": {
+                    "description": "The ABI to be used in case of split APKs.",
+                    "enum": [
+                      "select",
+                      "armeabi",
+                      "armeabi-v7a",
+                      "arm64-v8a",
+                      "x86",
+                      "x86_64"
+                    ]
+                  },
+                  "abiMap": {
+                    "description": "Map android ABI to custom strings, use with ${command:mappedAbi}.",
+                    "type": "object",
+                    "properties": {
+                      "armeabi": {
+                        "type": "string"
+                      },
+                      "armeabi-v7a": {
+                        "type": "string"
+                      },
+                      "arm64-v8a": {
+                        "type": "string"
+                      },
+                      "x86": {
+                        "type": "string"
+                      },
+                      "x86_64": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "symbolSearchPaths": {
+                    "description": "List of paths to where your unstripped so files are located.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "target": {
+                "type": "string",
+                "description": "Android serial, select, or last-selected."
+              },
+              "resumeProcess": {
+                "type": "boolean",
+                "description": "Resume a waiting VM after Native attach. Defaults to true for launch and false for attach."
+              }
+            }
+          },
+          "launch": {
+            "properties": {
+              "serial": {
+                "type": "string",
+                "description": "Android device serial. Omit to select a device."
+              },
+              "pid": {
+                "type": [
+                  "integer",
+                  "string"
+                ],
+                "description": "Process id for attach."
+              },
+              "processId": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "packageName": {
+                "type": "string"
+              },
+              "launchActivity": {
+                "type": "string"
+              },
+              "apkPath": {
+                "type": "string"
+              },
+              "androidMode": {
+                "type": "string",
+                "enum": [
+                  "native"
+                ],
+                "default": "native"
+              },
+              "androidProjectRoot": {
+                "type": "string"
+              },
+              "androidSourceRoots": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "native": {
+                "description": "Configuration for native debugger.",
+                "type": "object",
+                "properties": {
+                  "abiSupported": {
+                    "description": "List of ABIs supported by the app",
+                    "type": "array",
+                    "items": {
+                      "enum": [
+                        "armeabi",
+                        "armeabi-v7a",
+                        "arm64-v8a",
+                        "x86",
+                        "x86_64"
+                      ]
+                    },
+                    "default": [
+                      "armeabi-v7a",
+                      "arm64-v8a",
+                      "x86",
+                      "x86_64"
+                    ]
+                  },
+                  "abi": {
+                    "description": "The ABI to be used in case of split APKs.",
+                    "enum": [
+                      "select",
+                      "armeabi",
+                      "armeabi-v7a",
+                      "arm64-v8a",
+                      "x86",
+                      "x86_64"
+                    ]
+                  },
+                  "abiMap": {
+                    "description": "Map android ABI to custom strings, use with ${command:mappedAbi}.",
+                    "type": "object",
+                    "properties": {
+                      "armeabi": {
+                        "type": "string"
+                      },
+                      "armeabi-v7a": {
+                        "type": "string"
+                      },
+                      "arm64-v8a": {
+                        "type": "string"
+                      },
+                      "x86": {
+                        "type": "string"
+                      },
+                      "x86_64": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "symbolSearchPaths": {
+                    "description": "List of paths to where your unstripped so files are located.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "target": {
+                "type": "string",
+                "description": "Android serial, select, or last-selected."
+              },
+              "resumeProcess": {
+                "type": "boolean",
+                "description": "Resume a waiting VM after Native attach. Defaults to true for launch and false for attach."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "android-tools",
+            "request": "attach",
+            "name": "Android: Attach Native",
+            "androidMode": "native",
+            "target": "select",
+            "pid": "${command:pickAndroidProcess}",
+            "native": {}
+          }
+        ]
+      },
+      {
+        "type": "lldb",
+        "variables": {
+          "pickAndroidProcess": "android-debug.pickAndroidProcess",
+          "abi": "android-debug.getBestAbi",
+          "mappedAbi": "android-debug.getBestMappedAbi"
+        },
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "androidTarget": {
+                "description": "Target Android. Specify target serial number or `select` to select target.",
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "enum": [
+                      false,
+                      "select",
+                      "last-selected"
+                    ]
+                  }
+                ]
+              },
+              "androidPackageName": {
+                "description": "Package name of the app to debug",
+                "type": "string"
+              },
+              "androidAbiSupported": {
+                "description": "List of ABIs supported by the app",
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "armeabi",
+                    "armeabi-v7a",
+                    "arm64-v8a",
+                    "x86",
+                    "x86_64"
+                  ]
+                },
+                "default": [
+                  "armeabi-v7a",
+                  "arm64-v8a",
+                  "x86",
+                  "x86_64"
+                ]
+              },
+              "androidAbi": {
+                "description": "The ABI that is installed in case of split APKs.",
+                "enum": [
+                  "select",
+                  "armeabi",
+                  "armeabi-v7a",
+                  "arm64-v8a",
+                  "x86",
+                  "x86_64"
+                ]
+              },
+              "androidAbiMap": {
+                "description": "Map of android abi to custom string",
+                "type": "object",
+                "properties": {
+                  "armeabi": {
+                    "type": "string"
+                  },
+                  "armeabi-v7a": {
+                    "type": "string"
+                  },
+                  "arm64-v8a": {
+                    "type": "string"
+                  },
+                  "x86": {
+                    "type": "string"
+                  },
+                  "x86_64": {
+                    "type": "string"
+                  }
+                }
+              },
+              "symbolSearchPaths": {
+                "description": "List of paths to where your unstripped so files are located",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
       }
     ],
     "configuration": {
@@ -240,6 +595,54 @@
           "type": "boolean",
           "default": true,
           "description": "Before launching an AVD that has hw.gpu.enabled=no (the avdmanager default, very slow), switch it to host GPU rendering by editing its config.ini."
+        },
+        "android-debug.sdkRoot": {
+          "type": "string",
+          "description": "sdk root"
+        },
+        "android-debug.ndkRoot": {
+          "type": "string",
+          "description": "ndk root"
+        },
+        "android-debug.abiSupported": {
+          "description": "List of ABIs supported by the app",
+          "type": "array",
+          "items": {
+            "enum": [
+              "armeabi",
+              "armeabi-v7a",
+              "arm64-v8a",
+              "x86",
+              "x86_64"
+            ]
+          },
+          "default": [
+            "armeabi-v7a",
+            "arm64-v8a",
+            "x86",
+            "x86_64"
+          ]
+        },
+        "android-debug.abiMap": {
+          "description": "Map android ABI to custom strings, use with ${command:mappedAbi}.",
+          "type": "object",
+          "properties": {
+            "armeabi": {
+              "type": "string"
+            },
+            "armeabi-v7a": {
+              "type": "string"
+            },
+            "arm64-v8a": {
+              "type": "string"
+            },
+            "x86": {
+              "type": "string"
+            },
+            "x86_64": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -250,10 +653,20 @@
         ],
         "url": "./schemas/android-ide.local.schema.json"
       }
+    ],
+    "breakpoints": [
+      {
+        "language": "c"
+      },
+      {
+        "language": "cpp"
+      }
     ]
   },
   "devDependencies": {
+    "@types/ini": "^4.1.1",
     "@types/node": "^26.6.6",
+    "@types/teen_process": "^2.0.4",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^4.1.0",
     "esbuild": "^0.28.2",
@@ -264,7 +677,10 @@
     "@grpc/proto-loader": "^0.8.1",
     "@vscode/debugadapter": "1.68.0",
     "@xmldom/xmldom": "0.9.12",
+    "appium-adb": "12.13.0",
+    "ini": "3.0.1",
     "long": "5.3.2",
+    "teen_process": "2.3.1",
     "unzipper": "0.12.5",
     "xpath": "0.0.36"
   },

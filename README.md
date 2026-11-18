@@ -1,6 +1,6 @@
 # VSCode Android IDE
 
-VSCode Android IDE brings Android development tools into VS Code. Manage emulators and physical devices, mirror screens, browse files and processes, stream Logcat, and access debugger configuration entries without leaving the editor. The built-in debugger backend is temporarily unimplemented.
+VSCode Android IDE brings Android development tools into VS Code. Manage emulators and physical devices, mirror screens, browse files and processes, stream Logcat, and debug native Android code without leaving the editor.
 
 ## Features
 
@@ -26,7 +26,7 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 - Create, rename, remove, download, upload, and open remote entries.
 - Preserve empty directories during recursive transfers.
 - Track debuggable processes through JDWP and show PID, package, VM, ABI, user ID, and debugger state.
-- Retain the debugger selection entry; built-in debugging is currently a placeholder. Stop processes, force-stop applications, clear app data, and uninstall packages.
+- Attach the Native debugger to a selected process. Stop processes, force-stop applications, clear app data, and uninstall packages.
 
 ### Logcat
 
@@ -39,9 +39,12 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 
 ### Debugging
 
-- Keep the built-in Android debugger interface and Java/Kotlin registration available for future implementation.
-- Built-in Kotlin/Java, Native, and JVM+Native choices currently display an explicit not-implemented notice and do not start a debug backend.
-- Existing external launch configurations continue to use their VS Code debug adapters.
+- The built-in backend is Native only: an Android parent starts a `type: "lldb"` CodeLLDB child, which connects its Android remote platform to an NDK `lldb-server` on the device.
+- Built-in Launch and Attach open Run and Debug directly from the build and process views without automatically compiling, installing, or querying Gradle source models. Use Build or Install explicitly when needed; external launch configurations keep their original adapters.
+- Native package names come from the selected Gradle variant/APK or device process ownership. ABI resolution prefers explicit configuration and the installed app ABI, then compatible build/device candidates. Package or ABI selection appears only when automatic resolution is unavailable or ambiguous; device/build errors remain visible.
+- Requires a trusted workspace, a debuggable app, CodeLLDB, an installed Android SDK/NDK, and matching unstripped symbols. No Maven or JVM adapter is required to compile or run the Native integration.
+- Native sources and upstream provenance live under `src/android-debugger/native-debugger`. See [Native design and verification](docs/android-native-debugger.md) for tested scope and remaining device validation.
+- Set `android-debug.ndkRoot` for an explicit NDK. Use `native.symbolSearchPaths` for unstripped shared-library directories and pass other CodeLLDB options inside `native`.
 
 ## Requirements
 
@@ -153,8 +156,9 @@ When installing from the Marketplace, the extension declares these companion ext
 | Language Support for Java by Red Hat | `redhat.java` | Java language support and project tooling |
 | Debugger for Java | `vscjava.vscode-java-debug` | VS Code Java debug adapter for external launch configurations |
 | Gradle for Java | `vscjava.vscode-gradle` | Gradle project and task integration |
+| CodeLLDB | `vadimcn.vscode-lldb` | Required Native debug backend, declared in `extensionDependencies` |
 
-Marketplace access is required for automatic companion installation. For offline or manually distributed VSIX installs, pre-install these extensions separately; they do not replace Android Platform-Tools, the SDK, emulator, system images, or JDK. They also do not enable the built-in debugger, which remains an explicit not-implemented placeholder.
+VS Code installs CodeLLDB with this extension through its runtime dependency declaration; Java/Gradle companions use the extension-pack mechanism. CodeLLDB must remain enabled for this extension to activate. Automatic installation requires access to the configured extension gallery. In offline environments, install the compatible CodeLLDB VSIX and the other companions separately; none replaces Android Platform-Tools, the SDK/NDK, emulator, system images, or JDK.
 
 ## Configuration
 

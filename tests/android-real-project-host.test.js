@@ -52,8 +52,8 @@ function childExit(child, signal) {
 /** 加载当前生产 AGP 模型 API，不复制源码发现逻辑或猜 src/main 根；真机回归记录全部 producer provenance。 */
 async function discover(projectRoot, run, signal) {
   const loaded = { exports: {} };
-  vm.runInNewContext(transformSync(fs.readFileSync(path.join(root, 'src/android-debugger/projectModel.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module: loaded, exports: loaded.exports, require, AbortController }, { filename: 'projectModel.ts' });
+  vm.runInNewContext(transformSync(fs.readFileSync(path.join(root, 'src/androidProjectModel.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
+    { module: loaded, exports: loaded.exports, require, AbortController }, { filename: 'androidProjectModel.ts' });
   return loaded.exports.discoverVariantSources({ projectRoot, modulePath: ':ink-demo', variant: 'debug', wrapper: path.join(projectRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew') }, run, signal);
 }
 
@@ -144,7 +144,7 @@ test('authorized real project VS Code JVM debugging', { skip: process.env.ANDROI
     ownedServerProcesses: text(['shell', 'ps', '-A', '-o', 'PID,ARGS']).split(/\r?\n/).filter(line => /\/dta-[0-9a-f-]+\/server(?:\s|$)/i.test(line)),
   });
   try {
-    for (const [label, file] of Object.entries({ apk: info.apk, source: info.source, extension: path.join(root, 'dist/extension.js'), backend: path.join(root, 'dist/android-jvm-debugger.js'), model: path.join(root, 'src/android-debugger/projectModel.ts') })) resources.hashes[label] = { path: file, sha256: hash(file) };
+    for (const [label, file] of Object.entries({ apk: info.apk, source: info.source, extension: path.join(root, 'dist/extension.js'), backend: path.join(root, 'dist/android-jvm-debugger.js'), model: path.join(root, 'src/androidProjectModel.ts') })) resources.hashes[label] = { path: file, sha256: hash(file) };
     const model = await discover(info.projectRoot, async (command, args, cwd, signal) => {
       const windows = process.platform === 'win32';
       const joined = args.map(arg => /\s/.test(arg) ? '"' + arg + '"' : arg).join(' ');

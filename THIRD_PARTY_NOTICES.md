@@ -1,6 +1,6 @@
 # Third-party notices
 
-The bundled `dist/extension.js` contains the following npm packages (production dependencies only). Their full license texts are available in each package on npm.
+The table below records the original device-tool dependency set. The complete current bundled npm closure, including the Android Debug dependencies, is generated as `dist/runtime-js-dependencies.json`; full npm and debugger-source license texts are included in `dist/THIRD_PARTY_NOTICES.txt`. The generated index is authoritative for the current build.
 
 | Package | Version | License |
 |---|---|---|
@@ -62,3 +62,8 @@ the extension MIT license does not replace upstream component terms.
 | `resources/scrcpy/scrcpy-server.jar` | [scrcpy](https://github.com/Genymobile/scrcpy) 3.3.4, Copyright (C) Genymobile | Apache-2.0 (see `resources/scrcpy/scrcpy-LICENSE.txt`) |
 
 Apache-2.0 text: https://www.apache.org/licenses/LICENSE-2.0
+
+## Debugger Sources
+
+- Android Debug: https://github.com/nisargjhaveri/vscode-android-debug, MIT; source and original license retained under `src/android-debugger/native-debugger/upstream`. Local lifecycle adaptations are recorded in the source lock.
+- Only the Native integration is active. CodeLLDB is installed as an external VS Code extension dependency; no Java/Kotlin debug engine or JVM runtime is built or bundled by this integration.

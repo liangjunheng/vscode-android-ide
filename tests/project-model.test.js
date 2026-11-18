@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const AbortController = global.AbortController;
 const { transformSync } = require('esbuild');
 
-const source = fs.readFileSync(path.join(__dirname, '../src/android-debugger/projectModel.ts'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/androidProjectModel.ts'), 'utf8');
 const compiled = transformSync(source, { loader: 'ts', format: 'cjs', platform: 'node' }).code;
 const loaded = { exports: {} };
 vm.runInNewContext(compiled, { require, module: loaded, exports: loaded.exports, console, process, Buffer, AbortController, setTimeout, clearTimeout });

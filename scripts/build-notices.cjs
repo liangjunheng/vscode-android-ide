@@ -1,31 +1,76 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const NOTICE_NAME = /^(?:LICENSE|LICENCE|NOTICE|COPYING)(?:[.-][A-Za-z0-9_-]+)?$/i;
+const NOTICE_NAME = /^(?:UNLICENSE|LICENSE|LICENCE|NOTICE|COPYING)(?:[.-][A-Za-z0-9_-]+)?$/i;
 const README_NAME = /^README(?:[.-].+)?$/i;
+const CC0_DECLARATION = '[Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/deed)';
+const CC0_SOURCE_URL = 'https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt';
+const CC_BY_DECLARATION = 'Copyright \u00a9 2010-2015 Linux Foundation and its Contributors. Licensed under the Creative Commons Attribution License 3.0 Unported. All other rights are expressly reserved.';
+const SUPPLEMENTAL_SOURCE_URLS = {
+  'CC0-1.0': CC0_SOURCE_URL,
+  'CC-BY-3.0': 'https://creativecommons.org/licenses/by/3.0/legalcode.txt',
+  'WTFPL': 'https://www.wtfpl.net/txt/copying/'
+};
+const SUPPLEMENTAL_MANIFEST_KEYS = { 'WTFPL': 'WTFPL-2.0' };
 
-/** 从根 README 截取明确的 Markdown License 章节。输入：README 完整文本和 package.json SPDX 标识；输出：包含 SPDX 标识的完整章节文本，或 null；条件：只接受 License 标题及其章节正文，拒绝 URL-only/普通说明；回归：bundled-notices.test.js 覆盖 README 内嵌 MIT 与 URL-only 失败。 */
+/** 从根 README 截取明确的 Markdown License 章节。输入：README 完整文本和 package.json SPDX 标识；输出：与 SPDX 标识精确匹配的完整章节文本，或 null；条件：只接受完整 MIT 正文或精确 CC0 deed 声明，拒绝 URL-only/普通说明；回归：bundled-notices.test.js 覆盖 MIT、CC0 和 URL-only 失败。 */
 function embeddedLicenseSection(text, license) {
   const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const token = String(license).trim();
+  if (token === 'CC-BY-3.0') {
+    const normalized = lines.join('\n').replace(/^>\s?/gm, '').replace(/\s+/g, ' ').trim();
+    return normalized.includes(CC_BY_DECLARATION) ? '### License\n\n' + CC_BY_DECLARATION + '\n' : null;
+  }
   const heading = /^(#{1,6})\s+license\s*#?\s*$/i;
-  const start = lines.findIndex(line => heading.test(line));
+  let start = lines.findIndex(line => heading.test(line));
+  let level = start >= 0 ? lines[start].match(heading)[1].length : 0;
+  let bodyStart = start >= 0 ? start + 1 : -1;
+  if (start < 0) {
+    for (let index = 0; index + 1 < lines.length; index += 1) {
+      if (/^license\s*$/i.test(lines[index].trim()) && /^(?:=+|-+)\s*$/.test(lines[index + 1])) {
+        start = index;
+        level = lines[index + 1].trim()[0] === '=' ? 1 : 2;
+        bodyStart = index + 2;
+        break;
+      }
+    }
+  }
   if (start < 0) return null;
-  const level = lines[start].match(heading)[1].length;
   let end = lines.length;
-  for (let index = start + 1; index < lines.length; index += 1) {
+  for (let index = bodyStart; index < lines.length; index += 1) {
     const next = lines[index].match(/^(#{1,6})\s+/);
     if (next && next[1].length <= level) {
       end = index;
       break;
     }
+    if (index + 1 < lines.length && /^.{1,80}$/.test(lines[index]) && /^(?:=+|-+)\s*$/.test(lines[index + 1])) {
+      const nextLevel = lines[index + 1].trim()[0] === '=' ? 1 : 2;
+      if (nextLevel <= level) {
+        end = index;
+        break;
+      }
+    }
   }
-  const section = lines.slice(start, end).join('\n').trim();
+  const sectionLines = [lines[start], ...lines.slice(bodyStart, end)];
+  // 删除章节末尾的空行和 Markdown 引用定义，避免文档链接尾部污染许可证正文比较。
+  while (sectionLines.length > 1) {
+    const last = sectionLines.at(-1);
+    if (!last.trim() || /^\s*\[[^\]]+\]:\s+\S+\s*$/.test(last)) {
+      sectionLines.pop();
+      continue;
+    }
+    break;
+  }
+  const section = sectionLines.join('\n').trim();
   if (!section || /^https?:\/\/\S+$/i.test(section)) return null;
-  const token = String(license).trim();
-  if (token !== 'MIT' || !section.includes('(MIT)') || !/copyright/i.test(section)) return null;
+  const declaration = section.slice(section.indexOf('\n') + 1).trim();
+  if (token === 'CC0-1.0' && declaration === CC0_DECLARATION) return section + '\n';
+  if (token !== 'MIT' || (!/\((?:MIT|The MIT License)\)/.test(section) && !/\bThe MIT License\b/i.test(section)) || !/copyright/i.test(section)) return null;
   const grant = section.slice(section.indexOf('Permission is hereby granted')).replace(/\s+/g, ' ').trim();
   const completeMit = 'Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.';
-  if (grant !== completeMit) return null;
+  const normalizedGrant = grant.replaceAll(String.fromCharCode(34), "'");
+  const normalizedMit = completeMit.replaceAll(String.fromCharCode(34), "'");
+  if (normalizedGrant !== normalizedMit) return null;
   return section + '\n';
 }
 /** 比较两个稳定排序键。输入：两个字符串；输出：供 Array.sort 使用的三态整数；回归：bundled-notices.test.js 断言包与通知顺序。 */
@@ -71,13 +116,62 @@ function usableLicense(value) {
   if (value && typeof value === 'object' && typeof value.type === 'string') return usableLicense(value.type);
   return null;
 }
-/** 读取单个包的元数据及根许可证/通知文件。输入：已安全解析的包根；输出：包索引字段和完整正文；条件：metadata 与至少一个非空非 URL 根文件必须有效，否则抛错；回归：bundled-notices.test.js 覆盖完整文本、哈希和失败闭包。 */
-function readPackage(packageRoot) {
+/** 读取工作区中与 SPDX 标识绑定的补充许可证正文。输入：项目根、包根和 metadata 许可标识；输出：正文、文件哈希、来源 URL/哈希及可选 package-specific 提交证据；条件：清单、canonical URL、正文哈希及 package JSON 身份必须一致，否则抛错；回归：Node>=22执行node --test tests/bundled-notices.test.js；CC0/CC-BY用例及WTFPL package provenance两项断言全文、包身份/输出来源证据，以及metadata哈希、commit/URL、来源SHA拒绝矩阵。 */
+function readSupplementalLicense(projectRoot, packageRoot, name, version, license) {
+  const sourceUrl = SUPPLEMENTAL_SOURCE_URLS[license];
+  if (!sourceUrl) return null;
+  const resourcesPath = path.join(projectRoot, 'resources', 'licenses');
+  if (!fs.existsSync(resourcesPath)) return null;
+  const resourcesRoot = realpathInside(resourcesPath, projectRoot, 'license resources');
+  const manifestPath = path.join(resourcesRoot, 'index.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const manifestKey = SUPPLEMENTAL_MANIFEST_KEYS[license] || license;
+  const declaration = manifest && manifest[manifestKey];
+  if (!declaration || declaration.sourceUrl !== sourceUrl || typeof declaration.file !== 'string' || !/^[a-f0-9]{64}$/.test(declaration.sourceSha256 || '')) {
+    throw new Error('Invalid supplemental license declaration: ' + manifestPath);
+  }
+  const packageDeclaration = declaration.package;
+  let packageEvidence = {};
+  if (packageDeclaration) {
+    const packageJsonPath = path.join(packageRoot, 'package.json');
+    const packageBytes = fs.readFileSync(packageJsonPath);
+    const packageSha256 = crypto.createHash('sha256').update(packageBytes).digest('hex');
+    if (packageDeclaration.name !== name || packageDeclaration.version !== version || packageDeclaration.license !== license || packageDeclaration.packageJsonSha256 !== packageSha256 || typeof packageDeclaration.sourceCommit !== 'string' || typeof packageDeclaration.packageJsonSourceUrl !== 'string' || packageDeclaration.packageJsonSourceUrl.includes(packageDeclaration.sourceCommit) !== true || !/^[a-f0-9]{64}$/.test(packageDeclaration.packageJsonSourceSha256 || '')) {
+      throw new Error('Supplemental package declaration does not match installed metadata: ' + packageJsonPath);
+    }
+    packageEvidence = { metadataSourceUrl: packageDeclaration.packageJsonSourceUrl, metadataSourceSha256: packageDeclaration.packageJsonSourceSha256, sourceCommit: packageDeclaration.sourceCommit };
+  }
+  const resourcePath = realpathInside(path.join(resourcesRoot, declaration.file), resourcesRoot, 'license resource');
+  const bytes = fs.readFileSync(resourcePath);
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (sha256 !== declaration.sourceSha256) {
+    throw new Error('Supplemental license hash does not match source: ' + resourcePath);
+  }
+  return {
+    file: path.relative(projectRoot, resourcePath).replaceAll('\\', '/'),
+    sha256,
+    sourceUrl: declaration.sourceUrl,
+    sourceSha256: declaration.sourceSha256,
+    ...packageEvidence,
+    text: bytes.toString('utf8')
+  };
+}
+/** 读取单个包的元数据及根许可证/通知文件。输入：已安全解析的包根和项目根；输出：包索引字段和完整正文；条件：metadata 与至少一个非空非 URL 根文件必须有效，明确 CC0/CC-BY README 声明还必须有哈希绑定补充正文，否则抛错；回归：bundled-notices.test.js 覆盖完整文本、CC0/CC-BY、哈希和失败闭包。 */
+function readPackage(packageRoot, projectRoot) {
   const packageJsonPath = path.join(packageRoot, 'package.json');
   const metadata = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   const name = metadata && typeof metadata.name === 'string' && metadata.name.trim() ? metadata.name.trim() : null;
   const version = metadata && typeof metadata.version === 'string' && metadata.version.trim() ? metadata.version.trim() : null;
-  const license = metadata && usableLicense(metadata.license);
+  // 兼容 npm 早期的单项 licenses 数组；多项声明必须显式失败，避免静默丢弃许可证。
+  let license = null;
+  if (metadata && metadata.license !== undefined) {
+    license = usableLicense(metadata.license);
+  } else if (metadata && Array.isArray(metadata.licenses)) {
+    if (metadata.licenses.length !== 1) {
+      throw new Error('Package has multiple license entries; refusing to select one silently: ' + packageJsonPath);
+    }
+    license = usableLicense(metadata.licenses[0]);
+  }
   if (!name || !version || !license) {
     throw new Error('Package has no usable name, version, or license metadata: ' + packageJsonPath);
   }
@@ -102,7 +196,8 @@ function readPackage(packageRoot) {
       const section = embeddedLicenseSection(readmeBytes.toString('utf8'), license);
       if (section) {
         const sectionBytes = Buffer.from(section, 'utf8');
-        notices.push({
+        const supplemental = readSupplementalLicense(projectRoot, packageRoot, name, version, license);
+        notices.push(supplemental || {
           file: readmeEntry.name + '#License',
           sha256: crypto.createHash('sha256').update(sectionBytes).digest('hex'),
           sourceSha256: crypto.createHash('sha256').update(readmeBytes).digest('hex'),
@@ -112,6 +207,10 @@ function readPackage(packageRoot) {
     }
   }
   if (!notices.length) {
+    const supplemental = readSupplementalLicense(projectRoot, packageRoot, name, version, license);
+    if (supplemental) notices.push(supplemental);
+  }
+  if (!notices.length) {
     throw new Error('Package has no usable license or notice text: ' + packageJsonPath);
   }
   notices.sort((a, b) => compare(a.file, b.file));
@@ -119,7 +218,15 @@ function readPackage(packageRoot) {
     name,
     version,
     license,
-    notices: notices.map(({ file, sha256, sourceSha256 }) => sourceSha256 ? { file, sha256, sourceSha256 } : { file, sha256 }),
+    notices: notices.map(notice => {
+      const entry = { file: notice.file, sha256: notice.sha256 };
+      if (notice.sourceSha256) entry.sourceSha256 = notice.sourceSha256;
+      if (notice.sourceUrl) entry.sourceUrl = notice.sourceUrl;
+      if (notice.metadataSourceUrl) entry.metadataSourceUrl = notice.metadataSourceUrl;
+      if (notice.metadataSourceSha256) entry.metadataSourceSha256 = notice.metadataSourceSha256;
+      if (notice.sourceCommit) entry.sourceCommit = notice.sourceCommit;
+      return entry;
+    }),
     body: notices.map(notice => '### ' + notice.file + '\n\n' + notice.text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n$/, '')).join('\n\n')
   };
 }
@@ -149,7 +256,7 @@ function buildBundledNotices(root, metafiles) {
   const marker = '/node_modules/';
   const markerIndex = normalized.toLowerCase().lastIndexOf(marker); if (markerIndex < 0) throw new Error('Metafile input is outside node_modules: ' + input);
   const base = inputPath.slice(0, markerIndex + marker.length);
-  const packageRoot = realpathInside(path.join(base, ...parsed.packageSegments), nodeModules, 'package root'); if (!packages.has(packageRoot)) packages.set(packageRoot, readPackage(packageRoot)); }
+  const packageRoot = realpathInside(path.join(base, ...parsed.packageSegments), nodeModules, 'package root'); if (!packages.has(packageRoot)) packages.set(packageRoot, readPackage(packageRoot, projectRoot)); }
   const entries = [...packages.values()].sort((a, b) => compare(a.name, b.name) || compare(a.version, b.version));
   const text = entries.map(e => '## ' + e.name + ' ' + e.version + '\n\nLicense: ' + e.license + '\n\n' + e.body).join('\n\n');
   return { text: text ? text + '\n' : '', packages: entries.map(({ name, version, license, notices }) => ({ name, version, license, notices })) };

@@ -124,12 +124,13 @@ test('build panel integration owns controller and connects both directions', asy
   const calls = [], registrations = [], commandNames = [], module = { exports: {} }, subscriptions = [];
   let running, build;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
-  class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } dispose() {} }
+  // 模拟只读当前Gradle包名，断言Native工厂只在需要时按workspace调用。
+  class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
   const debugFactory = {};
   const extensionContext = { extensionPath: 'extension-root', subscriptions };
-  const factoryContexts = [];
+  const factoryContexts = [], packageResolvers = [];
   const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; } } };
-  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: context => { factoryContexts.push(context); return debugFactory; } } };
+  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: (context, packageResolver) => { factoryContexts.push(context); packageResolvers.push(packageResolver); return debugFactory; } } };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   module.exports.activate(extensionContext);
@@ -142,6 +143,11 @@ test('build panel integration owns controller and connects both directions', asy
   assert.equal(registrations[0][0], 'android-tools');
   assert.equal(registrations[0][1], debugFactory);
   assert.equal(factoryContexts[0], extensionContext);
+  assert.equal(calls.some(call => call[0] === 'selected-package'), false);
+  build.applicationId = 'com.selected.gradle';
+  assert.deepEqual(packageResolvers[0]({ uri: { fsPath: 'workspace-root' } }), { packageName: 'com.selected.gradle' });
+  assert.deepEqual(calls.at(-1), ['selected-package', 'workspace-root']);
+  assert.equal(packageResolvers[0](undefined), undefined);
   await running.action({ action: 'build' }, 'phone');
   assert.deepEqual(calls.at(-1), ['build', 'phone']);
   build.post({ type: 'buildState', status: 'Ready' });

@@ -37,7 +37,7 @@ function fixture() {
   const parserModule = load('logcatParser', {});
   const logcat = load('logcat', { vscode, './sdk': sdk, './logcatParser': parserModule, child_process: { spawn }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { watch() { return async () => {}; } } } });
   // 调试适配器注册属于独立宿主依赖；仍执行真实 activate 和两侧设备选择，不加载无关调试会话。
-  load('extension', { './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
+  load('extension', { './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { dispose() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
   f.running = f.views['android-ide.runningDevice']; f.logcat = f.views['android-ide.logcat'];
   f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
   // 创建实际 HTML 与宿主消息入口，默认均可见；可在测试中延迟创建或隐藏来覆盖生命周期。

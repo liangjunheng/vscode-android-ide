@@ -1,0 +1,36 @@
+{
+  "CC0-1.0": {
+    "file": "CC0-1.0/legalcode.txt",
+    "sourceUrl": "https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt",
+    "sourceSha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+  },
+  "CC-BY-3.0": {
+    "file": "CC-BY-3.0/legalcode.txt",
+    "sourceUrl": "https://creativecommons.org/licenses/by/3.0/legalcode.txt",
+    "sourceSha256": "e6bc9e9c474700b708f568bac9e5a8a9bcb2b1dad53442f5ba449fcb848b8e76"
+  },
+  "Apache-2.0": {
+    "file": "Apache-2.0/legalcode.txt",
+    "sourceUrl": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "sourceSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "EPL-2.0": {
+    "file": "EPL-2.0/legalcode.txt",
+    "sourceUrl": "https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt",
+    "sourceSha256": "0becf16567beb77fa252b7664631dd177c8f9a1889e48995b45379c7130e5303"
+  },
+  "WTFPL-2.0": {
+    "file": "WTFPL-2.0/legalcode.txt",
+    "sourceUrl": "https://www.wtfpl.net/txt/copying/",
+    "sourceSha256": "0356258391e190dc1d44ea01565cfe627fe44e27dad693a0a54c2483a7b223e5",
+    "package": {
+      "name": "truncate-utf8-bytes",
+      "version": "1.0.2",
+      "license": "WTFPL",
+      "packageJsonSha256": "8da766c7092b0ce9fd8f3b2ac2f41d1b739df9210067d3f710d65d95c9c17a7a",
+      "sourceCommit": "c8fcebc8be093c8bd8db1e7d75c09b9fce7e4708",
+      "packageJsonSourceUrl": "https://raw.githubusercontent.com/parshap/truncate-utf8-bytes/c8fcebc8be093c8bd8db1e7d75c09b9fce7e4708/package.json",
+      "packageJsonSourceSha256": "8da766c7092b0ce9fd8f3b2ac2f41d1b739df9210067d3f710d65d95c9c17a7a"
+    }
+  }
+}

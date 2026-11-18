@@ -7,6 +7,7 @@ Thanks for helping! Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 - **Node.js 22+** and npm (`.nvmrc` pins 22; required by `@vscode/vsce` 4).
 - **VS Code 1.85+**.
 - **Android SDK** with `platform-tools`, `emulator`, `cmdline-tools` and at least one system image, to test against real emulators. Set `ANDROID_HOME` or `sdkPath` in the project-local `.vscode/android-ide.local.json`; machine paths are not VS Code settings.
+- **CodeLLDB and an Android NDK** for Native debugger device validation. The extension build and F5 Run Extension do not require Maven or a JVM debug adapter. Android Gradle builds still require the project's JDK.
 - Optional: a physical Android device with USB debugging, to test the scrcpy path.
 
 ## Getting started
