@@ -3,11 +3,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
 import { adbPath } from './sdk';
+import { selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
+import { discoverVariantSources, NativeSourceModule } from './android-debugger/projectModel';
 
 interface Project { id: string; label: string; root: string; wrapper: string; tasks: string[]; }
 interface Target { id: string; label: string; module: string; variant: string; assemble: string; install: string; }
 interface Operation { controller: AbortController; done: Promise<void>; }
-interface OwnedProcess { child: ChildProcess; closed: Promise<void>; }
+interface OwnedProcess { child: ChildProcess; closed: Promise<void>; termination?: Promise<void>; }
+/** 当前 Build 选择解析出的调试源码身份，不包含设备或会话状态。 */
+export interface AndroidDebugProject { androidProjectRoot: string; androidModuleRoot: string; androidVariant: string; androidSourceRoots: string[]; androidNativeModules?: NativeSourceModule[]; }
 const LIMIT = 256 * 1024;
 class Cancelled extends Error { constructor() { super('Operation cancelled'); } }
 
@@ -15,8 +19,9 @@ class Cancelled extends Error { constructor() { super('Operation cancelled'); } 
 export function parseGradleTasks(text: string): string[] {
   const tasks = new Set<string>();
   for (const line of text.split(/\r?\n/)) {
-    const match = /^\s*(:?[\w.-]+(?::[\w.-]+)+)(?:\s+-.*)?\s*$/.exec(line);
-    if (match && /:(assemble|install)[\w.-]+$/.test(match[1])) tasks.add(':' + match[1].replace(/^:/, ''));
+    const match = /^\s*(:?[\w.-]+(?::[\w.-]+)*)(?:\s+-.*)?\s*$/.exec(line);
+    const task = match && ':' + match[1].replace(/^:/, '');
+    if (task && /:(assemble|install)[\w.-]+$/.test(task)) tasks.add(task);
   }
   return [...tasks].sort();
 }
@@ -25,10 +30,11 @@ export function parseGradleTasks(text: string): string[] {
 function buildTargets(tasks: string[]): Target[] {
   const found = new Map<string, Target>();
   for (const task of tasks) {
-    const match = /^:(.+):(assemble|install)([\w.-]+)$/.exec(task);
+    const match = /^:(?:(.+):)?(assemble|install)([\w.-]+)$/.exec(task);
     if (!match || /AndroidTest|UnitTest/.test(match[3])) continue;
-    const id = ':' + match[1] + ':' + match[3];
-    const item = found.get(id) || { id, label: match[1] + ' | ' + match[3], module: match[1], variant: match[3], assemble: '', install: '' };
+    const module = match[1] || '';
+    const id = ':' + (module ? module + ':' : '') + match[3];
+    const item = found.get(id) || { id, label: (module || ':') + ' | ' + match[3], module, variant: match[3], assemble: '', install: '' };
     item[match[2] as 'assemble' | 'install'] = task;
     found.set(id, item);
   }
@@ -108,14 +114,18 @@ export class AndroidBuildController implements vscode.Disposable {
     if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
   }
 
-  // adb 使用参数数组，Windows 仅固定 wrapper 经过 cmd；npm test Windows 回归验证空格路径及无 shell 注入。
-  private async run(operation: Operation, command: string, args: string[], cwd: string, env = process.env): Promise<string> {
+  // adb 保持 argv；Windows 仅允许内部生成的 init-script 路径经固定环境变量传递，其余参数继续严格白名单。
+  // 回归：node --test tests/android-build.test.js；source runner/real Windows 验证空格、精确脚本、注入拒绝和 close 后清理。
+  private async run(operation: Operation, command: string, args: string[], cwd: string, env = process.env, generatedInitScript?: string): Promise<string> {
     this.check(operation);
     const bat = process.platform === 'win32' && path.basename(command).toLowerCase() === 'gradlew.bat';
-    if (bat && args.some(arg => !/^[\w:=-]+$/.test(arg))) throw new Error('Unsafe Gradle argument');
+    if (generatedInitScript !== undefined && (args[0] !== '--init-script' || args[1] !== generatedInitScript || args.filter(arg => arg === '--init-script').length !== 1 || !path.isAbsolute(generatedInitScript) || /[\x00-\x1f\x7f"]/.test(generatedInitScript) || !fs.lstatSync(generatedInitScript).isFile())) throw new Error('Invalid generated Gradle init script');
+    if (bat && args.some((arg, index) => !(generatedInitScript !== undefined && index === 1) && !/^[\w:=-]+$/.test(arg))) throw new Error('Unsafe Gradle argument');
+    const tokens = args.map((arg, index) => generatedInitScript !== undefined && index === 1 ? '"%DSH_SOURCE_INDEX_INIT_PATH%"' : arg);
+    const childEnv = generatedInitScript === undefined ? env : { ...Object.fromEntries(Object.entries(env).filter(([key]) => key.toUpperCase() !== 'DSH_SOURCE_INDEX_INIT_PATH')), DSH_SOURCE_INDEX_INIT_PATH: generatedInitScript };
     const child = bat
-      ? spawn('cmd.exe', ['/d', '/s', '/c', 'gradlew.bat ' + args.join(' ')], { cwd, env, shell: false, windowsHide: true })
-      : spawn(command, args, { cwd, env, shell: false, windowsHide: true, detached: process.platform !== 'win32' });
+      ? spawn('cmd.exe', ['/d', '/v:off', '/s', '/c', 'gradlew.bat ' + tokens.join(' ')], { cwd, env: childEnv, shell: false, windowsHide: true, windowsVerbatimArguments: true })
+      : spawn(command, args, { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== 'win32' });
     let text = '', launchError: Error | undefined;
     const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
     const owned = { child, closed };
@@ -137,7 +147,11 @@ export class AndroidBuildController implements vscode.Disposable {
   }
 
   // 终止拥有的进程树并等待 close；npm test cancel/Windows 用 EventEmitter 断言关闭前不完成。
-  private async terminate(owned: OwnedProcess): Promise<void> {
+  private terminate(owned: OwnedProcess): Promise<void> { return owned.termination ||= this.terminateProcess(owned); }
+
+  // 同一 child 的停止由 terminate 共享；provider abort/Stop/dispose 并发时只发一次 kill 并等待真实 close。
+  // 回归：node --test tests/android-build.test.js；provider cancellation 与原 cancel/Windows 断言关闭前不完成。
+  private async terminateProcess(owned: OwnedProcess): Promise<void> {
     const child = owned.child;
     if (child.exitCode === null && child.signalCode == null) {
       if (!child.pid) throw new Error('Cannot cancel process without pid');
@@ -176,17 +190,72 @@ export class AndroidBuildController implements vscode.Disposable {
     if (!targets.some(t => t.id === this.targetId)) this.targetId = targets.find(t => t.variant.toLowerCase() === 'debug')?.id || targets[0]?.id || '';
   }
 
-  // 原生 API 支持 launch.json JSONC，由用户选配置；npm test debug 断言缺配置、取消及适配器拒绝。
+  // 由统一调试选择器展示内置三模式和已注册外部配置；取消不触发安装或调试。
   private async debugConfiguration(project: Project): Promise<vscode.DebugConfiguration | undefined> {
     const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
-    const configs = vscode.workspace.getConfiguration('launch', folder?.uri).get<vscode.DebugConfiguration[]>('configurations', [])
-      .filter(config => typeof config.type === 'string' && ['attach', 'launch'].includes(config.request));
-    if (!configs.length) throw new Error('Configure an Android-compatible debug adapter in launch.json before Debug.');
-    const pick = await vscode.window.showQuickPick(configs.map(config => ({ label: config.name, description: config.type, config })), { title: 'Android Debug Configuration' });
-    return pick?.config;
+    return selectAndroidDebugConfiguration(folder);
   }
 
-  // 执行集合校验后的任务；npm test action 回归断言 install 后启动、ANDROID_SERIAL 及所选模块包名。
+  /**
+   * 读取精确项目/模块/变体的 AGP 模型，返回现存 Java/Kotlin 根、真实 moduleRoot 和可选 Native 依赖图身份；不重建路径。
+   * nativeModules 缺失保持未知/旧契约，显式 [] 保持已知无 Native 模块；不构建、不安装、不猜约定目录。
+   * 回归：node --test tests/android-build.test.js；source discovery/provider native graph 用例验证精确身份、缺失/空图、ID冲突、IO失败与取消。
+   */
+  private async discoverDebugProject(operation: Operation, project: Project, target: Target, packageName: string): Promise<AndroidDebugProject> {
+    const variant = target.variant[0].toLowerCase() + target.variant.slice(1);
+    const model = await discoverVariantSources({ projectRoot: project.root, modulePath: target.module ? ':' + target.module : ':', variant, wrapper: project.wrapper },
+      (command, args, cwd) => this.run(operation, command, args, cwd, process.env, args[1]), operation.controller.signal);
+    this.check(operation);
+    if (model.applicationId !== undefined && model.applicationId !== packageName) throw new Error('Source index applicationId does not match selected APK metadata');
+    const androidSourceRoots = model.roots.filter(root => root.kind === 'java' || root.kind === 'kotlin').flatMap(root => {
+      try { if (!fs.statSync(root.path).isDirectory()) throw new Error('Android source root is not a directory: ' + root.path); return [root.path]; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    });
+    return { androidProjectRoot: project.root, androidModuleRoot: model.moduleRoot, androidVariant: variant, androidSourceRoots,
+      ...(model.nativeModules === undefined ? {} : { androidNativeModules: model.nativeModules }) };
+  }
+
+  /**
+   * 为 Attach 解析当前 Build 选择的源码身份；必须匹配调用方 workspace 与 APK 包名，无选择/错包时明确要求用户选择。
+   * 独占 Operation 桥接外部取消，等待 child close 后释放临时脚本；不安装/启动/缓存项目结果。
+   * 回归：node --test tests/android-build.test.js；provider selection/failures/cancellation/native graph 验证精确身份、可选图转发、取消无旧图、互斥及释放。
+   */
+  async resolveCurrentDebugProject(packageName: string, workspaceRoot: string, signal: AbortSignal): Promise<AndroidDebugProject> {
+    if (this.disposed) throw new Error('Android build controller is disposed');
+    if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
+    signal.throwIfAborted();
+    if (this.operation || this.stopping) throw new Error('An Android operation is already running');
+    const project = this.projects.find(item => item.id === this.projectId);
+    const target = buildTargets(project?.tasks || []).find(item => item.id === this.targetId);
+    if (!project || !target) throw new Error('Select a Gradle project and Android variant in Build before Attach.');
+    const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
+    if (!path.isAbsolute(workspaceRoot) || !owner || path.resolve(owner.uri.fsPath) !== path.resolve(workspaceRoot)) throw new Error('Select a Build project and Android variant in the chosen workspace before Attach.');
+    if (packageFor(project, target) !== packageName) throw new Error('Select the Build project and Android variant matching package ' + packageName + ' before Attach.');
+    const operation: Operation = { controller: new AbortController(), done: Promise.resolve() };
+    this.operation = operation;
+    let result: AndroidDebugProject | undefined;
+    let cancellation: Promise<{ error?: unknown }> | undefined;
+    // 取消回调只请求拥有的 child 终止，结果由方法末尾观察，避免异步事件抛错或提前释放资源。
+    const abort = (): void => {
+      operation.controller.abort(signal.reason);
+      if (this.child) cancellation = this.terminate(this.child).then(() => ({}), error => ({ error }));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    operation.done = (async () => { this.check(operation); result = await this.discoverDebugProject(operation, project, target, packageName); this.check(operation); })();
+    let failure: unknown;
+    try { await operation.done; }
+    catch (error) { failure = error; }
+    finally {
+      signal.removeEventListener('abort', abort);
+      const closed = await cancellation;
+      if (closed?.error) failure = failure ? new AggregateError([failure, closed.error], String(failure) + '; ' + String(closed.error)) : closed.error;
+      if (this.operation === operation) this.operation = undefined;
+    }
+    if (failure) throw failure;
+    return result!;
+  }
+
+  // 执行所选项目/模块/变体任务；node --test tests/android-build.test.js断言安装顺序、设备包名及内置调试会话的源码归属，自定义配置不注入内部模块字段。
   private async execute(operation: Operation, action: string, serial?: string): Promise<string> {
     if (action === 'refresh') { await this.discover(operation); return this.projects.length ? 'Ready' : 'No Gradle project'; }
     const project = this.projects.find(p => p.id === this.projectId);
@@ -208,13 +277,22 @@ export class AndroidBuildController implements vscode.Disposable {
       if (/monkey aborted|no activities found|error:/i.test(result)) throw new Error(result);
     } else {
       const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
-      const requested = { ...config!, serial, packageName };
+      let debugConfig = config!;
+      if (config!.type === 'android-tools') debugConfig = { ...config!, ...await this.discoverDebugProject(operation, project, target, packageName) };
+      const requested = { ...debugConfig, serial, packageName };
       const listener = vscode.debug.onDidStartDebugSession(session => {
         if (session.configuration.name === requested.name && session.configuration.type === requested.type && session.configuration.serial === serial && session.configuration.packageName === packageName) this.debugSession = session;
       });
       try {
-        const ok = await vscode.debug.startDebugging(folder, requested);
-        if (!ok) throw new Error('Debug adapter rejected the configuration.');
+        const mode = config!.androidMode === 'kotlin-java' || config!.androidMode === 'native' || config!.androidMode === 'jvm-native'
+          ? config!.androidMode
+          : undefined;
+        this.debugSession = await startAndroidDebugging(folder, debugConfig, { serial, packageName, ...(mode ? { mode } : {}) });
+        const ok = !!this.debugSession;
+        if (!ok) {
+          if (requested.type === 'android-tools') return 'Android 内置调试功能暂未实现';
+          throw new Error('Debug adapter rejected the configuration.');
+        }
         this.check(operation);
       } catch (error) {
         if (this.debugSession) { await vscode.debug.stopDebugging(this.debugSession); this.debugSession = undefined; }

@@ -305,8 +305,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private fallback(mode: Mode, reason: string) {
     this.stop();
     this.forced = mode;
-    // 截图回退会进入新的加载态；不要把启动诊断写回投屏，避免初始化时错误文案覆盖投屏。
-    if (this.mirrorVisible && this.view?.visible) { void this.restart().catch(error => this.post({ type: 'error', text: String(error) })); }
+    this.post({ type: 'error', text: reason });
+    if (this.mirrorVisible && this.view?.visible) { void this.restart().then(() => this.post({ type: 'error', text: reason })).catch(error => this.post({ type: 'error', text: String(error) })); }
   }
 
   private startScreencap() {
@@ -482,7 +482,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   }
 }
 
-// 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标始终按投屏宽度比例缩放，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
+// 生成投屏页面：工具栏与画面共用宽度，组内紧凑、组间分隔且首尾贴边，三键导航等宽紧贴画面，图标随宽度缩小且最大 24px，上下各留白 4px，首帧前显示黑色加载占位；npm test 的 mirror layout/navigation 回归断言结构、尺寸和按键。
 // 生成当前设备名称和全设备下拉 UI；npm test 的 DOM 回归执行 renderDevices 并断言状态、禁用项和空态。
 // 输入资源和模式，在设备选择框后输出投屏/Explorer/Processes图标组，不生成Wi-Fi按钮；build-panel-ui与device-view-mode回归验证同排顺序、移除绑定与四态恢复。
 // 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
@@ -519,7 +519,7 @@ button svg{width:20px;height:20px}
 #screen,#cv{max-width:100%;max-height:100%;object-fit:contain;object-position:top center;border-radius:8px;cursor:default;user-select:none;outline:none}
 #screen{display:none}
 #stage{display:flex;flex-direction:column;flex:none;min-width:0;gap:0}
-#navigation{--nav-icon-ratio:0.064;--nav-padding:4px;--nav-icon-size:0px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;flex:none}
+#navigation{--nav-icon-max:24px;--nav-icon-ratio:0.08;--nav-padding:4px;--nav-icon-size:24px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;flex:none}
 #navigation button{width:100%;height:auto;min-width:0;border-radius:0;padding:var(--nav-padding) 0}
 #navigation button svg{width:var(--nav-icon-size);height:var(--nav-icon-size);max-width:100%;flex:none}
 #frame{display:block;position:relative;flex:none;background:#000}
@@ -590,13 +590,12 @@ function layout(){
  if(on!==skinOn||on){skinOn=on;frame.classList.toggle('skin',on)}
  const w=on?skin.lw:live?(fw||cv.width):1080,h=on?skin.lh:live?(fh||cv.height):1920;
  const css=getComputedStyle(navigation),padding=2*parseFloat(css.getPropertyValue('--nav-padding'));
- const ratio=parseFloat(css.getPropertyValue('--nav-icon-ratio'));
- // 图标始终按投屏宽度比例缩放，同时用上下留白约束整体高度。
- const s=w&&h?Math.min(W/w,Math.max(0,H-padding)/(h+w*ratio)):0;
- const icon=w*s*ratio,availableH=Math.max(0,H-padding-icon);
- const iconSize=icon+'px';
- navigation.style.setProperty('--nav-icon-size',iconSize);
- navigation.querySelectorAll('svg').forEach((svg) => { svg.style.width=iconSize; svg.style.height=iconSize; });
+ const iconMax=parseFloat(css.getPropertyValue('--nav-icon-max')),ratio=parseFloat(css.getPropertyValue('--nav-icon-ratio'));
+ // 未达图标上限时，画面高与图标高都正比于宽度；达到上限后仅扣除固定图标高。
+ let s=w&&h?Math.min(W/w,Math.max(0,H-padding)/(h+w*ratio)):0;
+ if(w*s*ratio>iconMax)s=Math.min(W/w,Math.max(0,H-padding-iconMax)/h);
+ const icon=Math.min(iconMax,w*s*ratio),availableH=Math.max(0,H-padding-icon);
+ navigation.style.setProperty('--nav-icon-size',icon+'px');
  frame.style.width=stage.style.width=w*s+'px';frame.style.height=h*s+'px';
  if(!on){for(const el of[cv,img])for(const k of['left','top','width','height','border-radius'])el.style.removeProperty(k);
   return W>0&&availableH>0?{w:W,h:availableH}:null}

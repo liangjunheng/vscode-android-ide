@@ -32,8 +32,7 @@ function navigationStyle() {
 
 // 保留实际布局写入的图标大小，供窄窗、横竖屏和加载占位的断言读取。
 function navigationElement() {
-  const svgs = [{ style: {} }, { style: {} }, { style: {} }];
-  return { style: { setProperty(name, value) { this[name] = value; } }, svgs, querySelectorAll: () => svgs };
+  return { style: { setProperty(name, value) { this[name] = value; } } };
 }
 
 // 按输出几何独立断言约束、比例、图标大小及上下 4px 留白；至少宽度或总高度必须贴合可用边界。
@@ -42,8 +41,7 @@ function assertNavigationFit(c, width, height, ratio) {
   const icon = parseFloat(c.navigation.style['--nav-icon-size']);
   const W = Math.max(0, width - 16), H = Math.max(0, height - 8 - c.barEl.offsetHeight);
   assert.equal(c.stage.style.width, c.frame.style.width);
-  assert.ok(Math.abs(icon - w * 0.064) < 0.001);
-  assert.ok(c.navigation.svgs.every(svg => svg.style.width === `${icon}px` && svg.style.height === `${icon}px`));
+  assert.ok(Math.abs(icon - Math.min(24, w * 0.08)) < 0.001);
   assert.ok(w >= 0 && w <= W + 0.001);
   assert.ok(h >= 0 && h + icon + 8 <= Math.max(H, 8) + 0.001);
   assert.ok(Math.abs(w - W) < 0.001 || Math.abs(h + icon + 8 - H) < 0.001);
@@ -134,7 +132,8 @@ test('mirror layout keeps controls immediately above a top-centered screen', () 
   assert.equal(rule('#navigation')['grid-template-columns'], 'repeat(3,minmax(0,1fr))');
   assert.equal(rule('#navigation').width, '100%');
   assert.equal(rule('#navigation').height, 'auto');
-  assert.equal(rule('#navigation')['--nav-icon-ratio'], '0.064');
+  assert.equal(rule('#navigation')['--nav-icon-max'], '24px');
+  assert.equal(rule('#navigation')['--nav-icon-ratio'], '0.08');
   assert.equal(parseFloat(rule('#navigation')['--nav-padding']), 6 * 2 / 3);
   assert.equal(rule('#navigation button').padding, 'var(--nav-padding) 0');
   assert.equal(rule('#navigation button svg').width, 'var(--nav-icon-size)');
@@ -331,24 +330,22 @@ test('mirror loading ends on actual first frames and handles errors and reconnec
 });
 
 
-// 图标在当前宽度下缩小五分之一，不设固定上限；缩到半宽时仍缩半，上下各 4px 留白。
+// 图标在当前宽度下缩小五分之一，最大 24px；缩到半宽时仍缩半，上下各 4px 留白。
 test('mirror navigation icons shrink by one fifth and vertical padding by one third', () => {
   const { context: c } = loadingFixture();
   c.frame.dataset.state = 'live';c.skin = null;c.fw = 100;c.fh = 200;
   c.wrapEl.getBoundingClientRect = () => ({ width: 316, height: 1000 });
   c.layout();
   const wide = assertNavigationFit(c, 316, 1000, 0.5);
-  assert.equal(wide.w, 300);assert.ok(Math.abs(wide.icon - wide.w * 0.064) < 0.001);
+  assert.equal(wide.w, 300);assert.equal(wide.icon, 30 * 4 / 5);
   c.wrapEl.getBoundingClientRect = () => ({ width: 166, height: 1000 });
   c.layout();
   const narrow = assertNavigationFit(c, 166, 1000, 0.5);
-  assert.equal(narrow.w, 150);assert.ok(Math.abs(narrow.icon - narrow.w * 0.064) < 0.001);
+  assert.equal(narrow.w, 150);assert.equal(narrow.icon, 15 * 4 / 5);
   assert.equal(narrow.icon / wide.icon, narrow.w / wide.w);
-  c.wrapEl.getBoundingClientRect = () => ({ width: 800, height: 2000 });
+  c.wrapEl.getBoundingClientRect = () => ({ width: 800, height: 1000 });
   c.layout();
-  const uncapped = assertNavigationFit(c, 800, 2000, 0.5);
-  assert.equal(uncapped.w, 784);
-  assert.ok(Math.abs(uncapped.icon - uncapped.w * 0.064) < 0.001);
+  assert.equal(assertNavigationFit(c, 800, 1000, 0.5).icon, 24);
 });
 
 
