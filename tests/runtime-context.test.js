@@ -15,12 +15,12 @@ function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-context-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const host = runtime.runtimeTarget();
-  const platformTools = path.join(root, 'runtime', host, 'platform-tools');
+  const platformTools = path.join(root, 'resources', 'platform-tools', host);
   fs.mkdirSync(platformTools, { recursive: true });
   return { root, host, platformTools };
 }
 
-// node --test tests/runtime-context.test.js：runtime/<host>/platform-tools 是唯一内置 ADB 布局，Windows 使用 adb.exe。
+// node --test tests/runtime-context.test.js：resources/platform-tools/<host> 是唯一内置 ADB 布局，旧 runtime/<host> 布局必须忽略，Windows 使用 adb.exe。
 test('resolves bundled adb from canonical runtime layout', t => {
   const f = fixture(t);
   const adb = path.join(f.platformTools, process.platform === 'win32' ? 'adb.exe' : 'adb');
@@ -28,6 +28,8 @@ test('resolves bundled adb from canonical runtime layout', t => {
   if (process.platform !== 'win32') fs.chmodSync(adb, 0o755);
   const context = runtime.createRuntimeContext(f.root);
   assert.equal(context.target, f.host);
+  assert.equal(context.runtimeRoot, path.join(f.root, 'resources'));
+  assert.equal(context.dependencies.platformTools, f.platformTools);
   assert.equal(context.dependencies.adb, fs.realpathSync(adb));
   assert.equal(runtime.resolveBundledExecutable(f.root, 'adb'), fs.realpathSync(adb));
 });
@@ -35,11 +37,15 @@ test('resolves bundled adb from canonical runtime layout', t => {
 // 缺失内置依赖必须显式为 undefined，不伪造路径；上下文初始化对同一根目录保持稳定对象。
 test('reports missing bundled dependencies and preserves initialized context', t => {
   const f = fixture(t);
+  const legacyAdb = path.join(f.root, 'runtime', f.host, 'platform-tools', runtime.executable('adb'));
+  fs.mkdirSync(path.dirname(legacyAdb), { recursive: true });
+  fs.writeFileSync(legacyAdb, 'legacy');
   runtime.resetRuntimeContext();
   const first = runtime.initializeRuntimeContext(f.root);
   const second = runtime.initializeRuntimeContext(f.root);
   assert.strictEqual(first, second);
   assert.equal(first.dependencies.adb, undefined);
+  assert.equal(fs.existsSync(legacyAdb), true);
   assert.equal(first.dependencies.lldbDap, undefined);
   assert.equal(first.dependencies.lldbServer('arm64-v8a'), undefined);
   assert.equal(first.dependencies.ndkRoot, undefined);
@@ -51,21 +57,21 @@ test('reports missing bundled dependencies and preserves initialized context', t
 // 平台/依赖/文件层级统一管理；每个候选都创建真实文件，断言实际解析路径而非字符串登记。
 test('resolves every bundled dependency and platform naming convention', t => {
   const f = fixture(t);
-  const base = path.join(f.root, 'runtime', f.host);
+  const base = path.join(f.root, 'resources');
   const candidates = {
-    emulator: ['emulator', runtime.executable('emulator')],
-    sdkmanager: ['cmdline-tools', 'latest', 'bin', runtime.commandScript('sdkmanager')],
-    avdmanager: ['cmdline-tools', 'latest', 'bin', runtime.commandScript('avdmanager')],
-    lldbDap: ['lldb', 'bin', runtime.executable('lldb-dap')],
+    emulator: ['emulator', f.host, runtime.executable('emulator')],
+    sdkmanager: ['cmdline-tools', f.host, 'latest', 'bin', runtime.commandScript('sdkmanager')],
+    avdmanager: ['cmdline-tools', f.host, 'latest', 'bin', runtime.commandScript('avdmanager')],
+    lldbDap: ['lldb', f.host, 'bin', runtime.executable('lldb-dap')],
   };
   for (const parts of Object.values(candidates)) { const filename = path.join(base, ...parts); fs.mkdirSync(path.dirname(filename), { recursive: true }); fs.writeFileSync(filename, 'fixture'); }
-  for (const name of ['ndk', 'jdk', 'system-images']) fs.mkdirSync(path.join(base, name));
+  for (const name of ['ndk', 'jdk', 'system-images']) fs.mkdirSync(path.join(base, name, f.host), { recursive: true });
   const ctx = runtime.createRuntimeContext(f.root);
   for (const [name, parts] of Object.entries(candidates)) assert.equal(ctx.dependencies[name], fs.realpathSync(path.join(base, ...parts)));
-  assert.equal(ctx.dependencies.ndkRoot, fs.realpathSync(path.join(base, 'ndk')));
-  assert.equal(ctx.dependencies.jdkRoot, fs.realpathSync(path.join(base, 'jdk')));
-  assert.equal(ctx.dependencies.systemImagesRoot, fs.realpathSync(path.join(base, 'system-images')));
-  assert.equal(ctx.dependencies.scrcpyServer, path.join(f.root, 'resources', 'scrcpy-server.jar'));
+  assert.equal(ctx.dependencies.ndkRoot, fs.realpathSync(path.join(base, 'ndk', f.host)));
+  assert.equal(ctx.dependencies.jdkRoot, fs.realpathSync(path.join(base, 'jdk', f.host)));
+  assert.equal(ctx.dependencies.systemImagesRoot, fs.realpathSync(path.join(base, 'system-images', f.host)));
+  assert.equal(ctx.dependencies.scrcpyServer, path.join(f.root, 'resources', 'scrcpy', 'scrcpy-server.jar'));
   assert.equal(runtime.bundledRuntimeCandidate(f.root, 'adb').candidate, path.join(f.platformTools, runtime.executable('adb')));
   for (const [platform, arch] of [['win32', 'x64'], ['win32', 'arm64'], ['linux', 'x64'], ['linux', 'arm64'], ['linux', 'arm'], ['darwin', 'x64'], ['darwin', 'arm64']]) assert.equal(runtime.runtimeTarget(platform, arch), platform + '-' + arch);
   assert.equal(runtime.commandScript('avdmanager', 'win32'), 'avdmanager.bat');
@@ -77,6 +83,7 @@ test('resolves every bundled dependency and platform naming convention', t => {
 test('rejects escaped paths, non-files and IO failures', t => {
   const f = fixture(t);
   assert.throws(() => runtime.resolveBundledPath(f.root, ['..', 'escape']), /escapes/);
+  assert.throws(() => runtime.resolveBundledPath(f.root, ['platform-tools', '..', '..', 'lldb', f.host, 'bin']), /escapes/);
   const name = runtime.executable('adb');
   fs.mkdirSync(path.join(f.platformTools, name));
   assert.throws(() => runtime.resolveBundledExecutable(f.root, 'adb'), /not a regular file/);
@@ -120,10 +127,10 @@ test('SDK consumers share bundled paths and fallback from an incomplete SDK', t 
   assert.equal(sdk.avdmanagerPath(), avd);
 });
 
-// lldb-server 按设备 ABI 从 runtime/<host>/lldb-server/<abi> 解析，越界链接和目录均不视为成功。
+// lldb-server 按设备 ABI 从 resources/lldb-server/<host>/<abi> 解析，越界链接和目录均不视为成功。
 test('resolves ABI-specific bundled lldb-server safely', t => {
   const f = fixture(t);
-  const dir = path.join(f.root, 'runtime', f.host, 'lldb-server', 'arm64-v8a');
+  const dir = path.join(f.root, 'resources', 'lldb-server', f.host, 'arm64-v8a');
   fs.mkdirSync(dir, { recursive: true });
   const server = path.join(dir, 'lldb-server');
   fs.writeFileSync(server, 'server');

@@ -14,8 +14,8 @@ function fixture(t) {
   const manifest = { name: 'android-runtime-fixture', version: '1.0.0', publisher: 'fixture', engines: { vscode: '^1.95.0' }, description: 'Package content regression', main: './dist/extension.js', activationEvents: ['onStartupFinished'], license: 'MIT', repository: { type: 'git', url: 'https://github.com/microsoft/vscode-extension-samples.git' } };
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
   fs.copyFileSync(path.join(__dirname, '../.vscodeignore'), path.join(root, '.vscodeignore'));
-  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'runtime/runtime-manifest.json', 'resources/scrcpy-server.jar', 'resources/scrcpy-LICENSE.txt', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
-  const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/jvm/src/debugMain.js', 'dist/extension.js.map', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'tools/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE'];
+  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
+  const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/jvm/src/debugMain.js', 'dist/extension.js.map', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'runtime/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE'];
   for (const file of included.concat(excluded)) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), file === 'README.md' ? '# Package fixture' : file === 'LICENSE' ? 'MIT License - Copyright (c) fixture' : 'fixture');
@@ -61,14 +61,14 @@ test('actual VSIX archive retains bundled backends tools resources and notices',
 // 真实仓库 runtime 由 tools 复制而来；校验结构化清单、每文件大小/哈希及四宿主覆盖。
 test('repository runtime manifest matches every shipped platform-tools file', () => {
   const root = path.resolve(__dirname, '..');
-  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'runtime/runtime-manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'resources/platform-tools/runtime-manifest.json'), 'utf8'));
   assert.equal(manifest.schemaVersion, 1);
   assert.deepEqual(Object.keys(manifest.hosts).sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
   for (const [host, info] of Object.entries(manifest.hosts)) {
     assert.ok(info.platform && info.architecture);
     const files = info.dependencies.platformTools.files;
     assert.ok(files.length >= 4);
-    const runtimeDir = path.join(root, 'runtime', host, 'platform-tools');
+    const runtimeDir = path.join(root, 'resources', 'platform-tools', host);
     const actual = fs.readdirSync(runtimeDir).filter(name => fs.statSync(path.join(runtimeDir, name)).isFile()).sort();
     assert.deepEqual(files.map(entry => entry.path).sort(), actual);
     for (const entry of files) {
@@ -88,12 +88,15 @@ test('repository runtime manifest matches every shipped platform-tools file', ()
 test('repository VSIX contains runtime assets and excludes source tools', async t => {
   const root = path.resolve(__dirname, '..');
   const files = new Set(await vsce.listFiles({ cwd: root, packageManager: vsce.PackageManager.None }));
-  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'runtime/runtime-manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'resources/platform-tools/runtime-manifest.json'), 'utf8'));
   for (const [host, info] of Object.entries(manifest.hosts)) {
-    for (const entry of info.dependencies.platformTools.files) assert.ok(files.has('runtime/' + host + '/platform-tools/' + entry.path), 'runtime omitted: ' + host + '/' + entry.path);
+    for (const entry of info.dependencies.platformTools.files) assert.ok(files.has('resources/platform-tools/' + host + '/' + entry.path), 'runtime omitted: ' + host + '/' + entry.path);
   }
-  assert.ok(files.has('runtime/runtime-manifest.json'));
-  assert.equal([...files].some(name => name.startsWith('tools/')), false);
+  assert.ok(files.has('resources/platform-tools/runtime-manifest.json'));
+  assert.ok(files.has('resources/platform-tools/adb-runtime-provenance.json'));
+  assert.equal([...files].some(name => name.startsWith('runtime/')), false);
+  assert.equal(files.has('resources/scrcpy-server.jar'), false);
+  assert.equal(files.has('resources/scrcpy-LICENSE.txt'), false);
   const output = path.join(os.tmpdir(), 'vscode-android-tools-runtime-' + process.pid + '.vsix');
   t.after(() => fs.rmSync(output, { force: true }));
   await vsce.createVSIX({ cwd: root, packagePath: output, dependencies: false });
@@ -101,9 +104,9 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
   const zip = fs.createReadStream(output).pipe(Parse({ forceStream: true }));
   for await (const entry of zip) { archive.add(entry.path); entry.autodrain(); }
   for (const [host, info] of Object.entries(manifest.hosts)) {
-    for (const entry of info.dependencies.platformTools.files) assert.ok(archive.has('extension/runtime/' + host + '/platform-tools/' + entry.path), 'archive omitted: ' + host + '/' + entry.path);
+    for (const entry of info.dependencies.platformTools.files) assert.ok(archive.has('extension/resources/platform-tools/' + host + '/' + entry.path), 'archive omitted: ' + host + '/' + entry.path);
   }
-  assert.equal([...archive].some(name => name.startsWith('extension/tools/')), false);
+  assert.equal([...archive].some(name => name.startsWith('extension/runtime/')), false);
   const unpacked = fs.mkdtempSync(path.join(os.tmpdir(), 'android-packaged-root-'));
   t.after(() => fs.rmSync(unpacked, { recursive: true, force: true }));
   const contents = await require('unzipper').Open.file(output);

@@ -61,20 +61,26 @@ Activation creates one context with the host OS, architecture, target key, and d
 Missing optional dependencies are explicit; SDK and PATH fallbacks do not substitute another architecture.
 
 ```text
-runtime/
-  runtime-manifest.json
-  win32-x64/platform-tools/adb.exe
-  win32-x64/platform-tools/AdbWinApi.dll
-  win32-x64/platform-tools/AdbWinUsbApi.dll
-  linux-x64/platform-tools/adb
-  darwin-x64/platform-tools/adb
-  darwin-arm64/platform-tools/adb
 resources/
-  scrcpy-server.jar
+  platform-tools/
+    runtime-manifest.json
+    adb-runtime-provenance.json
+    win32-x64/adb.exe
+    win32-x64/AdbWinApi.dll
+    win32-x64/AdbWinUsbApi.dll
+    linux-x64/adb
+    darwin-x64/adb
+    darwin-arm64/adb
+  scrcpy/
+    README.md
+    scrcpy-LICENSE.txt
+    scrcpy-server.jar
 ```
 
 Each platform dependency directory also includes its NOTICE, version metadata and provenance.
-The top-level `tools/` staging directory is retired: published tools live only in `runtime/`.
+The top-level `tools/` and `runtime/` directories are retired: published dependencies live only in
+`resources/<tool>/<host>/`, while platform-independent scrcpy files live in `resources/scrcpy/`.
+All dependency paths are resolved by `RuntimeContext`; consumers do not construct resource paths.
 Inactive native-debugger build artifacts are preserved under the ignored
 `.test-artifacts/native-toolchain/` development cache and are not runtime search paths or VSIX assets.
 Historical `sourcePath` fields in the runtime manifest describe the original migration source;
@@ -96,7 +102,7 @@ The extension runs in VS Code Desktop on Windows, macOS, and Linux. The TypeScri
 | Linux arm64/armhf | Requires an external compatible Platform-Tools installation | Requires Android SDK Emulator, Command-Line Tools, and a system image |
 | VS Code for the Web | Not available: the browser cannot execute local `adb` | Not available |
 
-The VSIX bundles the core Android Platform-Tools ADB runtime for Windows x64, macOS x64/arm64, and Linux x64 under `runtime/<host>/platform-tools`. It also bundles the scrcpy server and UI assets. The Android Emulator, SDK Command-Line Tools, Android system images, JDK, and compatible architecture-specific SDK packages remain external dependencies; install them from the official Android sources before using emulator, AVD, build, or Java workflows:
+The VSIX bundles the core Android Platform-Tools ADB runtime for Windows x64, macOS x64/arm64, and Linux x64 under `resources/platform-tools/<host>`. It also bundles the scrcpy server and UI assets. The Android Emulator, SDK Command-Line Tools, Android system images, JDK, and compatible architecture-specific SDK packages remain external dependencies; install them from the official Android sources before using emulator, AVD, build, or Java workflows:
 
 1. Download [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) for the host platform and make `adb` available through the SDK, project-local configuration, or `PATH`.
 2. Install [Android SDK Command-Line Tools](https://developer.android.com/studio#command-line-tools-only) and the [Android Emulator](https://developer.android.com/studio/run/emulator) for AVD management.
@@ -136,7 +142,7 @@ The extension does not copy external SDK, emulator, command-line-tool, system-im
 }
 ```
 
-The scrcpy server is the exception: it is bundled at `resources/scrcpy-server.jar` inside the extension and is pushed to the selected Android device at runtime. Optional external debugger executables may be configured under `debugger.adbPath`, `debugger.lldbDapPath`, and `debugger.ndkPath`.
+The scrcpy server is the exception: it is bundled at `resources/scrcpy/scrcpy-server.jar` inside the extension and is pushed to the selected Android device at runtime. Optional external debugger executables may be configured under `debugger.adbPath`, `debugger.lldbDapPath`, and `debugger.ndkPath`.
 
 ### Companion VS Code extensions
 

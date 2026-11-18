@@ -10,15 +10,15 @@ const { verifyCoreRuntime } = require('../scripts/verify-core-runtime.cjs');
 function corrupted(t, change, message, omittedDirectory) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'android-runtime-corrupt-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const source = path.resolve(__dirname, '..', 'runtime');
+  const source = path.resolve(__dirname, '..', 'resources', 'platform-tools');
   const omitted = omittedDirectory && path.join(source, omittedDirectory);
-  fs.cpSync(source, path.join(root, 'runtime'), { recursive: true, filter: candidate => candidate !== omitted });
+  fs.cpSync(source, path.join(root, 'resources', 'platform-tools'), { recursive: true, filter: candidate => candidate !== omitted });
   change(root);
   assert.throws(() => verifyCoreRuntime(root), message);
 }
 // 模拟同时更新清单和provenance的错误架构，确保架构门禁独立于哈希存在。
 function replaceBinary(root, host, filename, mutate) {
-  const directory = path.join(root, 'runtime', host, 'platform-tools');
+  const directory = path.join(root, 'resources', 'platform-tools', host);
   const file = path.join(directory, filename); const bytes = fs.readFileSync(file);
   mutate(bytes); fs.writeFileSync(file, bytes);
   const digest = b => crypto.createHash('sha256').update(b).digest('hex');
@@ -26,25 +26,40 @@ function replaceBinary(root, host, filename, mutate) {
   const provenance = JSON.parse(fs.readFileSync(provenanceFile));
   provenance.payloads.find(entry => entry.path === filename).sha256 = digest(bytes);
   fs.writeFileSync(provenanceFile, JSON.stringify(provenance));
-  const manifestFile = path.join(root, 'runtime', 'runtime-manifest.json');
+  const manifestFile = path.join(root, 'resources', 'platform-tools', 'runtime-manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestFile));
   for (const entry of manifest.hosts[host].dependencies.platformTools.files) { const b = fs.readFileSync(path.join(directory, entry.path)); entry.sha256 = digest(b); entry.bytes = b.length; }
   fs.writeFileSync(manifestFile, JSON.stringify(manifest));
 }
 // Node>=22运行本文件及vsix-content：真实文件通过，以下每个错误必须拒绝。
-test('rejects missing Windows companion DLL', t => corrupted(t, root => fs.rmSync(path.join(root, 'runtime/win32-x64/platform-tools/AdbWinApi.dll')), /file set mismatch/));
-test('rejects modified Windows companion DLL', t => corrupted(t, root => fs.appendFileSync(path.join(root, 'runtime/win32-x64/platform-tools/AdbWinUsbApi.dll'), 'corrupt'), /hash[/]size mismatch/));
+test('rejects missing Windows companion DLL', t => corrupted(t, root => fs.rmSync(path.join(root, 'resources/platform-tools/win32-x64/AdbWinApi.dll')), /file set mismatch/));
+test('rejects modified Windows companion DLL', t => corrupted(t, root => fs.appendFileSync(path.join(root, 'resources/platform-tools/win32-x64/AdbWinUsbApi.dll'), 'corrupt'), /hash[/]size mismatch/));
 test('rejects wrong PE machine even with updated hashes', t => corrupted(t, root => replaceBinary(root, 'win32-x64', 'adb.exe', bytes => bytes.writeUInt16LE(0xaa64, bytes.readUInt32LE(0x3c) + 4)), /not PE i386/));
 test('rejects wrong ELF machine even with updated hashes', t => corrupted(t, root => replaceBinary(root, 'linux-x64', 'adb', bytes => bytes.writeUInt16LE(183, 18)), /not ELF x86_64/));
 test('rejects missing Mach-O target even with updated hashes', t => corrupted(t, root => replaceBinary(root, 'darwin-arm64', 'adb', bytes => { const count = bytes.readUInt32BE(4); for (let i = 0; i < count; i++) bytes.writeUInt32BE(0x01000007, 8 + i * 20); }), /Mach-O architecture/));
-test('rejects undeclared runtime subdirectories', t => corrupted(t, root => fs.mkdirSync(path.join(root, 'runtime/linux-x64/platform-tools/extra')), /not a regular/));
+test('rejects undeclared runtime subdirectories', t => corrupted(t, root => fs.mkdirSync(path.join(root, 'resources/platform-tools/linux-x64/extra')), /not a regular/));
 test('rejects escaped runtime dependency directory', t => corrupted(t, root => {
-  const location = path.join(root, 'runtime/linux-x64/platform-tools');
+  const location = path.join(root, 'resources/platform-tools/linux-x64');
   const outside = path.join(root, 'outside'); fs.mkdirSync(outside);
   assert.equal(fs.existsSync(location), false, 'Link must be constructed at a fresh path');
   fs.symlinkSync(outside, location, process.platform === 'win32' ? 'junction' : 'dir');
   assert.equal(fs.lstatSync(location).isSymbolicLink(), true);
-}, /real directory|escapes/, 'linux-x64/platform-tools'));
+}, /real directory|escapes/, 'linux-x64'));
+
+// 输入两个资源父级位置并构造指向真实资产的链接；Node>=22运行本文件，应在读取清单前拒绝父级链接。
+for (const parent of ['resources', 'platform-tools']) {
+  test('rejects linked runtime parent ' + parent, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'android-runtime-parent-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const resources = path.join(root, 'resources');
+    if (parent === 'platform-tools') fs.mkdirSync(resources);
+    const target = parent === 'resources' ? path.resolve(__dirname, '../resources') : path.resolve(__dirname, '../resources/platform-tools');
+    const location = parent === 'resources' ? resources : path.join(resources, 'platform-tools');
+    fs.symlinkSync(target, location, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(fs.lstatSync(location).isSymbolicLink(), true);
+    assert.throws(() => verifyCoreRuntime(root), /parent directory is not a real directory/);
+  });
+}
 
 test('core runtime verifier accepts repository assets', () => {
   const result = verifyCoreRuntime(path.resolve(__dirname, '..'));
@@ -56,8 +71,8 @@ test('core runtime verifier accepts repository assets', () => {
 test('core runtime verifier rejects changed manifest hashes', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'android-core-runtime-'));
   try {
-    fs.cpSync(path.resolve(__dirname, '..', 'runtime'), path.join(root, 'runtime'), { recursive: true });
-    const manifestFile = path.join(root, 'runtime/runtime-manifest.json');
+    fs.cpSync(path.resolve(__dirname, '..', 'resources', 'platform-tools'), path.join(root, 'resources', 'platform-tools'), { recursive: true });
+    const manifestFile = path.join(root, 'resources/platform-tools/runtime-manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
     manifest.hosts['linux-x64'].dependencies.platformTools.files[0].sha256 = '0'.repeat(64);
     fs.writeFileSync(manifestFile, JSON.stringify(manifest));

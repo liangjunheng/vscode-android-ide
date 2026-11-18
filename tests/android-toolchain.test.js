@@ -48,17 +48,18 @@ test('debugger adb override uses project local configuration and rejects invalid
   }
 });
 
-// npm test：扩展规范runtime优先于存储；旧tools即使存在也不能影响生产/开发一致性。
+// npm test：扩展 resources 优先于存储；旧 runtime/tools 布局即使存在也不能影响生产/开发一致性。
 test('bundled runtime resolves extension before storage and ignores retired tools', async t => {
   const f = resolverFixture(t, { pathAdb: 'adb-from-path' });
   const extensionRoot = path.join(f.root, 'extension'); const storageRoot = path.join(f.root, 'storage');
   const binary = process.platform === 'win32' ? 'adb.exe' : 'adb';
   const host = process.platform + '-' + process.arch;
-  const primary = path.join(extensionRoot, 'runtime', host, 'platform-tools', binary);
+  const primary = path.join(extensionRoot, 'resources', 'platform-tools', host, binary);
   const retired = path.join(extensionRoot, 'tools', host, binary);
   const retiredNested = path.join(extensionRoot, 'tools', host, 'platform-tools', binary);
-  const storage = path.join(storageRoot, 'runtime', host, 'platform-tools', binary);
-  for (const file of [primary, retired, retiredNested, storage]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'fixture'); }
+  const storage = path.join(storageRoot, 'resources', 'platform-tools', host, binary);
+  const legacyRuntime = path.join(extensionRoot, 'runtime', host, 'platform-tools', binary);
+  for (const file of [primary, retired, retiredNested, legacyRuntime, storage]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'fixture'); }
   const context = { extensionPath: extensionRoot, globalStorageUri: { fsPath: storageRoot } };
   assert.equal((await f.resolve(context)).adb, primary);
   fs.rmSync(primary); const selected = await f.resolve(context);
@@ -74,7 +75,7 @@ test('android toolchain resolves extension, SDK, PATH, and missing diagnostics',
   const storageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'android-storage-'));
   t.after(() => { fs.rmSync(extensionRoot, { recursive: true, force: true }); fs.rmSync(storageRoot, { recursive: true, force: true }); });
   const executable = process.platform === 'win32' ? 'adb.exe' : 'adb';
-  const extensionAdb = path.join(extensionRoot, 'runtime', process.platform + '-' + process.arch, 'platform-tools', executable);
+  const extensionAdb = path.join(extensionRoot, 'resources', 'platform-tools', process.platform + '-' + process.arch, executable);
   fs.mkdirSync(path.dirname(extensionAdb), { recursive: true }); fs.writeFileSync(extensionAdb, '');
   const sdkRoot = path.join(extensionRoot, 'sdk');
   const sdkAdb = path.join(sdkRoot, 'platform-tools', executable);

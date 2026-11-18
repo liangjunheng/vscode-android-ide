@@ -9,8 +9,8 @@ is in THIRD_PARTY_NOTICES.md. Main items:
   (colors replaced by currentColor).
 - media/icons/lc-*.svg derived from the IntelliJ Platform, Copyright JetBrains s.r.o.
   and contributors, Apache License 2.0.
-- resources/scrcpy-server.jar: scrcpy, Copyright (C) Genymobile, Apache License 2.0
-  (resources/scrcpy-LICENSE.txt). Source: https://github.com/Genymobile/scrcpy
+- resources/scrcpy/scrcpy-server.jar: scrcpy, Copyright (C) Genymobile, Apache License 2.0
+  (resources/scrcpy/scrcpy-LICENSE.txt). Source: https://github.com/Genymobile/scrcpy
 - media/codicons: Microsoft Codicons (CC-BY-4.0) and code (MIT).
 - media/logcat/fonts: JetBrains Mono, SIL Open Font License 1.1.
 - @grpc/grpc-js, @grpc/proto-loader: Apache License 2.0; protobufjs: BSD-3-Clause.

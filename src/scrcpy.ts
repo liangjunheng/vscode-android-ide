@@ -3,7 +3,7 @@ import { scrcpyServerPath } from './runtimeContext';
 import { ChildProcess, spawn } from 'child_process';
 import { adb, adbPath, freePort, sdkRoot, runBuffer } from './sdk';
 
-// Must match the bundled resources/scrcpy-server.jar
+// Must match the bundled resources/scrcpy/scrcpy-server.jar
 export const SCRCPY_VERSION = '3.3.4';
 const REMOTE_JAR = '/data/local/tmp/scrcpy-server-vscode.jar';
 const POINTER_MOUSE = 0xffffffffffffffffn;

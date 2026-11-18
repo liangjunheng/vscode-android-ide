@@ -20,6 +20,7 @@ export interface RuntimeContext {
   platform: NodeJS.Platform;
   arch: string;
   target: string;
+  /** 扩展内resources根；具体工具路径由dependencies及runtimeHostRoot提供，runtime-context回归验证。 */
   runtimeRoot: string;
   dependencies: RuntimeDependencies;
 }
@@ -39,22 +40,26 @@ function stat(candidate: string): fs.Stats | undefined { try { return fs.statSyn
 function contained(root: string, candidate: string): boolean { const relative = path.relative(root, candidate); return !!relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); }
 
 /**
- * 输入扩展根及平台内相对路径，输出安全的内置依赖或undefined；缺失可回退，权限/目录/越界不能吞错。
+ * 输入扩展根及工具类别/工具内相对路径，按resources/<工具>/<宿主>输出安全依赖或undefined；缺失可回退，权限/目录/越界不能吞错。
  * 仅在扩展自有可执行文件缺执行位时修复执行位；普通资源不修改权限。
  * Node>=22执行node --test tests/runtime-context.test.js，断言符号链接、权限、缺失及文件类型。
  */
 export function resolveBundledPath(extensionRoot: string, relativeParts: string[], mode: 'file' | 'directory' | 'resource' = 'file'): string | undefined {
   const extension = path.resolve(extensionRoot);
-  const root = path.resolve(extension, 'runtime', runtimeTarget());
-  const candidate = path.resolve(root, ...relativeParts);
-  if (!contained(root, candidate)) throw new Error('Bundled runtime escapes host root: ' + candidate);
+  const [dependency, ...parts] = relativeParts;
+  const root = runtimeHostRoot(extension, dependency);
+  const candidate = path.resolve(root, ...parts);
+  const dependencyDirectory = mode === 'directory' && parts.length === 0;
+  if (!contained(root, candidate) && !dependencyDirectory) throw new Error('Bundled runtime escapes host root: ' + candidate);
   let real: string; let info: fs.Stats;
   try {
     const extensionReal = fs.realpathSync(extension);
+    const resourcesReal = fs.realpathSync(path.join(extension, 'resources'));
+    const dependencyReal = fs.realpathSync(path.join(extension, 'resources', dependency));
     const rootReal = fs.realpathSync(root);
-    if (!contained(extensionReal, rootReal)) throw new Error('Bundled runtime root escapes extension: ' + root);
+    if (!contained(extensionReal, resourcesReal) || !contained(resourcesReal, dependencyReal) || !contained(dependencyReal, rootReal)) throw new Error('Bundled runtime symlink escapes dependency root: ' + root);
     real = fs.realpathSync(candidate);
-    if (!contained(rootReal, real)) throw new Error('Bundled runtime symlink escapes host root: ' + candidate);
+    if (!contained(rootReal, real) && !(dependencyDirectory && real === rootReal)) throw new Error('Bundled runtime symlink escapes host root: ' + candidate);
     info = fs.statSync(real);
   } catch (error) { if (missing(error)) return undefined; throw error; }
   if (mode === 'directory') { if (!info.isDirectory()) throw new Error('Bundled runtime is not a directory: ' + candidate); }
@@ -71,11 +76,14 @@ export function resolveBundledPath(extensionRoot: string, relativeParts: string[
 export function resolveBundledExecutable(root: string, name: string): string | undefined { return resolveBundledPath(root, ['platform-tools', executable(name)]); }
 /** 返回依赖类别下的候选路径和所有权根；runtime-context回归验证lldb/platform-tools候选。 */
 export function bundledRuntimeCandidate(root: string, name: string, dependency = 'platform-tools'): { candidate: string; root: string } {
-  const owned = path.resolve(root, 'runtime', runtimeTarget());
-  return { candidate: path.join(owned, dependency, executable(name)), root: owned };
+  const owned = runtimeHostRoot(root, dependency);
+  return { candidate: path.join(owned, executable(name)), root: owned };
 }
-/** 返回当前宿主规范runtime根；android-native-toolchain回归断言扩展与存储候选不再访问旧tools目录。 */
-export function runtimeHostRoot(root: string): string { return path.resolve(root, 'runtime', runtimeTarget()); }
+/** 输入扩展根和工具类别，返回resources/<工具>/<宿主>所有权根；runtime-context回归拒绝工具名越界及旧目录。 */
+export function runtimeHostRoot(root: string, dependency = 'platform-tools'): string {
+  if (!dependency || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(dependency)) throw new Error('Bundled runtime dependency escapes resources: ' + dependency);
+  return path.resolve(root, 'resources', dependency, runtimeTarget());
+}
 /** 仅构造规范ADB候选；android-toolchain回归验证扩展、存储、SDK及旧目录不参与回退。 */
 export function adbRuntimeCandidates(root: string): Array<{ candidate: string; root: string }> {
   return [bundledRuntimeCandidate(root, 'adb')];
@@ -86,7 +94,7 @@ export function resolveBundledLldbServer(root: string, abi: string): string | un
   return resolveBundledPath(root, ['lldb-server', abi, 'lldb-server'], 'resource');
 }
 /** 输入扩展根，输出已随包发布的scrcpy资源位置；runtime-context回归验证真实VSIX资源位置一致。 */
-export function scrcpyServerPath(root: string): string { return path.join(root, 'resources', 'scrcpy-server.jar'); }
+export function scrcpyServerPath(root: string): string { return path.join(root, 'resources', 'scrcpy', 'scrcpy-server.jar'); }
 /** 输入用户SDK覆盖路径，输出标准SDK候选列表；SDK和android-toolchain回归验证配置/环境优先级。 */
 export function sdkCandidates(configured?: string): string[] {
   return [configured, process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT, path.join(os.homedir(), 'Library', 'Android', 'sdk'), path.join(os.homedir(), 'Android', 'Sdk'), path.join(process.env.LOCALAPPDATA ?? '', 'Android', 'Sdk')].filter(Boolean) as string[];
@@ -105,13 +113,13 @@ export function sdkToolPath(root: string, tool: 'adb' | 'emulator' | 'sdkmanager
 /** 返回存在的外部普通文件或undefined，不改外部权限；runtime-context回归验证残缺SDK回退。 */
 export function existingRuntimeFile(candidate: string): string | undefined { return stat(candidate)?.isFile() ? candidate : undefined; }
 /**
- * 输入扩展安装根，构造统一平台和内置依赖上下文；不下载、不启动进程，缺资源显式undefined。
+ * 输入扩展安装根，以resources为统一资源根构造平台和内置依赖上下文；不下载、不启动进程，缺资源显式undefined。
  * Node>=22执行node --test tests/runtime-context.test.js，断言所有依赖层级、ABI和生命周期。
  */
 export function createRuntimeContext(extensionRoot: string): RuntimeContext {
-  const runtimeRoot = path.join(extensionRoot, 'runtime', runtimeTarget());
+  const runtimeRoot = path.join(extensionRoot, 'resources');
   return { extensionRoot, platform: process.platform, arch: process.arch, target: runtimeTarget(), runtimeRoot, dependencies: {
-    platformTools: path.join(runtimeRoot, 'platform-tools'),
+    platformTools: runtimeHostRoot(extensionRoot, 'platform-tools'),
     adb: resolveBundledExecutable(extensionRoot, 'adb'),
     emulator: resolveBundledPath(extensionRoot, ['emulator', executable('emulator')]),
     sdkmanager: resolveBundledPath(extensionRoot, ['cmdline-tools', 'latest', 'bin', commandScript('sdkmanager')]),

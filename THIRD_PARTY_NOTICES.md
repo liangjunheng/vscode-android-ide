@@ -41,7 +41,7 @@ The bundled `dist/extension.js` contains the following npm packages (production 
 ## Bundled Android Platform-Tools
 
 The extension includes Android Platform-Tools 37.0.1 ADB host payloads under
-`runtime/<host>/platform-tools/` for Windows x64, Linux x64, macOS x64, and macOS arm64.
+`resources/platform-tools/<host>/` for Windows x64, Linux x64, macOS x64, and macOS arm64.
 Windows includes the required AdbWinApi.dll and AdbWinUsbApi.dll companions.
 
 Source: [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools).
@@ -49,7 +49,7 @@ Each platform directory contains the complete upstream NOTICE.txt, source.proper
 version metadata, and adb-provenance.json with archive source URLs and payload hashes.
 The components retain their respective licenses reproduced in those NOTICE files;
 the extension MIT license does not replace upstream component terms.
-`runtime/runtime-manifest.json` records each shipped file and its SHA-256 digest.
+`resources/platform-tools/runtime-manifest.json` records each shipped file and its SHA-256 digest.
 
 ## Other bundled assets
 
@@ -59,6 +59,6 @@ the extension MIT license does not replace upstream component terms.
 | `media/icons/lc-*.svg` | IntelliJ Platform `expui` icons, Copyright JetBrains s.r.o. and contributors | Apache-2.0 |
 | `media/codicons/` | [@vscode/codicons](https://github.com/microsoft/vscode-codicons), Copyright Microsoft | Icons CC-BY-4.0, code MIT (see `media/codicons/LICENSE*`) |
 | `media/logcat/fonts/` | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | SIL OFL 1.1 (see `media/logcat/fonts/OFL.txt`) |
-| `resources/scrcpy-server.jar` | [scrcpy](https://github.com/Genymobile/scrcpy) 3.3.4, Copyright (C) Genymobile | Apache-2.0 (see `resources/scrcpy-LICENSE.txt`) |
+| `resources/scrcpy/scrcpy-server.jar` | [scrcpy](https://github.com/Genymobile/scrcpy) 3.3.4, Copyright (C) Genymobile | Apache-2.0 (see `resources/scrcpy/scrcpy-LICENSE.txt`) |
 
 Apache-2.0 text: https://www.apache.org/licenses/LICENSE-2.0

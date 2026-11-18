@@ -29,15 +29,15 @@ function regularFiles(dir) {
   }
   return names;
 }
-/** 输入 runtime 根和平台目录，确认 realpath containment 并拒绝 symlink/额外子目录。 */
-function verifyContainedDirectory(runtime, dir, host) {
+/** 输入可信父级、目标目录和是否检查文件，确认 realpath containment；父级拒绝链接，宿主目录额外拒绝子目录。回归见 core-runtime-verifier 的宿主和父级链接拒绝用例。 */
+function verifyContainedDirectory(runtime, dir, host, checkFiles = true) {
   const dirInfo = fs.lstatSync(dir);
   if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) fail(host + ' directory is not a real directory');
   const runtimeReal = fs.realpathSync(runtime);
   const dirReal = fs.realpathSync(dir);
   const relative = path.relative(runtimeReal, dirReal);
   if (!relative || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) fail(host + ' directory escapes runtime root');
-  regularFiles(dir);
+  if (checkFiles) regularFiles(dir);
 }
 /** 输入真实二进制、宿主和文件名，核对 PE machine、ELF machine 或 Mach-O/FAT 架构。 */
 function verifyFormat(file, host, executable) {
@@ -63,7 +63,10 @@ function verifyFormat(file, host, executable) {
 }
 /** 输入仓库根目录，验证真实 core ADB 资产、架构、provenance、许可和哈希；供 prepublish 调用。 */
 function verifyCoreRuntime(root = ROOT) {
-  const runtime = path.join(root, 'runtime');
+  // 中文职责：验证 resources/platform-tools 下的四宿主发布资产及根清单，确保布局迁移不削弱完整性与路径约束。
+  const runtime = path.join(root, 'resources', 'platform-tools');
+  verifyContainedDirectory(root, path.join(root, 'resources'), 'resources parent', false);
+  verifyContainedDirectory(path.join(root, 'resources'), runtime, 'platform-tools parent', false);
   const manifest = readJson(path.join(runtime, 'runtime-manifest.json'));
   if (manifest.schemaVersion !== 1 || manifest.component !== 'Android Platform-Tools' || manifest.version !== '37.0.1') fail('manifest identity/version');
   if (!manifest.hosts || Object.keys(manifest.hosts).sort().join(',') !== Object.keys(EXPECTED).sort().join(',')) fail('manifest host set');
@@ -72,7 +75,7 @@ function verifyCoreRuntime(root = ROOT) {
     if (info.platform !== expected.platform || info.architecture !== expected.architecture) fail(host + ' platform/architecture');
     const dependency = info.dependencies?.platformTools;
     if (!dependency || dependency.version !== manifest.version || !Array.isArray(dependency.files)) fail(host + ' platform-tools dependency');
-    const dir = path.join(runtime, host, 'platform-tools');
+    const dir = path.join(runtime, host);
     if (!fs.existsSync(dir)) fail(host + ' directory missing');
     verifyContainedDirectory(runtime, dir, host);
     const actual = regularFiles(dir);

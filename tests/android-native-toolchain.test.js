@@ -23,11 +23,11 @@ function fixture(t) {
   return { root, extension, storage, host, binary, context, put, calls, ...module.exports };
 }
 
-// 扩展和global storage只使用runtime/<host>/lldb/bin；停用后端缓存不会被读取。
+// 扩展和global storage只使用resources/lldb/<host>/bin；停用后端缓存不会被读取。
 test('native host resolver uses canonical runtime and never retired tools', async t => {
   const f = fixture(t);
-  const primary = f.put(path.join(f.extension, 'runtime', f.host, 'lldb', 'bin', f.binary));
-  const storage = f.put(path.join(f.storage, 'runtime', f.host, 'lldb', 'bin', f.binary));
+  const primary = f.put(path.join(f.extension, 'resources', 'lldb', f.host, 'bin', f.binary));
+  const storage = f.put(path.join(f.storage, 'resources', 'lldb', f.host, 'bin', f.binary));
   f.put(path.join(f.extension, 'tools', f.host, 'llvm', 'bin', f.binary));
   const options = { context: f.context, sdkRoot: '' };
   assert.equal((await f.resolveNativeHostToolchain(options)).lldbDap, primary);
@@ -44,8 +44,8 @@ test('native host resolver uses canonical runtime and never retired tools', asyn
 test('native server resolver uses canonical runtime ABI files and ignores retired cache', async t => {
   const f = fixture(t);
   for (const abi of ['arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64']) {
-    const primary = f.put(path.join(f.extension, 'runtime', f.host, 'lldb-server', abi, 'lldb-server'));
-    const storage = f.put(path.join(f.storage, 'runtime', f.host, 'lldb-server', abi, 'lldb-server'));
+    const primary = f.put(path.join(f.extension, 'resources', 'lldb-server', f.host, abi, 'lldb-server'));
+    const storage = f.put(path.join(f.storage, 'resources', 'lldb-server', f.host, abi, 'lldb-server'));
     f.put(path.join(f.extension, 'tools', 'android', 'lldb-server', abi, 'lldb-server'));
     const options = { context: f.context, abi };
     assert.equal(await f.resolveNativeServer(options), primary);
@@ -62,7 +62,7 @@ test('native explicit NDK server selection remains isolated from bundled runtime
   fs.writeFileSync(path.join(ndk, 'source.properties'), 'Pkg.Revision=27.0.0');
   const ndkHost = ({ win32: 'windows-x86_64', linux: 'linux-x86_64', darwin: 'darwin-x86_64' })[process.platform];
   const server = f.put(path.join(ndk, 'toolchains', 'llvm', 'prebuilt', ndkHost, 'lib', 'clang', '20', 'lib', 'linux', 'aarch64', 'lldb-server'));
-  f.put(path.join(f.extension, 'runtime', f.host, 'lldb-server', 'arm64-v8a', 'lldb-server'));
+  f.put(path.join(f.extension, 'resources', 'lldb-server', f.host, 'arm64-v8a', 'lldb-server'));
   assert.equal(await f.resolveNativeServer({ context: f.context, abi: 'arm64-v8a', overrides: { ndkPath: ndk } }), server);
   fs.rmSync(server);
   await assert.rejects(f.resolveNativeServer({ context: f.context, abi: 'arm64-v8a', overrides: { ndkPath: ndk } }), /unavailable in NDK/);

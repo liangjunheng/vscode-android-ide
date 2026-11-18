@@ -9,8 +9,8 @@
 !dist/*.js
 !dist/*.json
 !dist/*.txt
+!dist/kotlin-debug-adapter.jar
 !media/*.*
 !media/!(screenshots)/**
 !resources/**
 !schemas/**
-!runtime/**
