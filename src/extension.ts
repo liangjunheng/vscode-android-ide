@@ -6,10 +6,13 @@ import { LogcatView } from './logcat';
 import { openExtendedControls } from './extendedControls';
 import { AndroidBuildController } from './androidBuild';
 import { createAndroidDebugAdapterFactory } from './android-debugger/jvm-debugger/adapter';
+import { initializeRuntimeContext, resetRuntimeContext } from './runtimeContext';
 
 // 注册共享设备区域及配置监听，以延迟只读闭包将 Build 当前选择提供给 Explorer；输入扩展上下文，订阅交其释放，无返回值。
 // 回归：node --test tests/build-panel-ui.test.js 断言仅注册现存命令、android-tools工厂及上下文；mirror-configuration.test.js覆盖配置接线。
 export function activate(ctx: vscode.ExtensionContext) {
+  // 初始化唯一运行时上下文，集中管理当前平台和扩展内置依赖。
+  initializeRuntimeContext(ctx.extensionPath);
   // 显式四态配置优先，未配置则兼容旧布尔项；device-view-mode回归验证迁移与设置页同步。
   const readMode = (): DeviceViewMode => {
     const configuration = vscode.workspace.getConfiguration('android-ide');
@@ -64,4 +67,5 @@ export function activate(ctx: vscode.ExtensionContext) {
   registerDeviceManager(ctx, () => {});
 }
 
-export function deactivate() {}
+// 停用时释放唯一依赖上下文；runtime-context回归验证下一次激活不会保留旧根目录。
+export function deactivate() { resetRuntimeContext(); }

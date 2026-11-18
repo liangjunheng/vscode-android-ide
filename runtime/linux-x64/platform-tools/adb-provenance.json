@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "component": "Android Debug Bridge",
+  "version": "37.0.1",
+  "host": "linux-x64",
+  "archive": {
+    "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip",
+    "sha1": "477254aa5f903c15cf51001717bdf347fb6b53e0",
+    "sha256": "d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1",
+    "bytes": 9054187
+  },
+  "payloads": [
+    {
+      "path": "adb",
+      "bytes": 10642368,
+      "sha256": "a902be8f45c6c62e76c9efaf6947a0fa747c9cabd89a2ac8e0d16ecb30b3ed01",
+      "exactUpstreamBytes": true
+    },
+    {
+      "path": "NOTICE.txt",
+      "bytes": 1175837,
+      "sha256": "c29da8f704720fa1d3d802b834b86d9c023f20ae2596a8f2a4e17ed5490b17ae",
+      "exactUpstreamBytes": true
+    },
+    {
+      "path": "source.properties",
+      "bytes": 38,
+      "sha256": "2dccd788c0234d8cf7f7457377e57f57527a86a629c6ed54feb8af0f549dac38",
+      "exactUpstreamBytes": true
+    }
+  ],
+  "notices": {
+    "path": "NOTICE.txt",
+    "preservation": "Exact complete upstream aggregate notices; only ADB and explicitly listed companion DLLs are redistributed, not the entire SDK.",
+    "versionMetadata": "source.properties"
+  },
+  "audit": {
+    "format": "ELF64 x86_64",
+    "evidence": "readelf -d and --version-info on exact staged adb",
+    "osBaseline": "glibc >=2.16 and OS libgcc_s ABI on Linux x86_64; no runtime Linux execution tested on Windows.",
+    "needed": [
+      "libdl.so.2",
+      "libpthread.so.0",
+      "libm.so.6",
+      "librt.so.1",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "nonOsDependencies": [],
+    "excludedArchiveLibraries": [
+      "lib64/libc++.so (not in adb DT_NEEDED)"
+    ]
+  }
+}

@@ -13,7 +13,7 @@ function load(name, dependencies) {
   const module = { exports: {} };
   vm.runInNewContext(transformSync(src, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, console, process, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
-    require: (id) => Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
+    require: (id) => id.endsWith('/runtimeContext') ? require('./runtime-context-loader.cjs')(dependencies) : Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
   });
   return module.exports;
 }
@@ -149,7 +149,11 @@ test('SDK discovers PATH adb and preserves device states and errors', async () =
   const sdk = load('sdk', {
     vscode: { workspace: { getConfiguration: () => { throw new Error('SDK path must not read VS Code settings'); } } },
     './projectLocalConfig': { readProjectLocalConfig: root => { assert.equal(root, undefined); return { sdkPath: configured || undefined }; } },
-    fs: { existsSync: p => configured && p === configured },
+    fs: { statSync: p => {
+      if (configured && p === configured) return { isDirectory: () => true, isFile: () => false };
+      if (configured && p === path.join(configured, 'platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb')) return { isDirectory: () => false, isFile: () => true };
+      throw Object.assign(new Error('missing fixture path'), { code: 'ENOENT' });
+    } },
     child_process: { execFile: (cmd, args, options, callback) => {
       commands.push(cmd);
       if (failure) callback(new Error('ENOENT'), '', 'adb missing');

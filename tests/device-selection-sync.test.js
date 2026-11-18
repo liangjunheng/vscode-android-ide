@@ -28,7 +28,7 @@ function fixture() {
     vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/' + name + '.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, {
       module, exports: module.exports, process, Buffer, AbortController, setTimeout, clearTimeout,
       setInterval: (fn, ms) => { const id = ++timerId; f.intervals.set(id, { fn, ms }); return id; }, clearInterval: id => f.intervals.delete(id),
-      require: id => Object.hasOwn(deps, id) ? deps[id] : require(id),
+      require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : Object.hasOwn(deps, id) ? deps[id] : require(id),
     });
     return module.exports;
   }

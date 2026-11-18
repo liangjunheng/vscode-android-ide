@@ -47,25 +47,51 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 
 - VS Code 1.95 or later.
 - Node.js 22 or later for development and packaging.
-- Android SDK with platform-tools, emulator, and command-line tools.
+- For connected-device workflows, bundled ADB on the four hosts listed below; other hosts need a compatible external ADB. Android SDK, emulator, command-line tools and JDK are only required for their respective SDK/build workflows.
 - An installed Android system image for emulator workflows.
 - A physical device with USB debugging for device workflows.
 - LLDB and NDK tools are optional and only needed for external/native debugging configurations.
 
 The extension discovers the Android SDK from project-local configuration first, then `ANDROID_HOME`, `ANDROID_SDK_ROOT`, and standard installation locations. The scrcpy server is bundled.
 
+## Bundled runtime layout
+
+The extension resolves platform dependencies centrally in `src/runtimeContext.ts`.
+Activation creates one context with the host OS, architecture, target key, and dependency paths.
+Missing optional dependencies are explicit; SDK and PATH fallbacks do not substitute another architecture.
+
+```text
+runtime/
+  runtime-manifest.json
+  win32-x64/platform-tools/adb.exe
+  win32-x64/platform-tools/AdbWinApi.dll
+  win32-x64/platform-tools/AdbWinUsbApi.dll
+  linux-x64/platform-tools/adb
+  darwin-x64/platform-tools/adb
+  darwin-arm64/platform-tools/adb
+resources/
+  scrcpy-server.jar
+```
+
+Each platform dependency directory also includes its NOTICE, version metadata and provenance.
+Emulator, Command-Line Tools, LLDB, NDK, JDK and system-image paths share the same context
+when available, but are not included in this release. Installing the companion extensions
+does not install these external SDK components.
+
 ## Platform support and external downloads
 
 The extension runs in VS Code Desktop on Windows, macOS, and Linux. The TypeScript and webview code is platform-neutral, but Android device access requires a local executable runtime. Web extensions cannot launch local `adb`, emulator, or SDK processes, so device actions are unavailable in VS Code for the Web.
 
-| Host | Core device features | Emulator and AVD features |
+| Host | Bundled core device features | Emulator and AVD features |
 |---|---|---|
-| Windows x64/arm64 | Requires Windows Platform-Tools (`adb.exe`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
-| macOS x64/arm64 | Requires macOS Platform-Tools (`adb`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
-| Linux x64/arm64/armhf | Requires Linux Platform-Tools (`adb`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| Windows x64 | Bundled Platform-Tools 37.0.1 (`adb.exe` plus companion DLLs) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| Windows arm64 | Requires an external compatible Platform-Tools installation | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| macOS x64/arm64 | Bundled Platform-Tools 37.0.1 (`adb`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| Linux x64 | Bundled Platform-Tools 37.0.1 (`adb`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| Linux arm64/armhf | Requires an external compatible Platform-Tools installation | Requires Android SDK Emulator, Command-Line Tools, and a system image |
 | VS Code for the Web | Not available: the browser cannot execute local `adb` | Not available |
 
-The current VSIX bundles the scrcpy server and all UI assets, but does not bundle Android Platform-Tools, the Android Emulator, SDK Command-Line Tools, or Android system images. Install these dependencies from the official Android sources before using device or emulator actions:
+The VSIX bundles the core Android Platform-Tools ADB runtime for Windows x64, macOS x64/arm64, and Linux x64 under `runtime/<host>/platform-tools`. It also bundles the scrcpy server and UI assets. The Android Emulator, SDK Command-Line Tools, Android system images, JDK, and compatible architecture-specific SDK packages remain external dependencies; install them from the official Android sources before using emulator, AVD, build, or Java workflows:
 
 1. Download [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) for the host platform and make `adb` available through the SDK, project-local configuration, or `PATH`.
 2. Install [Android SDK Command-Line Tools](https://developer.android.com/studio#command-line-tools-only) and the [Android Emulator](https://developer.android.com/studio/run/emulator) for AVD management.
@@ -96,7 +122,7 @@ Use this layout inside the SDK directory (`<sdk-root>`):
   system-images/<api>/<tag>/<abi>/   # Emulator system images
 ```
 
-The extension does not copy these dependencies into the project or VSIX. Project-specific paths belong in `.vscode/android-ide.local.json`; this file is intentionally ignored by Git:
+The extension does not copy external SDK, emulator, command-line-tool, system-image, or JDK dependencies into the project or VSIX. Project-specific paths belong in `.vscode/android-ide.local.json`; this file is intentionally ignored by Git:
 
 ```json
 {
@@ -106,6 +132,18 @@ The extension does not copy these dependencies into the project or VSIX. Project
 ```
 
 The scrcpy server is the exception: it is bundled at `resources/scrcpy-server.jar` inside the extension and is pushed to the selected Android device at runtime. Optional external debugger executables may be configured under `debugger.adbPath`, `debugger.lldbDapPath`, and `debugger.ndkPath`.
+
+### Companion VS Code extensions
+
+When installing from the Marketplace, the extension declares these companion extensions for Java, Gradle, and external debug integration:
+
+| Extension | Marketplace ID | Purpose |
+|---|---|---|
+| Language Support for Java by Red Hat | `redhat.java` | Java language support and project tooling |
+| Debugger for Java | `vscjava.vscode-java-debug` | VS Code Java debug adapter for external launch configurations |
+| Gradle for Java | `vscjava.vscode-gradle` | Gradle project and task integration |
+
+Marketplace access is required for automatic companion installation. For offline or manually distributed VSIX installs, pre-install these extensions separately; they do not replace Android Platform-Tools, the SDK, emulator, system images, or JDK. They also do not enable the built-in debugger, which remains an explicit not-implemented placeholder.
 
 ## Configuration
 
@@ -145,7 +183,7 @@ npm test
 - npm run typecheck: run strict TypeScript checking.
 - npm test: run the Node.js test suite.
 - npm run package: build the VSIX package.
-- npm run vscode:prepublish: typecheck and build production bundles for VSIX packaging.
+- npm run vscode:prepublish: typecheck, build production bundles, and verify bundled core runtime file hashes, architectures, provenance, and license sidecars before VSIX packaging.
 
 Press F5 in VS Code to launch an Extension Development Host. Reload the host after rebuilding when the extension bundle changes.
 

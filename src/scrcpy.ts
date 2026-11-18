@@ -1,5 +1,5 @@
 import * as net from 'net';
-import * as path from 'path';
+import { scrcpyServerPath } from './runtimeContext';
 import { ChildProcess, spawn } from 'child_process';
 import { adb, adbPath, freePort, sdkRoot, runBuffer } from './sdk';
 
@@ -173,4 +173,5 @@ export class ScrcpySession {
   stop(): Promise<void> { return this.close(); }
 }
 
-export const bundledJar = (extPath: string) => path.join(extPath, 'resources', 'scrcpy-server.jar');
+// scrcpy资源由RuntimeContext统一定位；runtime-context及view-idle回归验证推送文件和清理。
+export const bundledJar = (extPath: string) => scrcpyServerPath(extPath);

@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "component": "Android Platform-Tools",
+  "version": "37.0.1",
+  "hosts": {
+    "win32-x64": {
+      "platform": "windows",
+      "architecture": "x64",
+      "dependencies": {
+        "platformTools": {
+          "version": "37.0.1",
+          "files": [
+            {
+              "path": "adb-provenance.json",
+              "bytes": 3900,
+              "sha256": "3ad1a76f5299c40965df6f252972fe84ab83c1c55bfac9d7dbe95bd21fa8fff7",
+              "sourcePath": "tools/win32-x64/adb-provenance.json"
+            },
+            {
+              "path": "adb.exe",
+              "bytes": 8273560,
+              "sha256": "b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f",
+              "sourcePath": "tools/win32-x64/adb.exe"
+            },
+            {
+              "path": "AdbWinApi.dll",
+              "bytes": 108184,
+              "sha256": "c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d",
+              "sourcePath": "tools/win32-x64/AdbWinApi.dll"
+            },
+            {
+              "path": "AdbWinUsbApi.dll",
+              "bytes": 73368,
+              "sha256": "0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b",
+              "sourcePath": "tools/win32-x64/AdbWinUsbApi.dll"
+            },
+            {
+              "path": "NOTICE.txt",
+              "bytes": 1154131,
+              "sha256": "38ec8c6f5b7799c223ffeab1f9e81c2d5fc67b5e56d6424f649630ca1ee1a811",
+              "sourcePath": "tools/win32-x64/NOTICE.txt"
+            },
+            {
+              "path": "source.properties",
+              "bytes": 38,
+              "sha256": "2dccd788c0234d8cf7f7457377e57f57527a86a629c6ed54feb8af0f549dac38",
+              "sourcePath": "tools/win32-x64/source.properties"
+            }
+          ]
+        }
+      }
+    },
+    "linux-x64": {
+      "platform": "linux",
+      "architecture": "x64",
+      "dependencies": {
+        "platformTools": {
+          "version": "37.0.1",
+          "files": [
+            {
+              "path": "adb",
+              "bytes": 10642368,
+              "sha256": "a902be8f45c6c62e76c9efaf6947a0fa747c9cabd89a2ac8e0d16ecb30b3ed01",
+              "sourcePath": "tools/linux-x64/adb"
+            },
+            {
+              "path": "adb-provenance.json",
+              "bytes": 1707,
+              "sha256": "e890c59404a99de7aac326128faa31cfb9b7d2daf33e7ed5d9290f198fde8260",
+              "sourcePath": "tools/linux-x64/adb-provenance.json"
+            },
+            {
+              "path": "NOTICE.txt",
+              "bytes": 1175837,
+              "sha256": "c29da8f704720fa1d3d802b834b86d9c023f20ae2596a8f2a4e17ed5490b17ae",
+              "sourcePath": "tools/linux-x64/NOTICE.txt"
+            },
+            {
+              "path": "source.properties",
+              "bytes": 38,
+              "sha256": "2dccd788c0234d8cf7f7457377e57f57527a86a629c6ed54feb8af0f549dac38",
+              "sourcePath": "tools/linux-x64/source.properties"
+            }
+          ]
+        }
+      }
+    },
+    "darwin-x64": {
+      "platform": "macos",
+      "architecture": "x64",
+      "dependencies": {
+        "platformTools": {
+          "version": "37.0.1",
+          "files": [
+            {
+              "path": "adb",
+              "bytes": 18844128,
+              "sha256": "1811e253b21b12cbfda7201ebaf86c10e7ddcb5c606a7a81f7c82b4c429c2d3b",
+              "sourcePath": "tools/darwin-x64/adb"
+            },
+            {
+              "path": "adb-provenance.json",
+              "bytes": 3404,
+              "sha256": "27158af6904682a4f61df752083594a3c675d0b09e1eafed288fd31c165accb7",
+              "sourcePath": "tools/darwin-x64/adb-provenance.json"
+            },
+            {
+              "path": "NOTICE.txt",
+              "bytes": 1152421,
+              "sha256": "356cc66516060e4da6bdc53e6f0bbb8e8101673f326b73c68d535eddd04dd7b1",
+              "sourcePath": "tools/darwin-x64/NOTICE.txt"
+            },
+            {
+              "path": "source.properties",
+              "bytes": 38,
+              "sha256": "2dccd788c0234d8cf7f7457377e57f57527a86a629c6ed54feb8af0f549dac38",
+              "sourcePath": "tools/darwin-x64/source.properties"
+            }
+          ]
+        }
+      }
+    },
+    "darwin-arm64": {
+      "platform": "macos",
+      "architecture": "arm64",
+      "dependencies": {
+        "platformTools": {
+          "version": "37.0.1",
+          "files": [
+            {
+              "path": "adb",
+              "bytes": 18844128,
+              "sha256": "1811e253b21b12cbfda7201ebaf86c10e7ddcb5c606a7a81f7c82b4c429c2d3b",
+              "sourcePath": "tools/darwin-arm64/adb"
+            },
+            {
+              "path": "adb-provenance.json",
+              "bytes": 3406,
+              "sha256": "770f67cbfda11af3099d297a2456e05260db2ecde3218d7f710c16a6efc7c82d",
+              "sourcePath": "tools/darwin-arm64/adb-provenance.json"
+            },
+            {
+              "path": "NOTICE.txt",
+              "bytes": 1152421,
+              "sha256": "356cc66516060e4da6bdc53e6f0bbb8e8101673f326b73c68d535eddd04dd7b1",
+              "sourcePath": "tools/darwin-arm64/NOTICE.txt"
+            },
+            {
+              "path": "source.properties",
+              "bytes": 38,
+              "sha256": "2dccd788c0234d8cf7f7457377e57f57527a86a629c6ed54feb8af0f549dac38",
+              "sourcePath": "tools/darwin-arm64/source.properties"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

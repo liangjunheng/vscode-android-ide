@@ -131,7 +131,7 @@ test('build panel integration owns controller and connects both directions', asy
   const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; } } };
   const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/jvm-debugger/adapter': { createAndroidDebugAdapterFactory: context => { factoryContexts.push(context); return debugFactory; } } };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   module.exports.activate(extensionContext);
   assert.ok(subscriptions.includes(build));
   assert.equal(commandNames.includes('android-ide.openProfiler'), false);

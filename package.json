@@ -45,6 +45,11 @@
     },
     "virtualWorkspaces": false
   },
+  "extensionPack": [
+    "redhat.java",
+    "vscjava.vscode-java-debug",
+    "vscjava.vscode-gradle"
+  ],
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished"
@@ -53,7 +58,7 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc -p . --noEmit",
-    "vscode:prepublish": "npm run typecheck && node esbuild.js --production",
+    "vscode:prepublish": "npm run typecheck && node esbuild.js --production && node scripts/verify-core-runtime.cjs",
     "package": "vsce package",
     "test": "node --test tests/*.test.js",
     "clean": "rm -rf dist *.vsix"

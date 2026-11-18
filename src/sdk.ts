@@ -1,4 +1,5 @@
 import { readProjectLocalConfig } from './projectLocalConfig';
+import { getRuntimeContext, discoverSdkRoot, sdkToolPath, existingRuntimeFile } from './runtimeContext';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -7,37 +8,24 @@ import { execFile, spawn } from 'child_process';
 
 // 从项目本机 JSON 的 sdkPath 和标准环境候选中选择首个存在的 SDK 路径；可显式传入项目根，缺失时返回空串。回归：node --test tests/device-manager-ui.test.js。
 export function sdkRoot(projectRoot?: string): string {
-  const cfg = readProjectLocalConfig(projectRoot).sdkPath;
-  const candidates = [
-    cfg,
-    process.env.ANDROID_HOME,
-    process.env.ANDROID_SDK_ROOT,
-    path.join(os.homedir(), 'Library/Android/sdk'),
-    path.join(os.homedir(), 'Android/Sdk'),
-    path.join(process.env.LOCALAPPDATA ?? '', 'Android/Sdk'),
-  ];
-  return candidates.find((c) => c && fs.existsSync(c)) ?? '';
+  return discoverSdkRoot(readProjectLocalConfig(projectRoot).sdkPath);
 }
 
 const exe = (n: string) => (process.platform === 'win32' ? n + '.exe' : n);
-const bat = (n: string) => (process.platform === 'win32' ? n + '.bat' : n);
 
-// 优先使用配置 SDK；未安装 SDK 时由系统 PATH 解析 adb。npm test 的 SDK 回归覆盖两种路径及命令失败。
+
+// 优先使用统一 RuntimeContext 的平台 ADB；缺失时回退 Android SDK，再回退 PATH。
+// 回归：node --test tests/android-toolchain.test.js tests/runtime-context.test.js，覆盖扩展资产、SDK 和 PATH 顺序。
 export function adbPath() {
+  const bundled = getRuntimeContext()?.dependencies.adb;
+  if (bundled) return bundled;
   const root = sdkRoot();
-  return root ? path.join(root, 'platform-tools', exe('adb')) : exe('adb');
+  return (root && existingRuntimeFile(sdkToolPath(root, 'adb'))) || exe('adb');
 }
-export function emulatorPath() { return path.join(sdkRoot(), 'emulator', exe('emulator')); }
-function cmdlineTool(name: string) {
-  const root = path.join(sdkRoot(), 'cmdline-tools');
-  const dirs = fs.existsSync(root) ? fs.readdirSync(root).sort((a, b) => (a === 'latest' ? -1 : b === 'latest' ? 1 : b.localeCompare(a))) : [];
-  for (const d of dirs) {
-    const p = path.join(root, d, 'bin', bat(name));
-    if (fs.existsSync(p)) { return p; }
-  }
-  return path.join(sdkRoot(), 'tools', 'bin', bat(name));
-}
-export const avdmanagerPath = () => cmdlineTool('avdmanager');
+// 模拟器与命令行依赖共用RuntimeContext，缺内置工具时使用外部SDK；runtime-context回归覆盖。
+export function emulatorPath() { return getRuntimeContext()?.dependencies.emulator ?? sdkToolPath(sdkRoot(), 'emulator'); }
+// AVD管理工具使用平台脚本后缀；runtime-context回归验证Windows bat及SDK版本目录。
+export const avdmanagerPath = () => getRuntimeContext()?.dependencies.avdmanager ?? sdkToolPath(sdkRoot(), 'avdmanager');
 
 export function run(cmd: string, args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -149,7 +137,7 @@ export function listAvds(): Avd[] {
 }
 
 export function installedSystemImages(): { id: string; label: string }[] {
-  const base = path.join(sdkRoot(), 'system-images');
+  const base = getRuntimeContext()?.dependencies.systemImagesRoot ?? path.join(sdkRoot(), 'system-images');
   const res: { id: string; label: string }[] = [];
   if (!fs.existsSync(base)) { return res; }
   for (const api of fs.readdirSync(base)) {

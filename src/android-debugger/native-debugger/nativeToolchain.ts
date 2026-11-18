@@ -3,6 +3,7 @@ import { runtimeExecutable } from '../runtimeExecutable';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import type * as vscode from 'vscode';
+import { getRuntimeContext, resolveBundledPath, resolveBundledLldbServer, legacyToolRoot, legacyLldbServer } from '../../runtimeContext';
 
 /** 输入 SDK 根、实际目标 ABI、扩展上下文及调用方提供的项目本地覆盖值；不读取 VS Code 设置。 */
 export interface NativeToolchainOptions {
@@ -155,16 +156,21 @@ function platformHosts(): { bundle: string; ndk: string; name: string } {
 function toolRoots(context?: vscode.ExtensionContext): string[] {
   return context ? [context.extensionPath, context.globalStorageUri.fsPath].map(root => {
     stat(root);
-    return path.join(root, 'tools', platformHosts().bundle);
+    return legacyToolRoot(root);
   }) : [];
 }
 
 /** 输入上下文和 ABI，输出打包共享 lldb-server；实际普通文件缺失时返回 undefined。 */
 function packagedServer(context: vscode.ExtensionContext | undefined, abi: string): string | undefined {
+  const runtime = getRuntimeContext();
+  const activeServer = runtime && (!context || context.extensionPath === runtime.extensionRoot) ? runtime.dependencies.lldbServer(abi) : undefined;
+  if (activeServer) return activeServer;
   if (!context) return undefined;
   for (const root of [context.extensionPath, context.globalStorageUri.fsPath]) {
     stat(root);
-    const candidate = path.join(root, 'tools', 'android', 'lldb-server', abi, 'lldb-server');
+    const bundled = resolveBundledLldbServer(root, abi);
+    if (bundled) return bundled;
+    const candidate = legacyLldbServer(root, abi);
     if (stat(candidate)?.isFile()) return candidate;
   }
   return undefined;
@@ -182,6 +188,8 @@ export async function resolveNativeHostToolchain(options: NativeHostToolchainOpt
   const hosts = platformHosts();
   if (options.sdkRoot) stat(options.sdkRoot);
   const roots = toolRoots(options.context);
+  const runtime = getRuntimeContext();
+  if (runtime && options.context?.extensionPath === runtime.extensionRoot && runtime.dependencies.ndkRoot) roots.unshift(runtime.runtimeRoot);
   const configuredDap = options.overrides?.lldbDapPath;
   const configuredNdk = options.overrides?.ndkPath;
   let lldbDap: string | undefined;
@@ -198,7 +206,14 @@ export async function resolveNativeHostToolchain(options: NativeHostToolchainOpt
     ndkRoot = installedNdk([...ndkRoots, ...roots.map(root => path.join(root, 'ndk'))]);
   }
   if (!lldbDap) {
+    const bundledDap = runtime && options.context?.extensionPath === runtime.extensionRoot ? runtime.dependencies.lldbDap : undefined;
+    if (bundledDap) lldbDap = bundledDap;
+    for (const root of options.context ? [options.context.extensionPath, options.context.globalStorageUri.fsPath] : []) {
+      if (lldbDap) break;
+      lldbDap = resolveBundledPath(root, ['lldb', 'bin', hosts.name]);
+    }
     for (const root of roots) {
+      if (lldbDap) break;
       lldbDap = runtimeExecutable(path.join(root, 'llvm', 'bin', hosts.name), root);
       if (lldbDap) break;
     }

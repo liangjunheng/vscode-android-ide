@@ -25,7 +25,7 @@ function resolverFixture(t, options = {}) {
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module,
     exports: module.exports,
-    require: id => id === './runtimeExecutable' ? runtimeModule.exports : id === 'vscode' ? vscode : id === '../projectLocalConfig' ? { readProjectLocalConfig: projectRoot => { rootsRead.push(projectRoot); return { sdkPath: config.sdkPath, debugger: { adbPath: config.adbPath } }; } } : id === 'node:child_process' ? { execFile } : require(id),
+    require: id => id === '../runtimeContext' ? require('./runtime-context-loader.cjs')() : id === './runtimeExecutable' ? runtimeModule.exports : id === 'vscode' ? vscode : id === '../projectLocalConfig' ? { readProjectLocalConfig: projectRoot => { rootsRead.push(projectRoot); return { sdkPath: config.sdkPath, debugger: { adbPath: config.adbPath } }; } } : id === 'node:child_process' ? { execFile } : require(id),
     process,
     console,
   });

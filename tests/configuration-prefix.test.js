@@ -63,7 +63,7 @@ test('runtime registers only android-ide commands and views', () => {
   function load(file, deps) {
     const module = { exports: {} };
     vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src', file), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-      { module, exports: module.exports, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id) });
+      { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : Object.hasOwn(deps, id) ? deps[id] : require(id) });
     return module.exports;
   }
   class Provider {}

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { runtimeExecutable } from './runtimeExecutable';
-import * as os from 'node:os';
+import { adbRuntimeCandidates, sdkCandidates as runtimeSdkCandidates, sdkToolPath, executable } from '../runtimeContext';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import * as vscode from 'vscode';
@@ -13,24 +13,18 @@ export interface AndroidToolchain {
   platform: string;
 }
 
-/** 返回当前宿主平台的可执行文件名；回归由 tests/android-toolchain.test.js 间接覆盖各平台候选命名。 */
-function executable(name: string): string { return process.platform === 'win32' ? name + '.exe' : name; }
+
 
 /** 返回与 VSIX 清单一致的宿主根目录候选，并保留旧 platform-tools 布局；android-toolchain bundled layout 回归断言扩展/存储优先级。 */
 function extensionToolCandidates(context?: vscode.ExtensionContext): Array<{ candidate: string; root: string }> {
   if (!context) return [];
-  const platform = process.platform + '-' + process.arch;
-  return [context.extensionPath, context.globalStorageUri.fsPath].flatMap(root => [
-    { candidate: path.join(root, 'tools', platform, executable('adb')), root: path.join(root, 'tools', platform) },
-    { candidate: path.join(root, 'tools', platform, 'platform-tools', executable('adb')), root: path.join(root, 'tools', platform) },
-  ]);
+  return [context.extensionPath, context.globalStorageUri.fsPath].flatMap(adbRuntimeCandidates);
 }
 
 /** 返回 Android SDK 中的 adb 候选路径；回归由 tests/android-toolchain.test.js 验证 SDK 解析。 */
 function sdkCandidates(projectRoot?: string): string[] {
   const configured = readProjectLocalConfig(projectRoot).sdkPath;
-  const roots = [configured, process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT, path.join(os.homedir(), 'Library', 'Android', 'sdk'), path.join(os.homedir(), 'Android', 'Sdk'), path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk')].filter(Boolean) as string[];
-  return roots.map(root => path.join(root, 'platform-tools', executable('adb')));
+  return runtimeSdkCandidates(configured).map(root => sdkToolPath(root, 'adb'));
 }
 
 /** 查找可执行文件是否存在且为普通文件；回归由 tests/android-toolchain.test.js 覆盖存在和缺失分支。 */

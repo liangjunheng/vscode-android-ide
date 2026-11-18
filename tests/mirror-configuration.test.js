@@ -40,7 +40,7 @@ function fixture() {
     dispose() {}
   } }, './logcat': { LogcatView: class {} }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} };
   const module = { exports: {} };
-  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => deps[id] });
+  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   f.activate = () => module.exports.activate({ extensionPath: '', subscriptions: f.subscriptions });
   f.disposable = listener;
   return f;

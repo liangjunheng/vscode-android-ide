@@ -38,6 +38,19 @@ The bundled `dist/extension.js` contains the following npm packages (production 
 | yargs | 17.7.3 | MIT |
 | yargs-parser | 21.1.1 | ISC |
 
+## Bundled Android Platform-Tools
+
+The extension includes Android Platform-Tools 37.0.1 ADB host payloads under
+`runtime/<host>/platform-tools/` for Windows x64, Linux x64, macOS x64, and macOS arm64.
+Windows includes the required AdbWinApi.dll and AdbWinUsbApi.dll companions.
+
+Source: [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools).
+Each platform directory contains the complete upstream NOTICE.txt, source.properties
+version metadata, and adb-provenance.json with archive source URLs and payload hashes.
+The components retain their respective licenses reproduced in those NOTICE files;
+the extension MIT license does not replace upstream component terms.
+`runtime/runtime-manifest.json` records each shipped file and its SHA-256 digest.
+
 ## Other bundled assets
 
 | Asset | Source | License |

@@ -3,3 +3,8 @@
 *.png binary
 *.woff2 binary
 *.ttf binary
+
+# Vendored payload hashes require exact upstream bytes on every checkout.
+runtime/*/platform-tools/* -text
+# Upstream license documents are opaque payloads, not locally formatted text.
+runtime/*/platform-tools/NOTICE.txt -diff
