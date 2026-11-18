@@ -50,9 +50,39 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 - Android SDK with platform-tools, emulator, and command-line tools.
 - An installed Android system image for emulator workflows.
 - A physical device with USB debugging for device workflows.
-- LLDB and NDK tools for native debugging features.
+- LLDB and NDK tools are optional and only needed for external/native debugging configurations.
 
-The extension discovers the Android SDK from project-local configuration first, then ANDROID_HOME, ANDROID_SDK_ROOT, and standard installation locations. The scrcpy server is bundled.
+The extension discovers the Android SDK from project-local configuration first, then `ANDROID_HOME`, `ANDROID_SDK_ROOT`, and standard installation locations. The scrcpy server is bundled.
+
+## Platform support and external downloads
+
+The extension runs in VS Code Desktop on Windows, macOS, and Linux. The TypeScript and webview code is platform-neutral, but Android device access requires a local executable runtime. Web extensions cannot launch local `adb`, emulator, or SDK processes, so device actions are unavailable in VS Code for the Web.
+
+| Host | Core device features | Emulator and AVD features |
+|---|---|---|
+| Windows x64/arm64 | Requires Windows Platform-Tools (`adb.exe`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| macOS x64/arm64 | Requires macOS Platform-Tools (`adb`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| Linux x64/arm64/armhf | Requires Linux Platform-Tools (`adb`) | Requires Android SDK Emulator, Command-Line Tools, and a system image |
+| VS Code for the Web | Not available: the browser cannot execute local `adb` | Not available |
+
+The current VSIX bundles the scrcpy server and all UI assets, but does not bundle Android Platform-Tools, the Android Emulator, SDK Command-Line Tools, or Android system images. Install these dependencies from the official Android sources before using device or emulator actions:
+
+1. Download [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) for the host platform and make `adb` available through the SDK, project-local configuration, or `PATH`.
+2. Install [Android SDK Command-Line Tools](https://developer.android.com/studio#command-line-tools-only) and the [Android Emulator](https://developer.android.com/studio/run/emulator) for AVD management.
+3. Install a compatible Android system image with `sdkmanager` before creating or starting an AVD.
+4. Connect a physical device with USB debugging enabled, or pair it over Wi-Fi.
+
+Example SDK setup commands (adapt the package IDs and SDK root to the target platform):
+
+```bash
+sdkmanager "platform-tools" "emulator" "platforms;android-35" "system-images;android-35;google_apis;x86_64"
+
+# Verify the dependency used by Devices, Logcat, Explorer, and physical-device mirroring
+adb version
+adb devices -l
+```
+
+After installation, set `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or set `sdkPath` in `.vscode/android-ide.local.json`. The extension reports the executable path and the missing dependency when discovery fails.
 
 ## Configuration
 
@@ -92,7 +122,7 @@ npm test
 - npm run typecheck: run strict TypeScript checking.
 - npm test: run the Node.js test suite.
 - npm run package: build the VSIX package.
-- npm run vscode:prepublish: typecheck, build production bundles, and verify runtime content.
+- npm run vscode:prepublish: typecheck and build production bundles for VSIX packaging.
 
 Press F5 in VS Code to launch an Extension Development Host. Reload the host after rebuilding when the extension bundle changes.
 
