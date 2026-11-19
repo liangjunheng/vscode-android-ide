@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import * as path from 'node:path';
+
 import * as vscode from 'vscode';
 import { getAndroidDebugConfigurations } from '../index';
 import * as android from './upstream/src/android';
@@ -27,9 +27,6 @@ export async function validateNativeDebugConfiguration(config: vscode.DebugConfi
     const nativeConfig = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : undefined;
     const automaticSymbols = findNativeSymbolSearchPaths(config.androidProjectRoot || folder?.uri.fsPath, native);
     if (automaticSymbols.length && nativeConfig) nativeConfig.symbolSearchPaths = automaticSymbols;
-    if (allowPrompt && (!Array.isArray(nativeConfig?.symbolSearchPaths) || nativeConfig.symbolSearchPaths.length === 0) && typeof vscode.window?.showInputBox === 'function') {
-      await promptNativeCorrection(config, 'symbolSearchPaths', folder);
-    }
     if (config.packageName !== undefined && (typeof config.packageName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName))) throw new Error('A valid package name is required.');
     if (config.launchActivity !== undefined && (typeof config.launchActivity !== 'string' || !config.launchActivity.trim())) throw new Error('Invalid Native launchActivity: expected a non-empty activity name');
     if (config.apkPath !== undefined) {
@@ -63,18 +60,18 @@ function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupp
 
 /** 弹出字段输入并写回当前会话配置副本；支持逗号分隔 symbolSearchPaths，取消返回 false，不写 settings 或 launch.json。
  * 回归：Node>=22 执行 node --test tests/native-codelldb.test.js，断言输入值只进入当前配置副本。 */
-async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | 'symbolSearchPaths', folder?: vscode.WorkspaceFolder): Promise<boolean> {
+async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath', folder?: vscode.WorkspaceFolder): Promise<boolean> {
   if (typeof vscode.window?.showInputBox !== 'function') return false;
   const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};
   const current = native[field];
   const value = await vscode.window.showInputBox({
-    prompt: field === 'abiSupported' ? 'Enter supported Android ABIs separated by commas' : field === 'symbolSearchPaths' ? 'Enter unstripped native symbol directories separated by commas (optional)' : 'Enter Android Native ' + field,
+    prompt: field === 'abiSupported' ? 'Enter supported Android ABIs separated by commas' : 'Enter Android Native ' + field,
     value: Array.isArray(current) ? current.join(',') : typeof current === 'string' ? current : '',
     ignoreFocusOut: true,
   });
   if (!value?.trim()) return false;
   if (field === 'abiSupported') native.abiSupported = value.split(',').map(item => item.trim()).filter(Boolean);
-  else if (field === 'symbolSearchPaths') native.symbolSearchPaths = value.split(',').map(item => item.trim()).filter(Boolean).map(item => path.resolve(folder?.uri.fsPath ?? config.androidProjectRoot ?? process.cwd(), item));
+
   else if (field === 'abi') native.abi = value.trim();
   else { native[field] = value.trim(); if (field === 'apkPath') config.apkPath = value.trim(); }
   config.native = native;

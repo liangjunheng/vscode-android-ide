@@ -5,7 +5,7 @@
   let state = { busy: false, deviceLoading: true, targets: [] }, serial = '';
   let viewMode = document.body.dataset.deviceViewMode || (document.body.dataset.mirrorVisible === 'false' ? 'hidden' : 'mirror');
 
-  // 输入宿主选项与选择值，以文本节点更新下拉；npm test 的 build panel UI 回归验证转义、空列表和选择。
+  // 输入宿主选项与选择值，保留下拉按钮及其加载图标；npm test 的 build panel UI 回归验证转义、空列表和选择。
   function options(select, items, value, empty) {
     const button = select.querySelector('button');
     select.replaceChildren(button);

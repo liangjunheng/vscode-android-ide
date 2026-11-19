@@ -316,21 +316,26 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.loop = setInterval(() => this.capture(), every);
   }
 
-  // 查询全部设备并发布快照；初次发现选第一台在线设备，断开则清空并同步日志，已清空不自动回退。
-  // 无输入，查询失败向消息入口传播；npm test 的 device-selection-sync.test.js 断言重复展开查询、默认选择、断开和错误。
+  // 查询全部设备并发布快照；发现期间通知三行加载状态，初次发现选第一台在线设备，断开则清空并同步日志，已清空不自动回退。
+  // 无输入，查询失败向消息入口传播并结束加载；npm test 的 device-selection-sync.test.js 断言重复展开查询、默认选择、断开和错误。
   private async refreshDevices() {
-    const devs = await listDevices();
-    if (this.serial && !devs.some((d) => d.serial === this.serial && d.state === 'device')) {
-      this.serial = undefined; this.stop();
-      await this.explorer?.setContext(undefined, false);
-      await this.selectionChanged?.(undefined);
-    } else if (this.serial === '') {
-      const first = devs.find((d) => d.state === 'device');
-      if (first) { this.serial = first.serial; await this.selectionChanged?.(this.serial); }
+    this.post({ type: 'deviceLoading', loading: true });
+    try {
+      const devs = await listDevices();
+      if (this.serial && !devs.some((d) => d.serial === this.serial && d.state === 'device')) {
+        this.serial = undefined; this.stop();
+        await this.explorer?.setContext(undefined, false);
+        await this.selectionChanged?.(undefined);
+      } else if (this.serial === '') {
+        const first = devs.find((d) => d.state === 'device');
+        if (first) { this.serial = first.serial; await this.selectionChanged?.(this.serial); }
+      }
+      this.post({ type: 'devices', devices: devs.map((d) => ({ serial: d.serial, label: d.name || d.avdName || d.model || d.serial, state: d.state, physical: !d.serial.startsWith('emulator-') })), serial: this.serial });
+      this.skin = skinForAvd(devs.find((d) => d.serial === this.serial)?.avdName);
+      this.post({ type: 'skin', skin: this.skin ? this.skinPayload(this.skin) : null });
+    } finally {
+      this.post({ type: 'deviceLoading', loading: false });
     }
-    this.post({ type: 'devices', devices: devs.map((d) => ({ serial: d.serial, label: d.name || d.avdName || d.model || d.serial, state: d.state, physical: !d.serial.startsWith('emulator-') })), serial: this.serial });
-    this.skin = skinForAvd(devs.find((d) => d.serial === this.serial)?.avdName);
-    this.post({ type: 'skin', skin: this.skin ? this.skinPayload(this.skin) : null });
   }
 
   private skinPayload(k: Skin) {
@@ -547,10 +552,10 @@ body.empty #bar,body.empty #wrap{display:none}
 body.empty #empty{display:flex}
 </style><link rel="stylesheet" href="${art.style}"><link rel="stylesheet" href="${art.explorerStyle}"><link rel="stylesheet" href="${art.dropdownStyle}"></head><body class="empty${art.mirrorVisible ? '' : ' mirror-hidden'}" data-mirror-visible="${art.mirrorVisible}" data-device-view-mode="${art.deviceViewMode}">
 <div id="tabs" aria-label="Android run configuration">
-<div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
+<div class="build-project-row"><i class="codicon codicon-project" aria-hidden="true"></i><select id="build-project" aria-label="Gradle project" title="Gradle project"><button type="button"><selectedcontent></selectedcontent><i id="build-project-loading" class="codicon codicon-loading codicon-modifier-spin build-loading" aria-label="Loading Gradle projects" hidden></i></button><option value="">No Gradle project</option></select><small id="build-root-count">0 Gradle roots</small></div>
 <div class="build-surface">
-<div class="build-target-row"><i class="codicon codicon-package" aria-hidden="true"></i><select id="build-target" aria-label="Module and build variant" title="Module and build variant"><option value="">No Android variants</option></select></div>
-<div class="build-device-row"><div id="tab"><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><button type="button"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><selectedcontent></selectedcontent></button><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
+<div class="build-target-row"><i class="codicon codicon-package" aria-hidden="true"></i><select id="build-target" aria-label="Module and build variant" title="Module and build variant"><button type="button"><selectedcontent></selectedcontent><i id="build-target-loading" class="codicon codicon-loading codicon-modifier-spin build-loading" aria-label="Loading Android variants" hidden></i></button><option value="">No Android variants</option></select></div>
+<div class="build-device-row"><div id="tab"><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><button type="button"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><selectedcontent></selectedcontent><i id="build-device-loading" class="codicon codicon-loading codicon-modifier-spin build-loading" aria-label="Loading devices" hidden></i></button><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
 <div class="build-actions"><button id="build-run" title="Build, install and run"><i id="build-run-icon" class="codicon codicon-play"></i><span id="build-run-label">Run</span></button><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-debug" title="Debug app" aria-label="Debug app"><i class="codicon codicon-debug-alt"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button></div>
 <div class="build-status" role="status" aria-live="polite"><i id="build-progress" class="codicon"></i><span id="build-status">No Gradle project</span></div>
 </div></div>

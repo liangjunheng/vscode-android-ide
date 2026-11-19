@@ -32,9 +32,10 @@ test('mirror selection clears previous frames and never falls back to another ph
   mirror.session = { stop: () => stopped++ };
   await mirror.select({ serial: 'phone' });
   assert.equal(stopped, 1);
-  assert.equal(messages[0].devices.length, 0);
+  assert.equal(messages.find((m) => m.type === 'devices').devices.length, 0);
   assert.equal(started.at(-1), 'phone');
   assert.equal(messages.find((m) => m.devices?.length).devices.length, 2);
+  assert.deepEqual(messages.filter((m) => m.type === 'deviceLoading').map((m) => m.loading), [true, false]);
   await mirror.select();
   assert.equal(mirror.serial, undefined);
   assert.equal(started.length, 1);
@@ -242,6 +243,8 @@ test('dropdown selection messages switch the actual mirrored serial', async () =
   await mirror.onMessage({ type: 'select', serial: 'two' });
   assert.deepEqual(started, ['one', 'two']);
   assert.equal(messages.filter(m => m.type === 'devices').at(-1).serial, 'two');
+  assert.deepEqual(messages.filter((m) => m.type === 'deviceLoading').at(-2)?.loading, true);
+  assert.equal(messages.filter((m) => m.type === 'deviceLoading').at(-1)?.loading, false);
   await mirror.onMessage({ type: 'select', serial: '' });
   assert.equal(mirror.serial, undefined);
   assert.equal(started.length, 2);

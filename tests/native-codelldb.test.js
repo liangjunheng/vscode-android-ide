@@ -134,23 +134,9 @@ test('Native auto symbols fill a missing native config without prompting', async
   assert.equal(f.inputCalls, 0); assert.equal(resolved.native.symbolSearchPaths[0], 'auto-symbols');
 });
 
-test('Native symbol prompt cancellation is not repeated in the second phase', async t => {
-  const f = await fixture(t); f.input = undefined; const folder = { uri: { fsPath: root } }; const config = { type: 'android-tools', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {} };
-  const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, config);
-  await f.providers.get('android-tools').resolveDebugConfigurationWithSubstitutedVariables(folder, resolved);
-  assert.equal(f.inputCalls, 1);
-});
-
-test('Native prompts for symbol paths and writes only the current session config', async t => {
-  const f = await fixture(t); f.input = 'symbols-one, symbols-two'; const folder = { uri: { fsPath: root } };
-  const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, { type: 'android-tools', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {} });
-  assert.equal(f.inputCalls, 1); assert.match(f.inputPrompt, /symbol directories/); assert.equal(resolved.native.symbolSearchPaths[0], path.resolve(root, 'symbols-one')); assert.equal(resolved.native.symbolSearchPaths[1], path.resolve(root, 'symbols-two'));
-});
-
-test('Native prompt cancellation leaves symbol paths unset and continues with warning', async t => {
-  const f = await fixture(t); f.input = undefined; const folder = { uri: { fsPath: root } };
-  const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, { type: 'android-tools', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {} });
-  assert.equal(f.inputCalls, 1); assert.equal(resolved.native.symbolSearchPaths, undefined);
+test('Native missing symbols do not prompt and continue with warning only after child attach', async t => {
+  const f = await fixture(t); f.input = 'unused'; const adapter = await f.parent({ native: {} }, true);
+  assert.equal(f.inputCalls, 0); assert.equal((await request(f, adapter, 'attach')).success, true); assert.equal(f.notices.some(message => /symbolSearchPaths/.test(message)), true);
 });
 
 test('Native prompts for a missing NDK and retries the current session', async t => {

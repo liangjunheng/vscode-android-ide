@@ -11,7 +11,10 @@ const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'u
 function fixture(initialVisible = true) {
   const nodes = {}, sent = [];
   let receive;
-  const get = id => nodes[id] ||= { value: '', children: [], textContent: '', disabled: false, title: '', classList: { toggle() {} }, setAttribute(k, v) { this[k] = v; }, replaceChildren() { this.children = []; }, appendChild(o) { this.children.push(o); } };
+  const get = id => nodes[id] ||= (() => {
+    const button = { children: [], querySelector: () => null };
+    return { value: '', children: [], textContent: '', disabled: false, hidden: false, title: '', classList: { toggle() {} }, setAttribute(k, v) { this[k] = v; }, querySelector: selector => selector === 'button' ? button : null, replaceChildren(...items) { this.children = items; }, appendChild(o) { this.children.push(o); } };
+  })();
   vm.runInNewContext(js, { document: { body: { dataset: { mirrorVisible: String(initialVisible) }, classList: { toggle() {} } }, getElementById: get, createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
   return { get, sent, receive: data => receive({ data }) };
 }
@@ -22,17 +25,27 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(f.sent[0].action, 'refresh');
   assert.equal(f.sent[1].type, 'getMirrorVisibility');
   assert.equal(get('build-run').disabled, true);
+  assert.equal(get('build-project-loading').hidden, true);
+  assert.equal(get('build-target-loading').hidden, true);
+  assert.equal(get('build-device-loading').hidden, false);
   assert.equal(get('build-profiler').onclick, undefined);
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
   assert.equal(f.sent.at(-1).type, 'logcat');
-  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', busy: false, status: 'Ready' };
+  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', busy: false, deviceLoading: false, status: 'Ready' };
+  f.receive({ ...state, deviceLoading: true });
+  assert.equal(get('build-project-loading').hidden, true);
+  assert.equal(get('build-target-loading').hidden, true);
+  assert.equal(get('build-device-loading').hidden, false);
   f.receive(state);
-  assert.equal(get('build-project').children[0].textContent, '<Project>');
+  assert.equal(get('build-device-loading').hidden, true);
+  assert.equal(get('build-project').children[1].textContent, '<Project>');
   assert.equal(get('build-target').value, ':app:Debug');
   assert.equal(get('build-build').disabled, false);
   assert.equal(get('build-install').disabled, true);
   f.receive({ type: 'devices', serial: 'phone' });
+  f.receive({ type: 'deviceLoading', loading: false });
+  assert.equal(get('build-device-loading').hidden, true);
   assert.equal(get('build-run').disabled, false);
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
@@ -54,7 +67,10 @@ test('build panel UI renders safe options and routes all commands', () => {
   for (const action of ['run', 'build', 'install', 'debug', 'refresh', 'output']) { get('build-' + action).onclick(); assert.equal(f.sent.at(-1).action, action); }
   assert.equal(get('build-wifi').onclick, undefined);
   assert.equal(f.sent.some(message => message.type === 'pairDevice'), false);
-  f.receive({ ...state, busy: true, status: 'Gradle :app:installDebug' });
+  f.receive({ ...state, busy: true, deviceLoading: false, status: 'Gradle :app:installDebug' });
+  assert.equal(get('build-project-loading').hidden, false);
+  assert.equal(get('build-target-loading').hidden, false);
+  assert.equal(get('build-device-loading').hidden, true);
   assert.equal(get('build-run-label').textContent, 'Stop');
   assert.equal(get('build-run').disabled, false);
   assert.equal(get('build-target').disabled, true);
@@ -66,12 +82,13 @@ test('build panel UI renders safe options and routes all commands', () => {
   get('build-run').onclick();
   assert.equal(f.sent.at(-1).action, 'stop');
   f.receive({ ...state, error: 'Build failed' });
+  for (const id of ['build-project-loading', 'build-target-loading', 'build-device-loading']) assert.equal(get(id).hidden, true);
   assert.equal(get('build-status').textContent, 'Build failed');
   f.receive({ type: 'devices', serial: undefined });
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick(); assert.equal(f.sent.at(-1).type, 'logcat');
   f.receive({ type: 'buildState', targets: [], projects: [], busy: false });
-  assert.equal(get('build-target').children[0].textContent, 'No Android variants');
+  assert.equal(get('build-target').children[1].textContent, 'No Android variants');
   assert.equal(get('build-run').disabled, true);
 });
 
@@ -94,12 +111,17 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.equal(calls.at(-1)[0], 'android-ide.pairDevice');
   view.publishBuildState({ type: 'buildState', status: 'Ready' });
   assert.equal(calls.at(-1).status, 'Ready');
-  for (const id of ['build-project', 'build-target', 'build-run', 'build-install', 'build-debug', 'build-status']) assert.ok(webview.html.includes('id="' + id + '"'));
+  for (const id of ['build-project', 'build-target', 'build-run', 'build-install', 'build-debug', 'build-status', 'build-project-loading', 'build-target-loading', 'build-device-loading']) assert.ok(webview.html.includes('id="' + id + '"'));
   assert.ok(webview.html.includes('build-panel.js'));
   const output = webview.html.indexOf('id="build-output"'), logcat = webview.html.indexOf('id="build-logcat"'), mirror = webview.html.indexOf('id="build-mirror"');
   assert.ok(mirror < output && output < logcat);
   const deviceRow = webview.html.slice(webview.html.indexOf('<div class="build-device-row">'), webview.html.indexOf('<div class="build-actions">'));
   const actionRow = webview.html.slice(webview.html.indexOf('<div class="build-actions">'), webview.html.indexOf('<div class="build-status"'));
+  assert.ok(deviceRow.indexOf('<selectedcontent></selectedcontent>') < deviceRow.indexOf('id="build-device-loading"'));
+  const projectRow = webview.html.slice(webview.html.indexOf('<div class="build-project-row">'), webview.html.indexOf('<div class="build-surface">'));
+  const targetRow = webview.html.slice(webview.html.indexOf('<div class="build-target-row">'), webview.html.indexOf('<div class="build-device-row">'));
+  assert.ok(projectRow.indexOf('<selectedcontent></selectedcontent>') < projectRow.indexOf('id="build-project-loading"'));
+  assert.ok(targetRow.indexOf('<selectedcontent></selectedcontent>') < targetRow.indexOf('id="build-target-loading"'));
   assert.ok(deviceRow.indexOf('id="dev"') < deviceRow.indexOf('id="build-mirror"'));
   for (const id of ['build-mirror', 'build-explorer', 'build-processes']) {
     assert.equal(deviceRow.split('id="' + id + '"').length, 2);
