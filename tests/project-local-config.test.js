@@ -162,6 +162,15 @@ test('relative and absolute paths preserve Unicode and spaces for every supporte
 });
 
 // 空/纯空白字符串只表示未指定，空debugger不会生成虚假配置；合法字段仍保留。
+test('symbol search paths preserve relative paths and reject non-string entries', t => {
+  const p = projectFixture(t); const reader = loadReader();
+  writeConfig(p, { debugger: { symbolSearchPaths: ['symbols/one', 'symbols/two'] } });
+  assert.deepEqual(reader.read(p.root), { debugger: { symbolSearchPaths: [path.resolve(p.root, 'symbols/one'), path.resolve(p.root, 'symbols/two')] } });
+  writeConfig(p, { debugger: { symbolSearchPaths: ['symbols/one', 42] } });
+  assert.throws(() => reader.read(p.root), /debugger.symbolSearchPaths must be a string array/);
+});
+
+// 空/纯空白字符串只表示未指定，空debugger不会生成虚假配置；合法字段仍保留。
 test('empty values are unspecified without losing non-empty debugger fields', t => {
   const p = projectFixture(t);
   const reader = loadReader();
