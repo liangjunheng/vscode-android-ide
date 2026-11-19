@@ -74,6 +74,32 @@ function findNdk(sdk: string): string | undefined {
   return undefined;
 }
 
+/** 自动发现本地 Native 调试符号目录；优先本地配置，再扫描 Gradle/NDK 常见输出目录，返回目录而非具体 .so 文件。 */
+export function findNativeSymbolSearchPaths(projectRoot?: string, native?: unknown): string[] {
+  const values = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : {};
+  const configured = Array.isArray(values.symbolSearchPaths) ? values.symbolSearchPaths.filter((value): value is string => typeof value === 'string' && value.trim()).map(value => path.resolve(value)) : [];
+  if (configured.length) return [...new Set(configured)];
+  const local = readProjectLocalConfig(projectRoot);
+  const localPaths = local.debugger?.symbolSearchPaths ?? [];
+  if (localPaths.length) return [...new Set(localPaths)];
+  if (!projectRoot) return [];
+  const roots = [projectRoot, path.join(projectRoot, 'app'), path.join(projectRoot, '.cxx'), path.join(projectRoot, 'build', 'intermediates', 'cxx'), path.join(projectRoot, 'build', 'intermediates', 'ndkBuild')];
+  const result = new Set<string>();
+  const visit = (directoryPath: string, depth: number): void => {
+    if (depth > 7 || !directory(directoryPath)) return;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(directoryPath, { withFileTypes: true }); } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code || '')) return; throw error; }
+    let hasSo = false;
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.so')) hasSo = true;
+      else if (entry.isDirectory() && entry.name !== 'node_modules') visit(path.join(directoryPath, entry.name), depth + 1);
+    }
+    if (hasSo && (directoryPath.includes('.cxx') || directoryPath.includes('intermediates') || /(?:obj|lib)$/i.test(directoryPath))) result.add(directoryPath);
+  };
+  for (const root of roots) visit(root, 0);
+  return [...result].sort();
+}
+
 /** 解析 launch.json 的 native 工具链覆盖，拒绝空路径和错误类型。 */
 export function nativeToolchainOverrides(native: unknown): NativeToolchainOverrides {
   if (native === undefined) return {};

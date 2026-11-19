@@ -51,6 +51,11 @@ test('Native toolchain reads Android local.properties for SDK and NDK before run
   assert.equal(result.sdkRoot, sdk); assert.equal(result.ndkRoot, ndkRoot);
 });
 
+test('Native symbol discovery finds Gradle native output directories automatically', t => {
+  const f = fixture(t); const symbols = path.join(f.root, '.cxx', 'Debug', 'hash', 'obj', 'arm64-v8a'); fs.mkdirSync(symbols, { recursive: true }); fs.writeFileSync(path.join(symbols, 'libapp.so'), 'symbols');
+  const found = f.api.findNativeSymbolSearchPaths(f.root); assert.ok(found.includes(symbols));
+});
+
 test('Native discovery keeps upstream SDK ndk and ndk-bundle layout with PATH ADB fallback', t => {
   const f = fixture(t); f.state.sdk = f.root;
   const older = ndk(f.root, 'ndk/25.2'), latest = ndk(f.root, 'ndk/27.1');

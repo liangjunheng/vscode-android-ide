@@ -28,6 +28,11 @@
         "ndkPath": {
           "type": "string",
           "description": "Optional Android NDK directory. Empty selects an installed or extension-managed NDK."
+        },
+        "symbolSearchPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional directories containing unstripped native .so symbols."
         }
       }
     }

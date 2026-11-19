@@ -8,7 +8,7 @@ import { AndroidDebugConfigurationProvider, LLDBDebugConfigurationProvider } fro
 import type { AndroidNativeDebugConfiguration, AndroidNativeDebugAdapterFactory } from './contracts';
 
 import { DebugAdapterDescriptorFactory } from './upstream/src/debugAdapter';
-import { nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } from './nativeToolchain';
+import { findNativeSymbolSearchPaths, nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } from './nativeToolchain';
 
 /** 当前选中Gradle项目在对应工作区的只读包名来源；未知返回undefined，真实错误传播。 */
 export interface NativeProjectMetadata { packageName?: string; abiSupported?: string[]; }
@@ -22,6 +22,8 @@ export async function validateNativeDebugConfiguration(config: vscode.DebugConfi
     resolveNativeToolchain(config.androidProjectRoot || folder?.uri.fsPath, overrides);
     validateNativeAbis(native, config.androidAbiSupported);
     const nativeConfig = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : undefined;
+    const automaticSymbols = findNativeSymbolSearchPaths(config.androidProjectRoot || folder?.uri.fsPath, native);
+    if (automaticSymbols.length && nativeConfig) nativeConfig.symbolSearchPaths = automaticSymbols;
     if ((!Array.isArray(nativeConfig?.symbolSearchPaths) || nativeConfig.symbolSearchPaths.length === 0) && typeof vscode.window?.showInputBox === 'function') {
       await promptNativeCorrection(config, 'symbolSearchPaths');
     }

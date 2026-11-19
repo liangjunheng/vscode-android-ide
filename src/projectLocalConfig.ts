@@ -10,6 +10,7 @@ export interface ProjectLocalConfig {
     adbPath?: string;
     lldbDapPath?: string;
     ndkPath?: string;
+    symbolSearchPaths?: string[];
   };
 }
 
@@ -78,13 +79,18 @@ export function readProjectLocalConfig(projectRoot?: string): ProjectLocalConfig
     }
   }
   if (Object.hasOwn(config, 'debugger')) {
-    const debuggerConfig = configObject(config.debugger, ['adbPath', 'lldbDapPath', 'ndkPath'], filename, 'debugger');
+    const debuggerConfig = configObject(config.debugger, ['adbPath', 'lldbDapPath', 'ndkPath', 'symbolSearchPaths'], filename, 'debugger');
     const debuggerPaths: NonNullable<ProjectLocalConfig['debugger']> = {};
     for (const key of ['adbPath', 'lldbDapPath', 'ndkPath'] as const) {
       if (Object.hasOwn(debuggerConfig, key)) {
         const value = configPath(debuggerConfig[key], root, filename, `debugger.${key}`);
         if (value !== undefined) debuggerPaths[key] = value;
       }
+    }
+    const symbolPaths = debuggerConfig.symbolSearchPaths;
+    if (symbolPaths !== undefined) {
+      if (!Array.isArray(symbolPaths) || symbolPaths.some(value => typeof value !== 'string')) throw new Error(filename + ': debugger.symbolSearchPaths must be a string array');
+      debuggerPaths.symbolSearchPaths = symbolPaths.map(value => configPath(value, root, filename, 'debugger.symbolSearchPaths')).filter((value): value is string => value !== undefined);
     }
     if (Object.keys(debuggerPaths).length) result.debugger = debuggerPaths;
   }
