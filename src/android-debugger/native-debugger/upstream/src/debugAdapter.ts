@@ -142,7 +142,8 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             this.consoleLog('Launching the app activity ' + config.packageName + '/' + config.launchActivity);
             await android.launchApp(target, config.packageName, config.launchActivity);
             this.checkOpen();
-            let processList = await android.getProcessList(target, true);
+            // Launch通过主进程精确名称匹配PID；不查询所有PID的包归属，避免设备端package查询瞬时失败误报get-pid。
+            let processList = await android.getProcessList(target, false);
             let process = processList.find(item => item.name === config.packageName) || processList.find(item => item.packages.includes(config.packageName));
             if (!process?.pid) throw new Error('Could not get pid for the launched app');
             await this.attachToProcess(process.pid, response);

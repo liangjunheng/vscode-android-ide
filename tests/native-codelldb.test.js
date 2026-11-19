@@ -41,7 +41,7 @@ async function fixture(t) {
     async installApp(device, apk) { f.calls.push(['install', device, apk]); },
     async launchApp(device, pkg, activity) { f.calls.push(['launch', device, pkg, activity]); },
     async getPackageNameFromApk(apk, projectRoot) { f.calls.push(['apk', apk, projectRoot]); return 'com.example.app'; },
-    async getProcessList() { return f.processes; },
+    async getProcessList(device, populatePackageNames) { f.calls.push(['process-list',populatePackageNames]); return f.processes; },
     async resumeJavaDebugger() { if (f.resumeFailure) throw f.resumeFailure; f.calls.push(['resume']); return async () => { f.calls.push(['jdwp-cleanup']); if (f.jdwpGate) await f.jdwpGate.promise; }; },
   };
   const targetCommand = {
@@ -129,6 +129,7 @@ test('Native real DAP launch installs APK resolves default Activity and selects 
   assert.equal((await request(f, adapter, 'launch')).success, true);
   assert.equal(f.children[0].configuration.pid, 42); assert.equal(f.children[0].configuration.androidPackageName, 'com.example.app');
   for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
+  assert.equal(f.calls.find(call => call[0] === 'process-list')[1], false);
   assert.equal(f.calls.find(call => call[0] === 'launch')[3], 'MainActivity');
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.calls.filter(call => call[0] === 'jdwp-cleanup').length, 1);
 });

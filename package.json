@@ -453,6 +453,21 @@
             "target": "select",
             "native": {}
           }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "[内置] Android Native",
+            "description": "Start the built-in Android Native debugger",
+            "body": {
+              "type": "android-tools",
+              "request": "launch",
+              "name": "[内置] Android Native",
+              "androidMode": "native",
+              "mode": "native",
+              "target": "select",
+              "native": {}
+            }
+          }
         ]
       },
       {
