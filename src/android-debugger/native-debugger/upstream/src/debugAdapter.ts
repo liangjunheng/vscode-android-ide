@@ -6,6 +6,7 @@ import * as android from './android';
 import { Device } from './commonTypes';
 import { nativeToolchainOverrides, resolveNativeToolchain } from '../../nativeToolchain';
 import { resolveLauncherActivity } from '../../nativeTarget';
+import { nativeLibraryCommands } from '../../nativeSymbols';
 
 /** 原工厂的宿主适配接口：仅提供配置准备/释放，不提供调试引擎；native-codelldb.test.js通过真实工厂验证。 */
 export interface NativeSessionHost {
@@ -69,7 +70,8 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     /** 保留原DAP控制台输出；native-codelldb.test.js经真实DAP事件通道执行。 */
     private consoleLog(message: string) { this.sendEvent(new debugadapter.OutputEvent(message + '\n', 'console')); }
 
-    /** 保留原Native配置构造，声明C/C++源语言并隔离工具链内部字段；native-codelldb.test.js断言副本隔离、允许配置覆盖和断点语言。 */
+    /** 保留原 Native 配置及隔离副本；父会话已选 .so 时生成精确模块 preRunCommands，不将内部文件列表传给 CodeLLDB。
+     * Node>=22 执行 node --test tests/native-codelldb.test.js，断言 C/C++、用户选项、副本隔离、所选文件命令及取消无 child；native-symbol-selection.test.js 验证路径转义。 */
     private prepareNativeDebugConfiguration(config: vscode.DebugConfiguration, pid: string) {
         let lldbConfig: vscode.DebugConfiguration = {
             "type": "lldb", "name": "Native", "request": "attach",
@@ -82,10 +84,15 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         };
         let excludeProperties = ["abi", "abiSupported", "abiMap", "sdkRoot", "ndkRoot"];
         if (config.native) for (let key in config.native) if (!excludeProperties.includes(key)) lldbConfig[key] = structuredClone(config.native[key]);
+        if (config.androidNativeLibraries?.length) {
+            if (lldbConfig.preRunCommands !== undefined && (!Array.isArray(lldbConfig.preRunCommands) || lldbConfig.preRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native preRunCommands must be a string array');
+            lldbConfig.preRunCommands = [...(lldbConfig.preRunCommands ?? []), ...nativeLibraryCommands(config.androidNativeLibraries)];
+        }
         return lldbConfig;
     }
 
-    /** 保留原先启动Native子会话的顺序与API，缺少符号目录时提示断点风险，宿主提前持有server以便失败回滚；native-codelldb.test.js覆盖提示和异常。 */
+    /** 保留原 Native 子会话启动顺序；前置为父配置已解析，宿主持有 server 供失败回滚。未发现本地符号目录仅附加成功后警告，不要求猜路径；
+     * Node>=22 执行 node --test tests/native-codelldb.test.js，断言所选文件精确传至命令且无文本输入/警告、缺失仅附加后警告及异常清理。 */
     private async attachToProcess(pid: string, response: DebugProtocol.Response) {
         this.checkOpen();
         let config = this.config;
@@ -104,8 +111,8 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         let lldbSuccess = await vscode.debug.startDebugging(this.session.workspaceFolder, lldbConfig, {parentSession: this.session});
         if (!lldbSuccess) throw new Error('CodeLLDB rejected the native child configuration');
         if (!Object.keys(this.childSessions).length) throw new Error('CodeLLDB did not report a native child session');
-        if (!Array.isArray(config.native?.symbolSearchPaths) || config.native.symbolSearchPaths.length === 0) {
-            void vscode.window.showWarningMessage('Android Native debugger attached without symbolSearchPaths. C/C++ source breakpoints may not bind; configure native.symbolSearchPaths with unstripped .so directories.');
+        if (!config.androidNativeLibraries?.length && (!Array.isArray(config.native?.symbolSearchPaths) || config.native.symbolSearchPaths.length === 0)) {
+            void vscode.window.showWarningMessage('Android Native debugger attached, but no local Native .so files were found in symbolSearchPaths. C/C++ source breakpoints may not bind. Source indexing does not guarantee matching debug symbols are available.');
         }
         this.checkOpen();
         response.success = lldbSuccess;

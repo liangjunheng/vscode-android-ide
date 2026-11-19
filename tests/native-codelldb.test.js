@@ -6,9 +6,9 @@ const vm = require('node:vm');
 const { build } = require('esbuild');
 const root = path.resolve(__dirname, '..');
 
-/** 加载真实父adapter、原两阶段provider和真实DAP库，只替换设备/VSCode边界；npm test发现本文件。 */
+/** Node>=22 的 npm test 加载真实父 adapter、两阶段 provider 和 DAP；隔离设备/工具链边界并记录符号发现输入，验证两阶段传递、文件选择/手填记录、失效清理及无强制目录输入。 */
 async function fixture(t) {
-  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, input: undefined, inputCalls: 0, autoSymbols: [], toolchainFailure: undefined, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
+  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, input: undefined, inputCalls: 0, autoSymbols: [], symbolCalls: [], symbolAction: 'none', symbolPicks: [], symbolStore: new Map(), symbolUpdates: [], toolchainFailure: undefined, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
   const disposable = set => listener => { set.add(listener); return { dispose: () => set.delete(listener) }; };
   const vscode = {
     Uri: { file: fsPath => ({ fsPath }) },
@@ -16,7 +16,7 @@ async function fixture(t) {
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     workspace: { get isTrusted() { return f.trusted; }, getConfiguration: () => ({ get: key => key === 'abiSupported' ? ['arm64-v8a', 'x86_64'] : key === 'abiMap' ? {} : undefined }) },
     extensions: { getExtension() { return f.codeLldb; } },
-    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showWarningMessage: async message => { f.notices.push(message); }, showInputBox: async options => { f.inputCalls++; f.inputPrompt = options.prompt; return f.input; } }, commands: { executeCommand: async () => undefined },
+    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showWarningMessage: async message => { f.notices.push(message); }, showInputBox: async options => { f.inputCalls++; f.inputPrompt = options.prompt; return f.input; }, showQuickPick: async (items, options) => { f.symbolPicks.push({ items, options }); if (f.symbolPickHook) return f.symbolPickHook(items, options); return options.canPickMany ? [items[0]] : items.find(item => item.action === f.symbolAction); }, showOpenDialog: async options => { f.dialogOptions = options; return f.dialogPaths?.map(fsPath => ({ fsPath })); } }, commands: { executeCommand: async () => undefined },
     commands: { registerCommand(name, action) { assert.equal(f.commands.has(name), false); f.commands.set(name, action); return { dispose() {} }; } },
     debug: {
       registerDebugAdapterDescriptorFactory() { throw new Error('Descriptor belongs to extension activation'); },
@@ -57,7 +57,7 @@ async function fixture(t) {
   };
   const targetPicker = { activate() {}, setCurrentTarget() {}, resetCurrentTarget() {}, async pickTarget() { return f.selected; }, async getLastOrPickTarget() { return f.selected; }, async getTargetFromUDID(udid) { return { udid }; } };
   const mocks = { vscode, android, targetCommand, targetPicker,
-    nativeToolchain: { findNativeSymbolSearchPaths: () => f.autoSymbols, resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
+    nativeToolchain: { findNativeSymbolSearchPaths: (projectRoot, native) => { f.symbolCalls.push({ projectRoot, paths: native?.symbolSearchPaths }); return native?.symbolSearchPaths?.length ? native.symbolSearchPaths : f.autoSymbols; }, resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
     nativeTarget: { resolveLauncherActivity: async (adb, serial, pkg) => { f.calls.push(['activity', adb, serial, pkg]); return 'MainActivity'; } },
   };
   const result = await build({ entryPoints: [path.join(root, 'src/android-debugger/native-debugger/adapter.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['@vscode/debugadapter'], plugins: [{ name: 'native-boundaries', setup(builder) {
@@ -66,13 +66,13 @@ async function fixture(t) {
   } }] });
   const module = { exports: {} };
   vm.runInNewContext(result.outputFiles[0].text, { module, exports: module.exports, require: id => id.startsWith('mock:') ? mocks[id.slice(5)] : require(id), process, console, Buffer, structuredClone });
-  f.api = module.exports; f.context = { subscriptions: [] }; f.factory = f.api.createAndroidDebugAdapterFactory(f.context, folder => { f.calls.push(['gradle-package', folder?.uri.fsPath]); if (f.gradleFailure) throw f.gradleFailure; return f.gradlePackage; });
+  f.api = module.exports; f.context = { subscriptions: [], workspaceState: { get: key => structuredClone(f.symbolStore.get(key)), async update(key, value) { f.symbolUpdates.push({ key, value: structuredClone(value) }); if (value === undefined) f.symbolStore.delete(key); else f.symbolStore.set(key, structuredClone(value)); } } }; f.factory = f.api.createAndroidDebugAdapterFactory(f.context, folder => { f.calls.push(['gradle-package', folder?.uri.fsPath]); if (f.gradleFailure) throw f.gradleFailure; return f.gradlePackage; });
   f.baseEnds = f.ends.size;
   t.after(async () => { for (const owned of [...f.context.subscriptions].reverse()) await owned.dispose?.(); });
   f.parent = async (overrides = {}, resolve = false) => {
     const folder = { uri: { fsPath: root } };
     let config = { type: 'android-tools', name: 'Built-in Native', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {}, ...overrides };
-    if (resolve) { const provider = f.providers.get('android-tools'); config = await provider.resolveDebugConfiguration(folder, config); if (!config) return undefined; config = await provider.resolveDebugConfigurationWithSubstitutedVariables(folder, config); }
+    if (resolve) { const provider = f.providers.get('android-tools'); config = await provider.resolveDebugConfiguration(folder, config); if (!config) return undefined; config = await provider.resolveDebugConfigurationWithSubstitutedVariables(folder, config); if (!config) return undefined; }
     const parent = { id: 'parent-' + f.seq, type: 'android-tools', workspaceFolder: folder, configuration: config };
     const descriptor = f.factory.createDebugAdapterDescriptor(parent); return descriptor.implementation;
   };
@@ -123,8 +123,12 @@ test('built-in Native real DAP attach resolves original remote commands and owns
   const config = f.children[0].configuration;
   assert.equal(config.type, 'lldb'); assert.equal(config.pid, 1); assert.equal(config.androidTarget.udid, 'evil'); assert.equal(config.androidPackageName, 'com.example.app');
   assert.equal(f.servers[0].args.device.androidProjectRoot, root); assert.equal(f.servers[0].args.abi, 'arm64-v8a');
-  assert.deepEqual(Array.from(config.initCommands), ['platform select remote-android', 'platform connect unix-abstract-connect://[evil]/platform-0', 'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'settings set target.foo true', "settings append target.exec-search-paths 'native symbols'"]);
+  assert.deepEqual(Array.from(config.initCommands), ['platform select remote-android', 'platform connect unix-abstract-connect://[evil]/platform-0', 'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'settings set target.foo true']);
   assert.deepEqual(options.initCommands, ['settings set target.foo true']);
+  assert.deepEqual(options.symbolSearchPaths, ['native symbols']);
+  assert.deepEqual(Array.from(config.symbolSearchPaths), []);
+  assert.equal(config.preRunCommands, undefined);
+  assert.equal(f.symbolPicks.length, 1); assert.equal(f.symbolStore.size, 0);
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.cleaned.length, 1); assert.equal(f.starts.size, 0); assert.equal(f.ends.size, f.baseEnds);
 });
 
@@ -134,9 +138,137 @@ test('Native auto symbols fill a missing native config without prompting', async
   assert.equal(f.inputCalls, 0); assert.equal(resolved.native.symbolSearchPaths[0], 'auto-symbols');
 });
 
-test('Native missing symbols do not prompt and continue with warning only after child attach', async t => {
+// 从父配置经过两阶段、一次用户选择及真实 LLDB provider；仅所选精确文件进入 preRunCommands，不再加入包含冲突文件的目录。
+test('Native selected symbols reach CodeLLDB exactly once and are remembered across sessions', async t => {
+  const f = await fixture(t); const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native symbols-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const symbols = path.join(temp, 'app', 'build', 'intermediates', 'cxx', 'Debug', 'hash', 'obj', 'arm64-v8a');
+  const rejected = path.join(temp, 'other', 'build', 'intermediates', 'cxx', 'Release', 'hash', 'obj', 'arm64-v8a');
+  fs.mkdirSync(symbols, { recursive: true }); fs.mkdirSync(rejected, { recursive: true });
+  const selectedFile = path.join(symbols, 'libapp.so'); const rejectedFile = path.join(rejected, 'libapp.so');
+  fs.writeFileSync(selectedFile, 'test library'); fs.writeFileSync(rejectedFile, 'other library');
+  f.autoSymbols = [symbols, rejected]; f.symbolAction = 'scan';
+  f.symbolPickHook = (items, options) => { assert.equal(f.servers.length, 0); return options.canPickMany ? items.filter(item => item.filename === selectedFile) : items.find(item => item.action === 'scan'); };
+  const adapter = await f.parent({ native: { preRunCommands: ['settings set target.foo true'] } }, true);
+  assert.equal(f.symbolCalls.length, 2);
+  assert.equal(f.symbolCalls[0].projectRoot, root); assert.equal(f.symbolCalls[0].paths, undefined);
+  assert.equal(f.symbolCalls[1].projectRoot, root); assert.deepEqual(Array.from(f.symbolCalls[1].paths), [symbols, rejected]);
+  assert.equal(f.inputCalls, 0); assert.equal(f.notices.length, 0);
+  assert.equal((await request(f, adapter, 'attach')).success, true);
+  assert.equal(f.children.length, 1);
+  const config = f.children[0].configuration;
+  assert.deepEqual(Array.from(config.symbolSearchPaths), []);
+  assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.foo true', 'target modules add -- ' + JSON.stringify(selectedFile)]);
+  assert.equal(config.androidNativeLibraries, undefined);
+  assert.deepEqual(Array.from(config.initCommands).filter(command => command.includes('target.exec-search-paths')), []);
+  assert.equal(config.preRunCommands.some(command => command.includes(rejectedFile)), false);
+  assert.equal(f.symbolPicks.length, 2); assert.equal(f.symbolStore.size, 1);
+  assert.deepEqual([...f.symbolStore.values()][0].files, [selectedFile]);
+  assert.equal(f.servers.length, 1); assert.equal(f.inputCalls, 0); assert.equal(f.notices.length, 0);
+  assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.cleaned.length, 1);
+  const remembered = await f.parent({ native: undefined }, true);
+  assert.equal(f.symbolPicks.length, 2);
+  assert.equal((await request(f, remembered, 'attach')).success, true);
+  assert.deepEqual(Array.from(f.children[1].configuration.preRunCommands), ['target modules add -- ' + JSON.stringify(selectedFile)]);
+  assert.equal(f.symbolPicks.length, 2);
+});
+
+// 手填得到的文件同样持久化；丢失后必须先删记录，再允许用户重新输入或取消，不能创建调试资源。
+test('Native manual symbol paths are remembered and stale files are removed before cancelled re-selection', async t => {
+  const f = await fixture(t); const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-manual-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const filename = path.join(temp, 'libmanual.so'); fs.writeFileSync(filename, 'library');
+  f.symbolAction = 'manual'; f.input = filename;
+  const adapter = await f.parent({}, true);
+  assert.ok(adapter); assert.equal(f.inputCalls, 1); assert.equal(f.symbolStore.size, 1);
+  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0);
+  const remembered = await f.parent({}, true);
+  assert.ok(remembered); assert.equal(f.inputCalls, 1); assert.equal(f.symbolPicks.length, 1);
+  fs.rmSync(filename); f.symbolAction = undefined;
+  f.symbolPickHook = () => { assert.equal(f.symbolStore.size, 0); return undefined; };
+  assert.equal(await f.parent({}, true), undefined);
+  assert.equal(f.symbolStore.size, 0); assert.equal(f.symbolUpdates.at(-1).value, undefined);
+  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0);
+});
+
+// 浏览目录后记录来源与具体文件；来源被删时必须先清记录，再让用户手填替代库，最终不能继续装载旧文件。
+test('Native lost symbol directories are cleared before manual replacement', async t => {
+  const f = await fixture(t); const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-directory-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const directory = path.join(temp, 'symbols'); fs.mkdirSync(directory);
+  const oldFile = path.join(directory, 'libold.so'); fs.writeFileSync(oldFile, 'old library');
+  f.symbolAction = 'directory'; f.dialogPaths = [directory];
+  assert.ok(await f.parent({}, true));
+  assert.equal(f.dialogOptions.canSelectFolders, true); assert.equal(f.dialogOptions.canSelectFiles, false);
+  assert.deepEqual([...f.symbolStore.values()][0], { files: [oldFile], directories: [directory] });
+  fs.rmSync(directory, { recursive: true });
+  const replacement = path.join(temp, 'libreplacement.so'); fs.writeFileSync(replacement, 'replacement library');
+  f.input = replacement;
+  f.symbolPickHook = items => { assert.equal(f.symbolStore.size, 0); return items.find(item => item.action === 'manual'); };
+  const adapter = await f.parent({}, true);
+  assert.equal(f.symbolUpdates[1].value, undefined);
+  assert.deepEqual([...f.symbolStore.values()][0], { files: [replacement], directories: [] });
+  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0);
+  assert.equal((await request(f, adapter, 'attach')).success, true);
+  assert.deepEqual(Array.from(f.children[0].configuration.preRunCommands), ['target modules add -- ' + JSON.stringify(replacement)]);
+});
+
+// 同一多根工作区共享 workspaceState 也必须按实际 Android 项目根隔离，不能用当前 folder 替代配置里的项目根。
+test('Native persistence belongs only to the current Android project', async t => {
+  const f = await fixture(t); const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-project-scope-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const projectA = path.join(temp, 'project-a'), projectB = path.join(temp, 'project-b');
+  fs.mkdirSync(projectA); fs.mkdirSync(projectB);
+  const filename = path.join(projectA, 'libapp.so'); fs.writeFileSync(filename, 'project-a');
+  f.symbolAction = 'manual'; f.input = filename;
+  assert.ok(await f.parent({ androidProjectRoot: projectA }, true));
+  assert.equal(f.symbolStore.size, 1); const [key, saved] = [...f.symbolStore.entries()][0];
+  assert.deepEqual(JSON.parse(key.slice('androidNative.symbols:'.length)), [projectA, 'com.example.app', 'arm64-v8a']); assert.deepEqual(saved.files, [filename]);
+  f.symbolAction = undefined;
+  assert.equal(await f.parent({ androidProjectRoot: projectB }, true), undefined);
+  assert.equal(f.symbolPicks.length, 2); assert.equal(f.inputCalls, 1);
+  assert.equal(f.symbolStore.size, 1); assert.deepEqual(f.symbolStore.get(key), saved);
+  assert.ok(await f.parent({ androidProjectRoot: projectA }, true));
+  assert.equal(f.symbolPicks.length, 2); assert.equal(f.symbolStore.size, 1);
+  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0);
+});
+
+// 冲突/取消在父配置阶段结算，不能让 CodeLLDB 再按目录顺序猜文件。
+test('Native cancelled file choice and duplicate library choices never create server or child', async t => {
+  const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-conflict-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const files = ['one', 'two'].map(name => { const dir = path.join(temp, name); fs.mkdirSync(dir); const filename = path.join(dir, 'libsame.so'); fs.writeFileSync(filename, 'library'); return filename; });
+  const cancelled = await fixture(t); cancelled.autoSymbols = files.map(filename => path.dirname(filename));
+  cancelled.symbolPickHook = (items, options) => options.canPickMany ? undefined : items.find(item => item.action === 'scan');
+  assert.equal(await cancelled.parent({}, true), undefined);
+  assert.equal(cancelled.symbolPicks.length, 2); assert.equal(cancelled.symbolStore.size, 0);
+  assert.equal(cancelled.servers.length, 0); assert.equal(cancelled.children.length, 0);
+  const conflict = await fixture(t); conflict.symbolAction = 'files'; conflict.dialogPaths = files;
+  await assert.rejects(conflict.parent({}, true), /Conflicting Native libraries.*libsame\.so/);
+  assert.equal(conflict.symbolStore.size, 0); assert.equal(conflict.servers.length, 0); assert.equal(conflict.children.length, 0);
+});
+
+// 用户 preRunCommands 的类型错误必须在创建远程 server 前失败，不能因追加模块命令而掩盖。
+test('Native selected libraries preserve preRunCommands validation before server allocation', async t => {
+  const f = await fixture(t); const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-options-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const filename = path.join(temp, 'libapp.so'); fs.writeFileSync(filename, 'library');
+  f.symbolAction = 'manual'; f.input = filename;
+  const adapter = await f.parent({ native: { preRunCommands: 'not an array' } }, true);
+  const response = await request(f, adapter, 'attach');
+  assert.equal(response.success, false); assert.match(response.message, /preRunCommands must be a string array/);
+  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0);
+});
+
+test('Native missing symbols offer manual selection and can continue with a warning after child attach', async t => {
   const f = await fixture(t); f.input = 'unused'; const adapter = await f.parent({ native: {} }, true);
-  assert.equal(f.inputCalls, 0); assert.equal((await request(f, adapter, 'attach')).success, true); assert.equal(f.notices.some(message => /symbolSearchPaths/.test(message)), true);
+  assert.equal(f.inputCalls, 0); assert.equal(f.notices.length, 0);
+  assert.equal((await request(f, adapter, 'attach')).success, true); assert.equal(f.inputCalls, 0);
+  assert.equal(f.children.length, 1); assert.equal(f.notices.length, 1); assert.match(f.notices[0], /no local Native \.so files.*symbolSearchPaths/);
+  assert.doesNotMatch(f.notices[0], /configure native\.symbolSearchPaths/);
+  const rejected = await fixture(t); rejected.accept = false; const rejectedAdapter = await rejected.parent({ native: {} }, true);
+  assert.equal((await request(rejected, rejectedAdapter, 'attach')).success, false);
+  assert.equal(rejected.inputCalls, 0); assert.equal(rejected.notices.some(message => /symbolSearchPaths/.test(message)), false);
 });
 
 test('Native prompts for a missing NDK and retries the current session', async t => {

@@ -7,14 +7,14 @@ const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 const source = fs.readFileSync(path.join(__dirname, '../src/android-debugger/native-debugger/nativeToolchain.ts'), 'utf8');
 
-/** 加载真实工具链模块，隔离本机设置/环境，只让文件检查访问测试创建的目录；npm test发现本文件。 */
+/** 加载真实工具链模块；Node>=22 的 npm test 发现本文件，隔离本机配置并记录目录访问，可注入权限错误验证发现失败不吞错。 */
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'native-toolchain-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const state = { local: {}, settings: {}, runtime: undefined, sdk: '', adb: 'adb', env: {} };
+  const state = { local: {}, settings: {}, runtime: undefined, sdk: '', adb: 'adb', env: {}, reads: [], denied: undefined };
   const module = { exports: {} };
   const vscode = { Uri: { file: fsPath => ({ fsPath }) }, workspace: { getConfiguration(section, uri) { assert.equal(section, 'android-debug'); state.uri = uri; return { get: key => state.settings[key] }; } } };
-  const disk = new Proxy(fs, { get(target, key) { if (key !== 'statSync') return target[key]; return file => { if (file === 'forbidden') throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); return fs.statSync(file); }; } });
+  const disk = new Proxy(fs, { get(target, key) { if (key === 'readdirSync') return (directory, options) => { state.reads.push(directory); if (directory === state.denied) throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); return fs.readdirSync(directory, options); }; if (key !== 'statSync') return target[key]; return file => { if (file === 'forbidden') throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); return fs.statSync(file); }; } });
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process: { platform: process.platform, env: state.env }, require(id) {
     if (id === 'vscode') return vscode;
     if (id === 'node:fs') return disk;
@@ -56,6 +56,40 @@ test('Native symbol discovery finds Gradle outputs and honors explicit paths', t
   fs.mkdirSync(symbols, { recursive: true }); fs.mkdirSync(gradleSymbols, { recursive: true }); fs.writeFileSync(path.join(symbols, 'libapp.so'), 'symbols'); fs.writeFileSync(path.join(gradleSymbols, 'libother.so'), 'symbols');
   const found = f.api.findNativeSymbolSearchPaths(f.root); assert.ok(found.includes(symbols)); assert.ok(found.includes(gradleSymbols));
   const explicit = path.join(f.root, 'manual-symbols'); fs.mkdirSync(explicit); const explicitFound = f.api.findNativeSymbolSearchPaths(f.root, { symbolSearchPaths: ['manual-symbols'] }); assert.equal(explicitFound.length, 1); assert.equal(explicitFound[0], explicit);
+});
+
+// 构造深于原七层上限的多模块产物，严格断言无遗漏/重复访问，且不把打包后 .so 当成自动候选。
+test('Native symbol discovery scans deep modules once and excludes unrelated outputs and directory links', t => {
+  const f = fixture(t);
+  const paths = [
+    'app/build/intermediates/cxx/Debug/hash/obj/arm64-v8a',
+    'features/camera/native/module/build/intermediates/ndkBuild/debug/obj/local/arm64-v8a',
+    'features/camera/native/module/.cxx/Debug/hash/very/deep/output/obj/x86_64',
+    'libraries/engine/build/intermediates/cmake/debug/obj/arm64-v8a',
+  ].map(relative => path.join(f.root, relative));
+  for (const directory of paths) file(path.join(directory, 'libapp.so'));
+  for (const relative of ['app/build/intermediates/merged_native_libs/debug/out/lib/arm64-v8a', 'node_modules/pkg/.cxx/obj', '.gradle/cache/.cxx/obj', '.git/.cxx/obj', '.idea/.cxx/obj']) file(path.join(f.root, relative, 'libignored.so'));
+  fs.symlinkSync(f.root, path.join(f.root, 'linked-project'), 'junction');
+  assert.deepEqual(Array.from(f.api.findNativeSymbolSearchPaths(f.root)), paths.sort());
+  assert.equal(f.state.reads.length, new Set(f.state.reads).size);
+  assert.equal(f.state.reads.some(directory => directory.includes('linked-project') || directory.includes('merged_native_libs') || directory.includes('node_modules')), false);
+});
+
+// 校验 launch > local > 自动扫描顺序、相对路径根归属、空结果和权限异常，不依赖本机 Android 安装。
+test('Native symbol discovery preserves local precedence and propagates scan IO failures', t => {
+  const f = fixture(t); const local = path.join(f.root, 'local-symbols');
+  f.state.local = { debugger: { symbolSearchPaths: [local, local] } };
+  assert.deepEqual(Array.from(f.api.findNativeSymbolSearchPaths(f.root)), [local]);
+  assert.deepEqual(Array.from(f.api.findNativeSymbolSearchPaths(f.root, { symbolSearchPaths: ['launch-symbols', 'launch-symbols'] })), [path.join(f.root, 'launch-symbols')]);
+  assert.equal(f.state.reads.length, 0);
+  f.state.local = {};
+  assert.equal(f.api.findNativeSymbolSearchPaths().length, 0);
+  assert.equal(f.api.findNativeSymbolSearchPaths(path.join(f.root, 'missing')).length, 0);
+  const notDirectory = file(path.join(f.root, 'file'));
+  assert.equal(f.api.findNativeSymbolSearchPaths(notDirectory).length, 0);
+  assert.equal(f.api.findNativeSymbolSearchPaths(f.root).length, 0);
+  f.state.denied = f.root;
+  assert.throws(() => f.api.findNativeSymbolSearchPaths(f.root), { code: 'EACCES' });
 });
 
 test('Native discovery keeps upstream SDK ndk and ndk-bundle layout with PATH ADB fallback', t => {

@@ -75,8 +75,9 @@ function findNdk(sdk: string): string | undefined {
   return undefined;
 }
 
-/** 自动发现本地 Native 调试符号目录；优先 launch/native 本地配置，再扫描 Gradle/NDK 常见输出目录，返回目录而非具体 .so 文件。
- * 回归：Node>=22 执行 node --test tests/native-toolchain.test.js，断言 .cxx/Gradle 输出目录自动发现和显式路径优先。 */
+/** 自动发现本地 .so 搜索目录，不保证产物未剥离或与设备版本匹配；优先 launch/local，再按模块扫描 .cxx 和 Gradle Native 输出，不触发构建。
+ * 前置：项目根可读；缺失目录返回空，权限错误传播，不跟随目录链接。Node>=22 执行 node --test tests/native-toolchain.test.js，
+ * 断言深层模块输出、去重、忽略非 Native 构建产物、显式/local 优先与 IO 错误；native-codelldb.test.js 验证无强制目录输入、用户确认具体 .so 后精确传至 LLDB。 */
 export function findNativeSymbolSearchPaths(projectRoot?: string, native?: unknown): string[] {
   const values = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : {};
   const configured = Array.isArray(values.symbolSearchPaths) ? values.symbolSearchPaths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map(value => path.resolve(projectRoot ?? process.cwd(), value)) : [];
@@ -85,20 +86,24 @@ export function findNativeSymbolSearchPaths(projectRoot?: string, native?: unkno
   const localPaths = local.debugger?.symbolSearchPaths ?? [];
   if (localPaths.length) return [...new Set(localPaths)];
   if (!projectRoot) return [];
-  const roots = [projectRoot, path.join(projectRoot, 'app'), path.join(projectRoot, '.cxx'), path.join(projectRoot, 'build', 'intermediates', 'cxx'), path.join(projectRoot, 'build', 'intermediates', 'ndkBuild')];
   const result = new Set<string>();
-  const visit = (directoryPath: string, depth: number): void => {
-    if (depth > 7 || !directory(directoryPath)) return;
+  const ignored = new Set(['.git', '.gradle', '.idea', 'node_modules']);
+  /** 沿模块树定位 Native 输出后完整扫描，避免项目深度截断；上方回归验证深层路径、单次访问及目录链接排除。 */
+  const visit = (directoryPath: string, nativeOutput = false): void => {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(directoryPath, { withFileTypes: true }); } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code || '')) return; throw error; }
-    let hasSo = false;
+    if (entries.some(entry => entry.isFile() && entry.name.endsWith('.so')) && (nativeOutput || /^(?:obj|lib)$/i.test(path.basename(directoryPath)))) result.add(directoryPath);
     for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.so')) hasSo = true;
-      else if (entry.isDirectory() && entry.name !== 'node_modules') visit(path.join(directoryPath, entry.name), depth + 1);
+      if (!entry.isDirectory() || entry.isSymbolicLink() || ignored.has(entry.name)) continue;
+      const child = path.join(directoryPath, entry.name);
+      if (!nativeOutput && entry.name === 'build') {
+        for (const output of ['cxx', 'ndkBuild', 'cmake']) visit(path.join(child, 'intermediates', output), true);
+      } else {
+        visit(child, nativeOutput || entry.name === '.cxx');
+      }
     }
-    if (hasSo && (directoryPath.includes('.cxx') || directoryPath.includes('intermediates') || /(?:obj|lib)$/i.test(directoryPath))) result.add(directoryPath);
   };
-  for (const root of roots) visit(root, 0);
+  visit(projectRoot);
   return [...result].sort();
 }
 

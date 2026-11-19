@@ -10,13 +10,15 @@ import type { AndroidNativeDebugConfiguration, AndroidNativeDebugAdapterFactory 
 
 import { DebugAdapterDescriptorFactory } from './upstream/src/debugAdapter';
 import { findNativeSymbolSearchPaths, nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } from './nativeToolchain';
+import { selectNativeLibraries } from './nativeSymbols';
 
 /** 当前选中Gradle项目在对应工作区的只读包名来源；未知返回undefined，真实错误传播。 */
 export interface NativeProjectMetadata { packageName?: string; abiSupported?: string[]; }
 export type NativePackageResolver = (folder: vscode.WorkspaceFolder | undefined) => string | NativeProjectMetadata | undefined;
 
-/** 校验 Native 启动前置条件；缺失/异常路径、ABI或符号目录可让用户输入并只修正本次会话，失败不创建设备/LLDB资源。
- * 回归：Node>=22 执行 node --test tests/native-codelldb.test.js，断言手动 NDK/符号目录输入、取消与错误提示。 */
+/** 校验 Native 启动前置条件；仅 SDK/NDK、ABI、APK 支持输入修正，符号目录自动读取且缺失不阻止附加，二阶段不重复输入。
+ * 前置：已信任工作区；失败不创建设备/LLDB资源。Node>=22 执行 node --test tests/native-codelldb.test.js，
+ * 断言候选目录经两阶段进入 .so 选择而非文本输入、所选文件精确进入 LLDB、缺失仅附加后警告，以及手动 NDK、取消与错误提示。 */
 export async function validateNativeDebugConfiguration(config: vscode.DebugConfiguration, folder?: vscode.WorkspaceFolder, strictPaths = false, corrected = false, allowPrompt = true): Promise<void> {
   try {
     const native = config.native && typeof config.native === 'object' && !Array.isArray(config.native) ? { ...config.native } : {};
@@ -39,7 +41,7 @@ export async function validateNativeDebugConfiguration(config: vscode.DebugConfi
     }
   } catch (error) {
     const field = nativeCorrectionField(error);
-    if (allowPrompt && !corrected && field && await promptNativeCorrection(config, field, folder)) return validateNativeDebugConfiguration(config, folder, strictPaths, true, allowPrompt);
+    if (allowPrompt && !corrected && field && await promptNativeCorrection(config, field)) return validateNativeDebugConfiguration(config, folder, strictPaths, true, allowPrompt);
     const detail = error instanceof Error ? error.message : String(error);
     const action = await vscode.window.showErrorMessage('Android Native configuration is invalid: ' + detail + '. Correct launch.json and start again.', 'Open launch.json');
     if (action === 'Open launch.json' && typeof vscode.commands?.executeCommand === 'function') await vscode.commands.executeCommand('workbench.action.debug.configure');
@@ -58,9 +60,9 @@ function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupp
   return undefined;
 }
 
-/** 弹出字段输入并写回当前会话配置副本；支持逗号分隔 symbolSearchPaths，取消返回 false，不写 settings 或 launch.json。
- * 回归：Node>=22 执行 node --test tests/native-codelldb.test.js，断言输入值只进入当前配置副本。 */
-async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath', folder?: vscode.WorkspaceFolder): Promise<boolean> {
+/** 仅对无效 SDK/NDK、ABI 或 APK 输入并写回当前会话副本，支持逗号分隔 ABI；不询问符号目录，取消返回 false，不写配置文件。
+ * 前置：对应字段校验失败；Node>=22 执行 node --test tests/native-codelldb.test.js，断言 NDK 修正和符号缺失无输入。 */
+async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath'): Promise<boolean> {
   if (typeof vscode.window?.showInputBox !== 'function') return false;
   const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};
   const current = native[field];
@@ -71,7 +73,6 @@ async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 
   });
   if (!value?.trim()) return false;
   if (field === 'abiSupported') native.abiSupported = value.split(',').map(item => item.trim()).filter(Boolean);
-
   else if (field === 'abi') native.abi = value.trim();
   else { native[field] = value.trim(); if (field === 'apkPath') config.apkPath = value.trim(); }
   config.native = native;
@@ -156,8 +157,8 @@ export class NativeLldbConfigurationProvider implements vscode.DebugConfiguratio
 export class NativeAndroidConfigurationProvider implements vscode.DebugConfigurationProvider {
   private readonly delegate = new AndroidDebugConfigurationProvider();
 
-  /** 只在Launch缺省包名和APK时懒读Gradle选择；native-codelldb.test.js断言覆盖、未知与错误。 */
-  constructor(private readonly selectedPackage: NativePackageResolver = () => undefined) {}
+  /** 持有当前工作区的符号选择记录，只在 Launch 缺省包名/APK 时懒读 Gradle；native-codelldb.test.js 验证记录重用、隔离及包名来源。 */
+  constructor(private readonly symbolState: vscode.Memento, private readonly selectedPackage: NativePackageResolver = () => undefined) {}
 
   /** 返回独立内置Native配置供Run and Debug显示名称，不探测工具链；native-codelldb.test.js直接调用initial/dynamic入口断言名称、复制隔离和零设备调用。 */
   provideDebugConfigurations(_folder?: vscode.WorkspaceFolder, _token?: vscode.CancellationToken): vscode.DebugConfiguration[] { return getAndroidDebugConfigurations().filter(config => config.type === 'android-tools'); }
@@ -183,11 +184,23 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
     return resolved;
   }
 
-  /** 变量替换后沿用原包名/ABI和resume默认值，规范化进程身份；回归同文件launch/attach解析断言。 */
+  /** 变量替换并解析包名/ABI 后，在 server 启动前选择或手填 .so/目录并重用项目级记录，失效先删再处理，取消返回 null。
+   * 仅将确认的精确文件传至 child，清除宽泛目录以排除未选同名库。前置：第一阶段校验完成；Node>=22 执行 node --test tests/native-codelldb.test.js，
+   * 断言 launch/attach、一次选择/手填、记录重用与失效删除、取消/冲突无 server，以及所选文件进入 preRunCommands。 */
   async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
     await validateNativeDebugConfiguration(config, folder, true, false, false);
     const result = await this.delegate.resolveDebugConfigurationWithSubstitutedVariables(folder, config, token!);
-    if (result?.request === 'attach') { result.pid = processId(result as AndroidNativeDebugConfiguration); result.processId = result.pid; }
+    if (!result) return null;
+    if (result.request === 'attach') { result.pid = processId(result as AndroidNativeDebugConfiguration); result.processId = result.pid; }
+    const paths = result.native?.symbolSearchPaths ?? [];
+    if (!Array.isArray(paths) || paths.some((value: unknown) => typeof value !== 'string')) throw new Error('Native symbolSearchPaths must be a string array');
+    const libraries = await selectNativeLibraries(paths, {
+      projectRoot: result.androidProjectRoot || folder?.uri.fsPath, packageName: result.packageName, abi: result.native?.abi,
+      storage: this.symbolState, token,
+    });
+    if (!libraries) return null;
+    result.androidNativeLibraries = libraries;
+    result.native.symbolSearchPaths = [];
     return result;
   }
 }
@@ -232,12 +245,13 @@ export function createAndroidDebugAdapterFactory(context: vscode.ExtensionContex
   return Object.assign(factory, { nativeOnly: true as const });
 }
 
-/** 注册原设备/ABI解析器和仅提供配置的动态入口，让Run and Debug显示内置名；native-codelldb.test.js验证唯一动态项、解析不重复及注册幂等。 */
+/** 注册原设备/ABI解析器与内置动态入口，将当前 workspaceState 交给父 provider 保存项目级选择，不使用全局存储。
+ * Node>=22 执行 node --test tests/native-codelldb.test.js，验证唯一动态项、注册幂等、符号记录重用及实际 Android 项目根隔离。 */
 export function registerNativeProviders(context: vscode.ExtensionContext, selectedPackage?: NativePackageResolver): NativeLldbConfigurationProvider {
   const existing = registrations.get(context); if (existing) return existing;
   initializeNativeUpstream(context);
   const lldb = new NativeLldbConfigurationProvider();
-  const androidProvider = new NativeAndroidConfigurationProvider(selectedPackage);
+  const androidProvider = new NativeAndroidConfigurationProvider(context.workspaceState, selectedPackage);
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('android-tools', androidProvider),
     vscode.debug.registerDebugConfigurationProvider('android-tools', androidProvider, vscode.DebugConfigurationProviderTriggerKind.Dynamic), vscode.debug.registerDebugConfigurationProvider('lldb', lldb), lldb,
     vscode.debug.onDidTerminateDebugSession(session => { if (session.type === 'lldb') void lldb.release(session.configuration.androidLldbServerSocket).catch(reportCleanup); }),
