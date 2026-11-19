@@ -21,6 +21,10 @@ export async function validateNativeDebugConfiguration(config: vscode.DebugConfi
     const overrides = nativeToolchainOverrides(native);
     resolveNativeToolchain(config.androidProjectRoot || folder?.uri.fsPath, overrides);
     validateNativeAbis(native, config.androidAbiSupported);
+    const nativeConfig = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : undefined;
+    if ((!Array.isArray(nativeConfig?.symbolSearchPaths) || nativeConfig.symbolSearchPaths.length === 0) && typeof vscode.window?.showInputBox === 'function') {
+      await promptNativeCorrection(config, 'symbolSearchPaths');
+    }
     if (config.packageName !== undefined && (typeof config.packageName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName))) throw new Error('A valid package name is required.');
     if (config.launchActivity !== undefined && (typeof config.launchActivity !== 'string' || !config.launchActivity.trim())) throw new Error('Invalid Native launchActivity: expected a non-empty activity name');
     if (config.apkPath !== undefined) {
@@ -53,17 +57,18 @@ function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupp
 }
 
 /** 弹出字段输入并写回当前会话配置副本；取消返回 false，不写 settings 或 launch.json。 */
-async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath'): Promise<boolean> {
+async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | 'symbolSearchPaths'): Promise<boolean> {
   if (typeof vscode.window?.showInputBox !== 'function') return false;
   const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};
   const current = native[field];
   const value = await vscode.window.showInputBox({
-    prompt: field === 'abiSupported' ? 'Enter supported Android ABIs separated by commas' : 'Enter Android Native ' + field,
+    prompt: field === 'abiSupported' ? 'Enter supported Android ABIs separated by commas' : field === 'symbolSearchPaths' ? 'Enter unstripped native symbol directories separated by commas (optional)' : 'Enter Android Native ' + field,
     value: Array.isArray(current) ? current.join(',') : typeof current === 'string' ? current : '',
     ignoreFocusOut: true,
   });
   if (!value?.trim()) return false;
   if (field === 'abiSupported') native.abiSupported = value.split(',').map(item => item.trim()).filter(Boolean);
+  else if (field === 'symbolSearchPaths') native.symbolSearchPaths = value.split(',').map(item => item.trim()).filter(Boolean);
   else if (field === 'abi') native.abi = value.trim();
   else { native[field] = value.trim(); if (field === 'apkPath') config.apkPath = value.trim(); }
   config.native = native;
