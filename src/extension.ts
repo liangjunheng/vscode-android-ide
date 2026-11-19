@@ -7,6 +7,7 @@ import { openExtendedControls } from './extendedControls';
 import { AndroidBuildController } from './androidBuild';
 import { createAndroidDebugAdapterFactory } from './android-debugger/native-debugger/adapter';
 import { initializeRuntimeContext, resetRuntimeContext } from './runtimeContext';
+import { registerJvmDebugger } from './android-debugger/jvm-debugger/adapter';
 
 // 注册共享设备区域及配置监听，以延迟只读闭包将 Build 当前选择提供给 Explorer；输入扩展上下文，订阅交其释放，无返回值。
 // 回归：node --test tests/build-panel-ui.test.js 断言仅注册现存命令、android-tools工厂及上下文；mirror-configuration.test.js覆盖配置接线。
@@ -39,12 +40,16 @@ export function activate(ctx: vscode.ExtensionContext) {
   // 提供方同串号幂等阻止回传循环；device-selection-sync回归验证双方选择、隐藏和无设备日志入口。
   // 定位时只读Build当前ID，undefined交Explorer候选fallback，不缓存或吞真实故障；Node>=22，node --test tests/mirror-configuration.test.js验证闭包时序/切换/undefined及错误。
   const explorer = new DeviceExplorerController(message => running.publishBuildState(message), () => build.currentApplicationId(), (packageName, workspaceRoot, signal) => build.resolveCurrentDebugProject(packageName, workspaceRoot, signal));
-  const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer);
+  const nativeMirror = vscode.workspace.getConfiguration('android-ide').get<boolean>('nativeMirror', false);
+  const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer, nativeMirror);
   const build = new AndroidBuildController(message => running.publishBuildState(message));
+  registerJvmDebugger(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath)?.packageName : undefined);
   const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined));
   const refresh = () => running.refresh().catch(error => vscode.window.showErrorMessage(String(error)));
+  const androidFactory = createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined);
   ctx.subscriptions.push(
-    vscode.debug.registerDebugAdapterDescriptorFactory('android-tools', createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined)),
+    vscode.debug.registerDebugAdapterDescriptorFactory('android-tools', androidFactory),
+    vscode.debug.registerDebugAdapterDescriptorFactory('android-debug', androidFactory),
     build, explorer, running,
     // 监听只应用不写回，订阅由ctx释放；device-view-mode/mirror-configuration回归断言过滤和错误展示。
     vscode.workspace.onDidChangeConfiguration(event => {

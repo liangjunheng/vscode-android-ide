@@ -96,14 +96,25 @@ test('title selector replaces device list and registers only the mirror view', a
     './upstream/src/targetCommand': { activate() {}, pickAndroidProcess() {}, getBestAbi() {}, getBestMappedAbi() {}, getPackageNameForPid: async () => 'app', resumeWaitingProcess() {}, setAbiResolutionInfo() {}, setProcessPickerInfo() {}, resetAbiResolutionInfo() {}, resetProcessPickerInfo() {} },
     './nativeToolchain': { resolveNativeToolchain: () => ({ adb: 'adb', sdkRoot: '', ndkRoot: '' }) },
     './nativeTarget': { resolveLauncherActivity: async () => 'MainActivity', adbExec: async () => '' },
+    '../../sdk': { adbPath: () => 'adb', listDevices: async () => [] },
+    '../../projectLocalConfig': { readProjectLocalConfig: () => ({}) },
+    './nativeSymbols': { selectNativeLibraries: async () => [] },
   });
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} } }, vscode, './android-debugger/native-debugger/adapter': adapter, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  // UI 回归只验证设备视图接线；JVM debugger 的外部注册边界由独立测试覆盖，因此在这里隔离整个注册模块。
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/native-debugger/adapter': adapter, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
   assert.deepEqual(views, ['android-ide.runningDevice', 'android-ide.logcat']);
-  // extension 注册唯一 android-tools descriptor；factory 注册 Native providers/commands，不启动后端或设备命令。
-  assert.deepEqual(debugRegistrations.map(item => item[0]), ['android-tools']);
-  assert.deepEqual(debugProviders.map(item => item[0]).sort(), ['android-tools', 'android-tools', 'lldb'].sort());
-  const dynamic=debugProviders.find(item=>item[2]===2); assert.equal(dynamic[0],'android-tools'); assert.equal(dynamic[1].provideDebugConfigurations()[0].name,'[内置] Android Native'); assert.equal(dynamic[1].resolveDebugConfiguration,undefined);
-  assert.equal(typeof debugRegistrations.find(item => item[0] === 'android-tools')[1].createDebugAdapterDescriptor, 'function');
+  // extension 同一工厂注册两种外部入口；android-tools仅保留resolver，android-debug提供六项动态内置配置。
+  assert.deepEqual(debugRegistrations.map(item => item[0]).sort(), ['android-debug', 'android-tools'].sort());
+  assert.deepEqual(debugProviders.map(item => item[0]).sort(), ['android-debug', 'android-debug', 'android-tools', 'lldb'].sort());
+  const dynamic = debugProviders.find(item => item[0] === 'android-debug' && item[2] === 2);
+  assert.equal(dynamic[1].provideDebugConfigurations().length, 6);
+  assert.deepEqual(JSON.stringify(Array.from(dynamic[1].provideDebugConfigurations(), config => config.name).sort()), JSON.stringify([
+    'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
+    'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',
+    'Android: Android Dual(Native and JVM) Debug Launch', 'Android: Android Dual(Native and JVM) Debug Attach',
+  ].sort()));
+  assert.equal(typeof dynamic[1].resolveDebugConfiguration,'function');
+  assert.equal(typeof debugRegistrations.find(item => item[0] === 'android-debug')[1].createDebugAdapterDescriptor, 'function');
   await handlers['android-ide.refresh']();
   assert.match(errors[0], /adb unavailable/);
 });

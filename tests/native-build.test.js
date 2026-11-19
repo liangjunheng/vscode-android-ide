@@ -4,34 +4,54 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
+const { transformSync } = require('esbuild');
 const root = path.resolve(__dirname, '..');
 
 /** 隔离构建上下文执行真实 esbuild 配置，捕获完成回调；不构建或覆盖并发构建产物。 */
+function loadAndroidDebugConfigurations() {
+  const module = { exports: {} };
+  const source = transformSync(fs.readFileSync(path.join(root, 'src/android-debugger/index.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code;
+  vm.runInNewContext(source, { module, exports: module.exports, require(id) {
+    if (id === 'vscode') return {
+      workspace: { getConfiguration: () => ({ get: () => [] }) },
+      window: { showQuickPick: async items => items[0] },
+    };
+    return require(id);
+  } });
+  return module.exports;
+}
+
 function buildFixture(missingLicense = false) {
   const source = fs.readFileSync(path.join(root, 'esbuild.js'), 'utf8');
   const builds = [], writes = new Map();
   const native = fs.readFileSync(path.join(root, 'src/android-debugger/native-debugger/upstream/LICENSE'), 'utf8');
+  const jvm = fs.readFileSync(path.join(root, 'src/android-debugger/jvm-debugger/upstream/LICENSE'), 'utf8');
   const localRequire = createRequire(path.join(root, 'esbuild.js'));
   vm.runInNewContext(source, { process: { argv: [], cwd: () => root, exit(code) { throw new Error('exit ' + code); } }, console, require(id) {
     if (id === 'esbuild') return { build(options) { builds.push(options); return Promise.resolve(); } };
     if (id === 'node:fs') return {
-      readFileSync(file) { assert.equal(file, 'src/android-debugger/native-debugger/upstream/LICENSE'); if (missingLicense) throw new Error('license missing'); return native; },
+      readFileSync(file) {
+        assert.ok([ 'src/android-debugger/native-debugger/upstream/LICENSE', 'src/android-debugger/jvm-debugger/upstream/LICENSE' ].includes(file), file);
+        if (missingLicense) throw new Error('license missing');
+        return file.includes('jvm-debugger') ? jvm : native;
+      },
       writeFileSync(file, content) { writes.set(file, content); },
     };
     if (id === './scripts/build-notices.cjs') return { buildBundledNotices(cwd, metas) { assert.equal(cwd, root); assert.equal(metas.length, 1); return { text: 'runtime notices', packages: [] }; } };
     return localRequire(id);
   } });
-  return { builds, writes, native };
+  return { builds, writes, native, jvm };
 }
 
-// 功能：compile入口仅构建TS扩展，绝不启动Maven或读取JVM源；npm test发现本文件。
-test('Native compile builds only the extension and includes full upstream license', () => {
+// 功能：compile入口在JVM构建完成后构建TS扩展，并将Native/JVM完整许可写入通知；npm test发现本文件。
+test('compile builds the extension and includes both debugger licenses', () => {
   const f = buildFixture(); assert.equal(f.builds.length, 1);
+  assert.ok(f.jvm.includes('Copyright (c) 2026 Parth Kansara'));
   assert.deepEqual(Array.from(f.builds[0].entryPoints), ['src/extension.ts']);
   assert.deepEqual(Array.from(f.builds[0].external), ['vscode', 'sharp']);
   let complete; f.builds[0].plugins[0].setup({ onEnd(callback) { complete = callback; } });
   complete({ errors: [], metafile: { inputs: {} } });
-  assert.equal(f.writes.get(path.join('dist', 'THIRD_PARTY_NOTICES.txt')), 'runtime notices\n## Android Native Debugger\n\n' + f.native);
+  assert.equal(f.writes.get(path.join('dist', 'THIRD_PARTY_NOTICES.txt')), 'runtime notices\n## Android Native Debugger\n\n' + f.native + '\n## Kotlin/Java JVM Debugger\n\n' + f.jvm);
   assert.deepEqual(JSON.parse(f.writes.get(path.join('dist', 'runtime-js-dependencies.json'))), { schemaVersion: 1, packages: [] });
 });
 
@@ -46,24 +66,83 @@ test('Native notices preserve strict build and missing license failures', () => 
   }
 });
 
-// 功能：清单只声明已接入后端，扩展开发预启动仍使用compile且无JAR要求。
-test('Native manifest and F5 configuration do not require a JVM adapter', () => {
+// 功能：清单提供android-debug六项兜底、动态入口和兼容Native/JVM类型；npm test发现本文件。
+test('manifest exposes the unified Android debug fallback and real extension entry', () => {
   const p = require('../package.json');
-  assert.deepEqual(p.contributes.debuggers.map(d => d.type), ['android-tools', 'lldb']);
+  assert.equal(p.main, './dist/extension.js');
+  assert.match(fs.readFileSync(path.join(root, 'src/extension.ts'), 'utf8'), /export function activate\(/);
+  assert.ok(p.activationEvents.includes('onDebugResolve:android-debug'));
+  assert.ok(p.activationEvents.includes('onDebugDynamicConfigurations:android-debug'));
+  assert.deepEqual(p.contributes.debuggers.map(d => d.type), ['kotlin-jvm', 'android-debug', 'android-tools', 'lldb']);
   assert.deepEqual(p.extensionDependencies, ['vadimcn.vscode-lldb']);
-  const parent = p.contributes.debuggers[0];
-  const initial = parent.initialConfigurations[0];
-  assert.equal(initial.name, '[内置] Android Native'); assert.equal(initial.request, 'launch'); assert.equal(initial.androidMode, 'native'); assert.equal(initial.mode, 'native'); assert.equal(initial.target, 'select'); assert.deepEqual(initial.native, {});
-  const snippet = parent.configurationSnippets[0];
-  assert.equal(snippet.label, '[内置] Android Native'); assert.equal(snippet.body.type, 'android-tools'); assert.equal(snippet.body.request, 'launch'); assert.equal(snippet.body.androidMode, 'native'); assert.equal(snippet.body.mode, 'native'); assert.equal(snippet.body.target, 'select'); assert.deepEqual(snippet.body.native, {});
-  for (const entry of Object.values(parent.configurationAttributes)) {
-    assert.deepEqual(entry.properties.androidMode.enum, ['native']);
-    assert.equal(entry.properties.java, undefined); assert.equal(entry.properties.kotlin, undefined);
-    assert.ok(entry.properties.native.properties.symbolSearchPaths);
+  assert.equal(p.scripts['build:jvm'], 'node scripts/build-jvm-debugger.cjs');
+  assert.equal(p.scripts['test:jvm'], 'node scripts/build-jvm-debugger.cjs --test');
+  assert.equal(p.scripts.compile, 'npm run build:jvm && node esbuild.js');
+  assert.equal(p.scripts.watch, 'npm run build:jvm && node esbuild.js --watch');
+  assert.equal(p.scripts['vscode:prepublish'], 'npm run typecheck && npm run build:jvm && node esbuild.js --production && node scripts/verify-core-runtime.cjs');
+  const jvm = p.contributes.debuggers[0];
+  assert.deepEqual(jvm.configurationSnippets.map(snippet => snippet.label), ['Kotlin/Java: Attach to JVM', 'Kotlin/Java: Launch main class']);
+  assert.equal(jvm.initialConfigurations, undefined);
+  const parent = p.contributes.debuggers[1];
+  const names = [
+    'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
+    'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',
+    'Android: Android Dual(Native and JVM) Debug Launch', 'Android: Android Dual(Native and JVM) Debug Attach',
+  ];
+  assert.deepEqual(parent.initialConfigurations.map(config => config.name), names);
+  assert.deepEqual(parent.configurationSnippets.map(snippet => snippet.label), names);
+  const runtime = loadAndroidDebugConfigurations();
+  assert.deepEqual(JSON.parse(JSON.stringify(runtime.getAndroidDebugConfigurations().map(config => [config.name, config.mode, config.request]))), parent.initialConfigurations.map(config => [config.name, config.mode, config.request]));
+  assert.deepEqual(JSON.parse(JSON.stringify(runtime.getAndroidDebugConfigurations().map(config => config.type))), parent.initialConfigurations.map(config => config.type));
+  assert.equal(runtime.findAndroidDebugConfiguration().name, names[0]);
+  assert.equal(runtime.findAndroidDebugConfiguration(undefined, true).name, names[0]);
+  assert.ok(parent.variables.abi === 'android-tools.getBestAbi');
+  assert.ok(parent.variables.mappedAbi === 'android-tools.getBestMappedAbi');
+  assert.ok(parent.variables.pickAndroidProcess === 'android-tools.pickAndroidProcess');
+  const legacyNative = p.contributes.debuggers.find(debuggerContribution => debuggerContribution.type === 'android-tools');
+  assert.equal(legacyNative.initialConfigurations, undefined); assert.equal(legacyNative.configurationSnippets, undefined);
+  for (const request of ['attach', 'launch']) {
+    const properties = parent.configurationAttributes[request].properties;
+    assert.deepEqual(properties.mode.enum, ['native', 'java', 'dual']);
+    for (const field of ['sdkRoot', 'ndkRoot', 'abiSupported', 'abi', 'abiMap', 'symbolSearchPaths']) assert.ok(properties.native.properties[field]);
+    assert.ok(properties.java.properties.type); assert.equal(properties.java.properties.type.const, 'kotlin-jvm');
+    for (const field of ['name', 'sourcePaths', 'projectRoot', 'hostName', 'port']) assert.ok(properties.java.properties[field]);
+    assert.ok(properties.projectRoot);
+    assert.ok(properties.sourcePaths);
+    assert.ok(properties.resumeProcess);
   }
-  assert.equal(p.contributes.languages, undefined); assert.equal(p.contributes.grammars, undefined);
+  const expectedModes = ['native', 'native', 'java', 'java', 'dual', 'dual'];
+  const expectedRequests = ['launch', 'attach', 'launch', 'attach', 'launch', 'attach'];
+  const expectedBodyNames = ['Native Debug Launch', 'Native Debug Attach', 'JVM Debug Launch', 'JVM Debug Attach', 'Dual Debug Launch', 'Dual Debug Attach'];
+  parent.configurationSnippets.forEach((snippet, index) => {
+    const body = snippet.body;
+    assert.equal(body.type, 'android-debug'); assert.equal(body.mode, expectedModes[index]); assert.equal(body.request, expectedRequests[index]);
+    assert.equal(body.name, expectedBodyNames[index]);
+    assert.equal(body.target, 'select'); assert.ok(body.name); assert.equal(body.name.startsWith('Android:'), false);
+    if (body.mode === 'native' || body.mode === 'dual') {
+      assert.ok(body.native); assert.ok(body.native.abi.includes('select')); assert.ok(body.native.symbolSearchPaths?.length);
+    }
+    if (body.mode === 'java' || body.mode === 'dual') {
+      assert.deepEqual(body.java.type, 'kotlin-jvm'); assert.ok(body.java.name); assert.ok(body.java.sourcePaths?.length);
+    }
+    if (body.request === 'launch') {
+      assert.ok(body.apkPath); assert.ok(body.packageName); assert.ok(body.launchActivity);
+    } else {
+      assert.equal(body.apkPath, undefined); assert.equal(body.launchActivity, undefined);
+      assert.equal(body.processId, '^"\\${command:android-tools.pickAndroidProcess}"');
+    }
+  });
+  const snippetText = JSON.stringify(parent.configurationSnippets);
+  assert.match(snippetText, /\$\{\d+:app\}/); assert.ok(snippetText.includes('com.example.app'));
+  for (const snippet of parent.configurationSnippets) {
+    for (const value of [snippet.body.apkPath, ...(snippet.body.native?.symbolSearchPaths ?? []), ...(snippet.body.java?.sourcePaths ?? [])].filter(Boolean)) {
+      assert.ok(value.startsWith('^"\\${workspaceFolder}/'), value);
+      assert.equal(/\$\{\d+:\^/.test(value), false, value);
+    }
+  }
+  assert.deepEqual(p.contributes.languages, [{ id: 'kotlin', aliases: ['Kotlin', 'kotlin'], extensions: ['.kt', '.kts'] }]);
   const launch = JSON.parse(fs.readFileSync(path.join(root, '.vscode/launch.json'), 'utf8'));
-  assert.equal(launch.configurations[0].preLaunchTask, 'npm: compile'); assert.equal(p.scripts.compile, 'node esbuild.js');
+  assert.equal(launch.configurations[0].preLaunchTask, 'npm: compile'); assert.equal(p.scripts.compile, 'npm run build:jvm && node esbuild.js');
   assert.equal(fs.readFileSync(path.join(root, '.vscodeignore'), 'utf8').includes('kotlin-debug-adapter.jar'), false);
 });
 

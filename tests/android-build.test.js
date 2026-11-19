@@ -20,7 +20,7 @@ function fixture(t, platform = 'linux') {
   fs.mkdirSync(metaDir, { recursive: true });
   const metadata = path.join(metaDir, 'output-metadata.json');
   fs.writeFileSync(metadata, JSON.stringify({ variantName: 'debug', applicationId: 'com.example.app', elements: [{ outputFile: 'app.apk' }] }));
-  const f = { root, metadata, calls: [], messages: [], notifications: [], configs: [], debugCalls: [], hold: false, closeOnKill: true, fail: null, offline: false, launchOutput: '', debugResult: true, choose: true, pickIndex: undefined, roots: [root], tasks };
+  const f = { root, metadata, calls: [], messages: [], notifications: [], configs: [], debugCalls: [], debugTerminationListeners: new Set(), hold: false, closeOnKill: true, fail: null, offline: false, launchOutput: '', debugResult: true, choose: true, pickIndex: undefined, roots: [root], tasks };
   const channel = { text: '', shown: 0, disposed: false, replace(s) { this.text = s; }, show() { this.shown++; }, dispose() { this.disposed = true; } };
   f.channel = channel;
   const cp = { spawn(command, args, options) {
@@ -50,9 +50,20 @@ function fixture(t, platform = 'linux') {
     window: { createOutputChannel: () => channel, showQuickPick: async items => f.choose ? items[f.pickIndex ?? (f.configs.length ? items.length - 1 : 0)] : undefined, showInformationMessage: async message => { f.notifications.push(message); return undefined; } },
     commands: { executeCommand: async (...args) => { f.commands ??= []; f.commands.push(args); } },
     debug: {
-      onDidStartDebugSession: listener => { f.debugListener = listener; return { dispose() { f.debugListener = undefined; } }; },
-      startDebugging: async (...args) => { f.debugCalls.push(args); if (f.debugResult) { const session = { configuration: { ...args[1], ...(f.resolvedPackage ? { packageName: f.resolvedPackage } : {}) } }; f.debugListener?.(session); f.session = session; } return f.debugResult; },
-      stopDebugging: async session => { assert.equal(session, f.session); f.stoppedDebug = session; },
+      onDidStartDebugSession: listener => { (f.debugStartListeners ??= new Set()).add(listener); return { dispose() { f.debugStartListeners.delete(listener); } }; },
+      onDidTerminateDebugSession: listener => { f.debugTerminationListeners.add(listener); return { dispose() { f.debugTerminationListeners.delete(listener); } }; },
+      startDebugging: async (...args) => {
+        f.debugCalls.push(args);
+        if (f.debugResult) {
+          const session = { configuration: { ...args[1], ...(f.resolvedPackage ? { packageName: f.resolvedPackage } : {}) } };
+          f.session = session;
+          for (const listener of [...f.debugStartListeners]) listener(session);
+          if (f.terminateImmediately) for (const listener of [...f.debugTerminationListeners]) listener(session);
+          await f.onDebugStart?.(session);
+        }
+        return f.debugResult;
+      },
+      stopDebugging: async session => { assert.equal(session, f.session); f.stoppedDebug = session; for (const listener of [...f.debugTerminationListeners]) listener(session); },
     },
   };
   f.vscode = vscode;
@@ -67,11 +78,15 @@ function fixture(t, platform = 'linux') {
   } };
   const debuggerModule = { exports: {} };
   vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : require(id), Promise });
+  const debugApi = { ...debuggerModule.exports, startAndroidDebugging: async (folder, config, target) => {
+    (f.debugRequests ??= []).push({ folder, config, target });
+    return debuggerModule.exports.startAndroidDebugging(folder, config, target);
+  } };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, AbortController, console,
     process: { platform, env: {}, kill: pid => { assert.equal(pid, -f.held.pid); if (f.closeOnKill) f.held.finish(null, 'SIGTERM'); } },
-    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debuggerModule.exports : id === './androidProjectModel' ? projectModel : require(id),
+    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './androidProjectModel' ? projectModel : require(id),
   });
   f.controller = new module.exports.AndroidBuildController(m => f.messages.push(m));
   f.parse = module.exports.parseGradleTasks;
@@ -145,7 +160,58 @@ test('android-build run installs selected package and stop owns original serial'
   await f.controller.dispose();
 });
 
-// npm test：metadata损坏/启动器失败不发布Running；Run和外部Debug仍要求metadata，Native另有AGP/设备自动后备回归。
+// node --test tests/android-build.test.js：面板默认应用项、六个内置项、非法选择及所属会话结束后复位均使用真实消息入口断言。
+test('android-build run mode selection routes all six configurations and resets on termination', async t => {
+  const f = fixture(t); await f.action('refresh');
+  assert.equal(f.last().runMode, 'run');
+  assert.equal(f.last().runModes.length, 7);
+  assert.equal(f.last().runModes[0].action, 'run');
+  await assert.rejects(f.action('runMode', 'debug-6'), /Invalid run mode/);
+  const expected = [['native','launch'],['native','attach'],['java','launch'],['java','attach'],['dual','launch'],['dual','attach']];
+  for (let index = 0; index < expected.length; index++) {
+    const calls = f.calls.length;
+    await f.action('runMode', 'debug-' + index);
+    assert.equal(f.calls.length, calls);
+    await f.action('run', undefined, 'phone');
+    assert.equal(f.last().running, true);
+    assert.equal(f.debugCalls.at(-1)[1].mode, expected[index][0]);
+    assert.equal(f.debugCalls.at(-1)[1].request, expected[index][1]);
+    await assert.rejects(f.action('runMode', 'run'), /Stop the current/);
+    for (const listener of [...f.debugTerminationListeners]) listener(f.session);
+    assert.equal(f.last().running, false);
+    assert.equal(f.last().runMode, 'debug-' + index);
+    assert.equal(f.last().status, 'Stopped');
+    assert.equal(f.debugTerminationListeners.size, 0);
+  }
+  await f.action('runMode', 'run');
+  await f.action('run', undefined, 'phone');
+  assert.ok(f.calls.at(-1).args.includes('monkey'));
+  await f.action('stop'); await f.controller.dispose();
+});
+
+// 所属会话结束释放自身状态，其他会话终止不变；再次Debug无需Stop且监听全部回收。
+test('android-build debug termination releases only its owned session and permits reentry', async t => {
+  const f = fixture(t); await f.action('refresh');
+  await f.action('debug', undefined, 'phone');
+  assert.equal(f.last().running, true);
+  for (const listener of [...f.debugTerminationListeners]) listener({ configuration: f.session.configuration });
+  assert.equal(f.last().running, true);
+  await assert.rejects(f.action('debug', undefined, 'phone'), /Stop the current/);
+  for (const listener of [...f.debugTerminationListeners]) listener(f.session);
+  assert.equal(f.last().running, false);
+  assert.equal(f.last().status, 'Stopped');
+  assert.equal(f.debugTerminationListeners.size, 0);
+  await f.action('debug', undefined, 'phone');
+  assert.equal(f.debugCalls.length, 2);
+  const before = f.calls.length;
+  await f.action('stop');
+  assert.equal(f.calls.length, before);
+  assert.equal(f.debugStartListeners.size, 0);
+  assert.equal(f.debugTerminationListeners.size, 0);
+  await f.controller.dispose();
+});
+
+// metadata损坏/启动器失败不发布Running；Run要求metadata，非Android外部Debug缺包名/metadata仍可正常启动。
 test('android-build metadata and launcher failures remain visible', async t => {
   const f = fixture(t); await f.action('refresh');
   fs.writeFileSync(f.metadata, '{broken');
@@ -153,10 +219,83 @@ test('android-build metadata and launcher failures remain visible', async t => {
   fs.unlinkSync(f.metadata);
   await assert.rejects(f.action('run', undefined, 'phone'), /No APK metadata/);
   f.configs = [{ name: 'External', type: 'adapter', request: 'attach' }];
-  await assert.rejects(f.action('debug', undefined, 'phone'), /No APK metadata/);
+  await f.action('debug', undefined, 'phone');
+  assert.equal(f.debugCalls.at(-1)[1].packageName, undefined);
+  await f.action('stop');
   fs.writeFileSync(f.metadata, JSON.stringify({ variantName: 'debug', applicationId: 'com.example.app' }));
   f.launchOutput = 'No activities found'; await assert.rejects(f.action('run', undefined, 'phone'), /No activities/);
   assert.equal(f.last().running, false);
+  await f.controller.dispose();
+});
+
+/** 六个内置组合保持所选mode/request，Debug和Stop均不构建、安装、启动或发现源码。 */
+test('android-build all six built-in configurations debug without Gradle installation or source models', async t => {
+  const f = fixture(t); await f.action('refresh'); fs.unlinkSync(f.metadata);
+  for (let index = 0; index < 6; index++) {
+    f.pickIndex = index;
+    const before = f.calls.length;
+    await f.action('debug', undefined, 'phone');
+    const config = f.debugCalls.at(-1)[1];
+    assert.equal(config.type, 'android-debug');
+    assert.equal(config.mode, ['native', 'java', 'dual'][Math.floor(index / 2)]);
+    assert.equal(config.request, index % 2 ? 'attach' : 'launch');
+    assert.equal(config.androidMode, undefined);
+    assert.equal(config.packageName, undefined); assert.equal(config.serial, 'phone');
+    assert.equal(config.apkPath, undefined); assert.equal(config.androidApkInstalled, undefined);
+    assert.equal(config.androidSourceRoots, undefined); assert.equal(config.sourcePaths, undefined);
+    assert.equal(config.java?.sourcePaths, undefined);
+    assert.equal(f.calls.length, before + 1);
+    assert.ok(f.calls.at(-1).args.includes('get-state'));
+    assert.equal(f.modelCalls.length, 0);
+    const stopBefore = f.calls.length;
+    await f.action('stop'); assert.equal(f.calls.length, stopBefore);
+  }
+  await f.controller.dispose();
+});
+
+// 显式配置不被metadata覆盖，缺metadata也可启动；立即终止和启动取消不留下所属会话或监听。
+test('android-build preserves explicit Android and external options without model discovery', async t => {
+  const f = fixture(t); await f.action('refresh');
+  for (const type of ['android-debug', 'android-tools', 'kotlin-jvm', 'third-party']) {
+    const selected = { name: 'Explicit ' + type, type, request: 'launch', ...(type === 'kotlin-jvm' ? { android: true } : {}),
+      mode: type === 'android-tools' ? 'native' : 'dual', packageName: 'com.user.chosen', target: 'explicit-target', serial: 'explicit-serial',
+      apkPath: '/explicit/app.apk', androidProjectRoot: '/explicit/root', preLaunchTask: 'user task', sourcePaths: ['top-src'],
+      java: { type: 'kotlin-jvm', sourcePaths: ['java-src'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
+    f.configs = [selected]; fs.writeFileSync(f.metadata, '{invalid metadata must not be read');
+    const snapshot = JSON.stringify(selected), before = f.calls.length;
+    await f.action('debug', undefined, 'phone');
+    const requested = f.debugCalls.at(-1)[1];
+    const forwarded = f.debugRequests.at(-1);
+    assert.equal(forwarded.config.serial, 'explicit-serial'); assert.equal(forwarded.config.target, 'explicit-target');
+    assert.deepEqual(Object.keys(forwarded.target).sort(), ['packageName', 'serial', 'signal']);
+    assert.equal(forwarded.target.serial, 'phone'); assert.equal(forwarded.target.packageName, 'com.user.chosen');
+    assert.equal(forwarded.target.signal instanceof AbortSignal, true);
+    for (const key of ['packageName', 'apkPath', 'androidProjectRoot', 'preLaunchTask', 'request', 'mode']) assert.equal(requested[key], selected[key]);
+    assert.deepEqual(JSON.parse(JSON.stringify(requested.java)), selected.java);
+    assert.deepEqual(JSON.parse(JSON.stringify(requested.native)), selected.native);
+    assert.deepEqual(Array.from(requested.sourcePaths), selected.sourcePaths);
+    assert.equal(requested.serial, 'phone');
+    assert.equal(JSON.stringify(selected), snapshot);
+    assert.equal(f.calls.length, before + 1); assert.equal(f.modelCalls.length, 0);
+    await f.action('stop'); assert.equal(f.calls.length, before + 1);
+  }
+  await f.controller.dispose();
+});
+
+// 启动事件和终止事件在startDebugging完成前连续发生也必须释放状态；取消后detach只发生一次。
+test('android-build immediate termination and startup cancellation release owned resources', async t => {
+  const f = fixture(t); await f.action('refresh'); f.terminateImmediately = true;
+  await assert.rejects(f.action('debug', undefined, 'phone'), /terminated during startup/);
+  assert.equal(f.controller.debugSession, undefined); assert.equal(f.controller.launched, undefined);
+  assert.equal(f.debugStartListeners.size, 0); assert.equal(f.debugTerminationListeners.size, 0);
+  assert.equal(f.stoppedDebug, undefined);
+  f.terminateImmediately = false;
+  f.onDebugStart = () => f.controller.operation.controller.abort();
+  await assert.rejects(f.action('debug', undefined, 'phone'), /cancelled/);
+  assert.equal(f.stoppedDebug, f.session);
+  assert.equal(f.debugTerminationListeners.size, 0); assert.equal(f.debugStartListeners.size, 0);
+  f.onDebugStart = undefined; await f.action('debug', undefined, 'phone'); await f.action('stop');
+  assert.equal(f.calls.some(call => call.args.includes('force-stop')), false);
   await f.controller.dispose();
 });
 
@@ -173,7 +312,7 @@ test('android-build Native debug uses metadata and skips Gradle model fallback',
   const requested = f.debugCalls.at(-1)[1];
   assert.equal(requested.packageName, 'com.metadata.selected');
   assert.equal(requested.androidProjectRoot, f.root);
-  assert.deepEqual(JSON.parse(JSON.stringify(requested.androidAbiSupported)), ['arm64-v8a']);
+  assert.equal(requested.androidAbiSupported, undefined);
   await f.action('stop');
   fs.unlinkSync(f.metadata); f.sourceModel = { applicationId: 'com.agp.must-not-be-read' }; f.resolvedPackage = 'com.provider.selected';
   const modelBeforeProvider = f.modelCalls.length, callsBeforeProvider = f.calls.length;
@@ -184,7 +323,7 @@ test('android-build Native debug uses metadata and skips Gradle model fallback',
   await f.action('stop'); await f.controller.dispose();
 });
 
-// npm test：唯一内置 Native 模式直接启动 Run and Debug；已有 APK metadata 负责包名/ABI，不安装、不运行Gradle、不查询项目模型；外部选择、取消、停止及拒绝保持原契约。
+// Native直接启动Run and Debug，仅只读包名、不注入APK/ABI/AGP字段；外部选择、取消、停止及拒绝均保留原契约。
 test('android-build debug starts built-in sessions with source roots and preserves external session behavior', async t => {
   const f = fixture(t); await f.action('refresh');
   fs.writeFileSync(f.metadata, JSON.stringify({ variantName: 'debug', applicationId: 'com.example.app', elements: [{ outputFile: 'app.apk', filters: [{ filterType: 'ABI', value: 'arm64-v8a' }] }] }));
@@ -200,16 +339,16 @@ test('android-build debug starts built-in sessions with source roots and preserv
     assert.ok(f.calls.some(call => call.args.includes('get-state')));
     assert.equal(f.calls.some(call => call.args.includes(':app:installDebug')), false);
     const requested = f.debugCalls.at(-1)[1];
-    assert.equal(requested.type, 'android-tools');
+    assert.equal(requested.type, 'android-debug');
     assert.equal(requested.request, 'launch');
-    assert.equal(requested.androidMode, 'native');
+    assert.equal(requested.androidMode, undefined);
     assert.equal(requested.mode, 'native');
     assert.deepEqual(JSON.parse(JSON.stringify(requested.native)), {});
-    assert.deepEqual(JSON.parse(JSON.stringify(requested.androidAbiSupported)), ['arm64-v8a']);
+    assert.equal(requested.androidAbiSupported, undefined);
     assert.equal(requested.serial, 'phone');
     assert.equal(requested.packageName, 'com.example.app');
     assert.equal(requested.androidProjectRoot, f.root);
-    assert.deepEqual(JSON.parse(JSON.stringify(requested.androidAbiSupported)), ['arm64-v8a']);
+    assert.equal(requested.androidAbiSupported, undefined);
     assert.equal(requested.androidModuleRoot, undefined);
     assert.equal(requested.androidVariant, undefined);
     assert.equal(requested.androidSourceRoots, undefined);
@@ -220,7 +359,9 @@ test('android-build debug starts built-in sessions with source roots and preserv
   }
   f.configs = [{ name: 'One', type: 'adapter', request: 'launch' }, { name: 'Two', type: 'adapter', request: 'attach' }];
   f.pickIndex = undefined;
+  const callsBeforeCancel = f.calls.length, debugBeforeCancel = f.debugCalls.length;
   f.choose = false; await f.action('debug', undefined, 'phone'); assert.equal(f.last().status, 'Debug cancelled');
+  assert.equal(f.calls.length, callsBeforeCancel); assert.equal(f.debugCalls.length, debugBeforeCancel);
   const modelCount = f.modelCalls.length;
   f.choose = true; await f.action('debug', undefined, 'phone');
   assert.equal(f.modelCalls.length, modelCount);
@@ -231,7 +372,7 @@ test('android-build debug starts built-in sessions with source roots and preserv
   assert.equal(f.debugCalls.at(-1)[1].androidModuleRoot, undefined);
   assert.equal(f.debugCalls.at(-1)[1].androidVariant, undefined);
   assert.equal(f.debugCalls.at(-1)[1].serial, 'phone');
-  assert.equal(f.debugCalls.at(-1)[1].packageName, 'com.example.app');
+  assert.equal(f.debugCalls.at(-1)[1].packageName, undefined);
   await f.action('stop');
   assert.equal(f.stoppedDebug, f.session);
   f.debugResult = false; await assert.rejects(f.action('debug', undefined, 'phone'), /rejected|Android debug session did not start/);
@@ -276,7 +417,7 @@ test('android-build provider preserves native graph identity while built-in Nati
     assert.equal(f.modelCalls.length, modelCount);
     assert.ok(f.calls.length > before);
     const requested = f.debugCalls.at(-1)[1];
-    assert.equal(requested.type, 'android-tools');
+    assert.equal(requested.type, 'android-debug');
     assert.equal(requested.androidProjectRoot, f.root);
     assert.equal(requested.androidModuleRoot, undefined);
     assert.equal(requested.androidVariant, undefined);
@@ -427,7 +568,7 @@ test('android-build real Windows source runner preserves generated init path wit
   const script = path.join(root, 'generated ! init.gradle'); fs.writeFileSync(script, '// fixture');
   fs.writeFileSync(path.join(root, 'gradlew.bat'), '@echo off\r\necho FIRST=%1\r\necho SECOND=%~2\r\nif not exist "%~2" exit /b 91\r\nif not "%~3"==":app:__dshSourceIndex" exit /b 92\r\n');
   const module = { exports: {} }, channel = { replace() {}, show() {}, dispose() {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './sdk' || id === './android-debugger' || id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(() => {});
   const text = await controller.run({ controller: new AbortController() }, path.join(root, 'gradlew.bat'), ['--init-script', script, ':app:__dshSourceIndex'], root, process.env, script);
   assert.ok(text.includes('FIRST=--init-script')); assert.ok(text.includes('SECOND=' + script), JSON.stringify({ text, script })); await controller.dispose();
@@ -482,7 +623,7 @@ test('android-build real Windows wrapper executes in a path with spaces', { skip
   const channel = { text: '', replace(s) { this.text = s; }, show() {}, dispose() {} };
   const vscode = { workspace: { isTrusted: true, findFiles: async () => [{ fsPath: path.join(root, 'gradlew.bat') }] }, window: { createOutputChannel: () => channel } };
   const module = { exports: {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' || id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './androidProjectModel' ? {} : require(id) });
   const states = [], controller = new module.exports.AndroidBuildController(m => states.push(m));
   await controller.handle({ type: 'buildPanel', action: 'refresh' });
   assert.equal(states.at(-1).target, ':app:Debug');

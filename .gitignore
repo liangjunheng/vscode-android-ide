@@ -4,9 +4,14 @@ dist
 *.vsix
 .DS_Store
 .vscode/android-ide.local.json
+.vscode/android-native-symbols.json
+.vscode/android-native-symbols.legacy-backup.json
+.vscode/.android-native-symbols-*.tmp
 
 # Local fixtures, generated test output, and toolchain staging stay local.
 # Verified runtime/ assets are versioned and included in the VSIX.
 .test-artifacts/
 tests/fixtures/
 tools/
+src/android-debugger/jvm-debugger/upstream/**/target/
+resources/jvm-debugger/kotlin-debug-adapter.jar

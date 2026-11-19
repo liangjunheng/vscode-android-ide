@@ -15,7 +15,7 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 ### Running Devices
 
 - Mirror emulator screens through emulator gRPC.
-- Mirror physical devices through scrcpy with screenshot fallback.
+- Mirror devices inside the Device Tools Webview by default; opt into an independent native scrcpy window with `android-ide.nativeMirror: true`.
 - Send touch, swipe, keyboard, back, home, overview, power, volume, rotation, screenshot, and recording actions.
 - Open emulator Extended Controls when supported.
 - Switch between Mirror, Files, Processes, and Hidden modes.
@@ -39,12 +39,21 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 
 ### Debugging
 
-- The built-in backend is Native only: an Android parent starts a `type: "lldb"` CodeLLDB child, which connects its Android remote platform to an NDK `lldb-server` on the device.
-- Built-in Launch and Attach open Run and Debug directly from the build and process views without automatically compiling, installing, or querying Gradle source models. Use Build or Install explicitly when needed; external launch configurations keep their original adapters.
+- The unified `android-debug` contribution provides Native, JVM, and Dual (Native and JVM) Launch/Attach configurations. Native starts a `type: "lldb"` CodeLLDB child; JVM uses the bundled JDI/JDWP adapter JAR through `type: "kotlin-jvm"`.
+- Native, JVM, and Dual Launch/Attach open Run and Debug without implicitly running Gradle or installing an APK. Processes can attach to the selected PID through a session-owned ADB forward. External configurations retain their original adapters.
+- The JVM adapter needs a full JDK 17+ with `jdk.jdi`. Its independent settings are `android-ide.jvmDebugger.javaHome`, `adapterJvmArgs`, `logLevel`, and `traceProtocol` under the same prefix; it does not register the upstream extension's settings.
 - Native package names come from the selected Gradle variant/APK or device process ownership. ABI resolution prefers explicit configuration and the installed app ABI, then compatible build/device candidates. Package or ABI selection appears only when automatic resolution is unavailable or ambiguous; device/build errors remain visible.
-- Requires a trusted workspace, a debuggable app, CodeLLDB, an installed Android SDK/NDK, and matching unstripped symbols. No Maven or JVM adapter is required to compile or run the Native integration.
+- Requires a trusted workspace, a debuggable app, CodeLLDB, an installed Android SDK/NDK, and matching unstripped symbols. Native sessions do not start Maven or the JVM adapter; the extension's complete development build also builds the bundled JVM JAR.
 - Native sources and upstream provenance live under `src/android-debugger/native-debugger`. See [Native design and verification](docs/android-native-debugger.md) for tested scope and remaining device validation.
-- Set `android-debug.ndkRoot` for an explicit NDK. Use `native.symbolSearchPaths` for unstripped shared-library directories and pass other CodeLLDB options inside `native`.
+- Set `native.ndkRoot` for an explicit NDK and pass other CodeLLDB options inside `native`. Automatic Native symbols come only from verified project build targets with debug information, not arbitrary `.so` search directories.
+
+### Android 调试配置说明
+
+- `android-debug` 是统一的 Android 调试入口。Build Debug 优先显示 `launch.json` 中的有效配置，没有时使用六个内置项。Processes 的 Attach Debug 始终显示三个内置 Attach（Native/JVM/Dual），以及 `launch.json` 中全部有效 Launch/Attach 配置；选择后绑定当前进程 PID，以 Attach 请求连接，不安装或启动 APK。会话启动成功后才切换到 Run and Debug，避免面板隐藏取消启动。
+- Launch 与 Attach 都不会隐式执行 Gradle 构建或安装。只有配置显式填写 `apkPath` 时才安装该 APK；Build Debug 也不会因为进入调试而偷偷触发 Gradle/install。Attach 不启动应用，也不安装 APK，只连接已经运行或等待调试的进程。
+- 端口由调试会话动态分配，不需要写死 `5005`，也不需要 `preLaunchTask`。外部配置中的 `port`、任务和其它选项会按原值保留，不会被内置模板覆盖。
+- Dual 会先启动 Native 子会话，再启动 JVM 子会话；两个子会话共享同一个设备、包名和 PID 身份，由 JVM 子会话负责最终 resume。
+- Native 自动符号仅加载当前项目构建记录中、与目标 ABI 匹配且包含 ELF 调试信息的 `.so`。预编译库、外部库及打包目录中的副本不自动处理；所有无重名项目库自动加载，同名产物自动采用文件修改时间最新的一份，不再弹窗；时间相同按路径稳定排序。旧的手选白名单会清除，每次调试重新发现产物，不再保存手选结果。实际自动加载列表写入当前项目 `.vscode/android-native-symbols.json`，仅供检查，不作为下次加载白名单。调试信息仍须与设备上安装的 APK 对应；存在符号不等于源码路径和构建版本匹配。
 
 ## Requirements
 
@@ -193,12 +202,14 @@ npm run typecheck
 npm test
 ```
 
-- npm run compile: bundle the extension with esbuild.
-- npm run watch: rebuild on source changes.
+- npm run compile: build the bundled JVM adapter and bundle the extension with esbuild. Use `JVM_DEBUGGER_JAVA_HOME` or `JAVA_HOME` for the build JDK; Maven is found through `MAVEN_HOME`, `M2_HOME`, PATH or a SHA-512-verified project-local download.
+- npm run build:jvm: build the shaded adapter JAR and copy it plus its license into `resources/jvm-debugger`.
+- npm run test:jvm: execute the migrated Kotlin/JDI unit and integration tests (JDK 21+ required by the upstream fixtures).
+- npm run watch: build the JVM JAR once, then watch TypeScript source changes.
 - npm run typecheck: run strict TypeScript checking.
 - npm test: run the Node.js test suite.
 - npm run package: build the VSIX package.
-- npm run vscode:prepublish: typecheck, build production bundles, and verify bundled core runtime file hashes, architectures, provenance, and license sidecars before VSIX packaging.
+- npm run vscode:prepublish: typecheck, build the JVM JAR and production bundle, and verify bundled core runtime file hashes, architectures, provenance, and license sidecars before VSIX packaging.
 
 Press F5 in VS Code to launch an Extension Development Host. Reload the host after rebuilding when the extension bundle changes.
 

@@ -59,7 +59,7 @@ function mirror(clock,options={}){
   const records=[],messages=[],errors=[],contexts=[],created=deferred();let reads=0;
   class Session {
     // 将handler与具体会话对象绑定，供断线及迟到事件测试。
-    constructor(...args){this.serial=args[0];this.h=args.find(value=>value&&typeof value.onClose==='function');this.closed=false;this.live=false;this.stops=0;records.push(this);created.resolve(this);}
+    constructor(...args){this.serial=args[0];this.args=args;this.h=args.find(value=>value&&typeof value.onClose==='function');this.closed=false;this.live=false;this.stops=0;this.noDelay=0;records.push(this);created.resolve(this);}
     // 创建期间仍由该对象拥有，停止后完成不得变回可连接状态。
     async start(){if(options.startGate)await options.startGate.promise;if(this.closed)throw Object.assign(new Error('cancelled start'),{name:'AbortError'});this.live=true;}
     // 提供方只能复用真实仍然存活的传输。
@@ -88,11 +88,12 @@ test('mirror grace period reuses each live transport and expires at sixty second
     const clock=new Clock(),f=mirror(clock,{mode});
     try{
       await f.view.restart();const owner=f.view.mirrorConnection,initial=f.records.length,intervals=clock.intervals;
+      if(mode==='scrcpy') assert.equal(f.records[0].args.at(-1),1280);
       await f.view.applyDeviceViewMode('explorer');assert.equal(f.view.mirroredSerial(),undefined);clock.advance(59999);assert.equal(owner.controller.signal.aborted,false);
-      await f.view.applyDeviceViewMode('mirror');assert.equal(f.view.mirrorConnection,owner);assert.equal(f.records.length,initial);assert.equal(clock.intervals,intervals);
+      await f.view.applyDeviceViewMode('mirror');assert.equal(f.view.mirrorConnection,owner,mode);assert.equal(f.records.length,initial);assert.equal(clock.intervals,intervals);
       clock.advance(1);assert.equal(owner.controller.signal.aborted,false);
       await f.view.applyDeviceViewMode('explorer');clock.advance(60000);assert.equal(owner.controller.signal.aborted,true);assert.equal(f.view.mirrorConnection,undefined);assert.equal(f.messages[f.messages.length-1].type,'loading');
-      await f.view.applyDeviceViewMode('mirror');assert.notEqual(f.view.mirrorConnection,owner);assert.equal(f.records.length,mode==='screencap'?0:initial+1);assert.equal(clock.intervals,mode==='screencap'?intervals+1:intervals);
+      await f.view.applyDeviceViewMode('mirror');assert.notEqual(f.view.mirrorConnection,owner);assert.equal(f.records.length,mode==='screencap'?0:initial+1);assert.equal(clock.intervals,intervals);
     }finally{await f.view.dispose();assert.equal(clock.timers.size,0);}
   }
 });
@@ -163,6 +164,7 @@ function scrcpy(clock,options={}){
   const calls=[],sockets=[],socketReady=deferred(),pushReady=deferred(),forwardReady=deferred();let closes=0,kills=0;
   class Socket extends EventEmitter {
     // 关闭同一真实模拟句柄只产生一次close事件。
+    setNoDelay(){return this;}
     destroy(){if(!this.destroyed){this.destroyed=true;this.emit('close');}return this;}
   }
   const sdk={adbPath:()=> 'adb',sdkRoot:()=> 'sdk',freePort:async()=>31415,

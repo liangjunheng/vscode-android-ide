@@ -9,6 +9,10 @@
       "type": "string",
       "description": "Android SDK directory. Relative paths resolve from the project root. Empty uses automatic discovery."
     },
+    "scrcpyPath": {
+      "type": "string",
+      "description": "Optional native scrcpy client executable path. Relative paths resolve from the project root. Empty uses PATH discovery."
+    },
     "downloadDirectory": {
       "type": "string",
       "description": "Local download directory. Empty uses the system Downloads directory."

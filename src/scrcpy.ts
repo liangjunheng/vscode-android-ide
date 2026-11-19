@@ -15,7 +15,7 @@ export interface ScrcpyHandlers {
   onClose(reason?: string): void;
 }
 
-// 沿用服务启动时的连接尝试，但仅ECONNREFUSED可接续，取消立即销毁当前socket和等待计时器；view-idle传输回归验证无迟到重连。
+// 沿用服务启动时的连接尝试，仅ECONNREFUSED可接续；视频和控制socket关闭Nagle聚合，取消立即销毁当前句柄和等待计时器。view-idle传输回归验证无迟到重连。
 function connectWithRetry(port: number, signal: AbortSignal, attempts = 100): Promise<{ sock: net.Socket; first: Buffer }> {
   return new Promise((resolve, reject) => {
     let n = 0, socket: net.Socket | undefined, timer: NodeJS.Timeout | undefined;
@@ -23,7 +23,7 @@ function connectWithRetry(port: number, signal: AbortSignal, attempts = 100): Pr
     const abort = () => { cleanup(); const owned = socket; socket = undefined; owned?.destroy(); reject(signal.reason); };
     const attempt = () => {
       if (signal.aborted) { abort(); return; }
-      const sock = net.connect(port, '127.0.0.1'); socket = sock; let failure: NodeJS.ErrnoException | undefined;
+      const sock = net.connect(port, '127.0.0.1'); sock.setNoDelay(true); socket = sock; let failure: NodeJS.ErrnoException | undefined;
       sock.once('data', (first: Buffer) => { cleanup(); socket = undefined; resolve({ sock, first }); });
       sock.once('error', (error: NodeJS.ErrnoException) => { failure = error; });
       sock.once('close', () => {
@@ -53,7 +53,7 @@ export class ScrcpySession {
   private requireOpen(): void { this.controller.signal.throwIfAborted(); }
   private log = '';
 
-  constructor(private serial: string, private jarPath: string, private h: ScrcpyHandlers) {}
+  constructor(private serial: string, private jarPath: string, private h: ScrcpyHandlers, private maxSize = 1920) {}
 
   // 逐步拥有push/forward/进程/socket，停止后不继续创建；view-idle传输回归覆盖创建中取消及forward清理。
   async start() {
@@ -68,7 +68,7 @@ export class ScrcpySession {
     this.proc = spawn(adbPath(), ['-s', this.serial, 'shell',
       `CLASSPATH=${REMOTE_JAR}`, 'app_process', '/', 'com.genymobile.scrcpy.Server', SCRCPY_VERSION,
       `scid=${scid}`, 'log_level=info', 'tunnel_forward=true', 'audio=false', 'control=true', 'cleanup=false',
-      'max_size=1920', 'video_bit_rate=8000000', 'max_fps=60', 'stay_awake=false'],
+      `max_size=${this.maxSize}`, 'video_bit_rate=8000000', 'max_fps=60', 'stay_awake=false'],
       { env: { ...process.env, ANDROID_HOME: sdkRoot() } });
     const collect = (d: Buffer) => { this.log = (this.log + d.toString()).slice(-2000); };
     this.proc.stdout?.on('data', collect);
@@ -81,6 +81,7 @@ export class ScrcpySession {
     this.video = sock;
     // first connection = video (after the dummy byte), second = control
     const ctl = net.connect(this.port, '127.0.0.1');
+    ctl.setNoDelay(true);
     this.control = ctl;
     ctl.on('data', () => { /* device messages (clipboard…) ignored */ });
     ctl.on('error', error => { this.close(error.message); });
@@ -171,6 +172,49 @@ export class ScrcpySession {
 
   // 明确停止返回真实清理Promise，提供方销毁会等待；view-idle回归验证forward关闭完成。
   stop(): Promise<void> { return this.close(); }
+}
+
+// scrcpy资源由RuntimeContext统一定位；runtime-context及view-idle回归验证推送文件和清理。
+// 独立原生窗口只拥有scrcpy客户端进程，不把视频包送入VS Code Webview；进程退出时通知提供方释放设备状态。
+export class NativeScrcpySession {
+  private proc?: ChildProcess;
+  private stopped = false;
+
+  // 子进程仍存活时才视为独立投屏连接；native窗口回归验证退出后的状态变化。
+  get connected(): boolean { return !this.stopped && !!this.proc && this.proc.exitCode === null; }
+
+  constructor(private serial: string, private h: Pick<ScrcpyHandlers, 'onClose'>, private executable = process.platform === 'win32' ? 'scrcpy.exe' : 'scrcpy') {}
+
+  // 启动官方scrcpy原生客户端并等待spawn事件；独立窗口使用原生解码/渲染，不占用Webview渲染链路。
+  start(): Promise<void> {
+    this.stopped = false;
+    const proc = spawn(this.executable, ['-s', this.serial, '--no-audio', '--window-title', `VS Code Android - ${this.serial}`], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+      env: { ...process.env, ANDROID_HOME: sdkRoot(), ANDROID_SDK_ROOT: sdkRoot(), ADB: adbPath() },
+    });
+    this.proc = proc;
+    return new Promise((resolve, reject) => {
+      let started = false;
+      let settled = false;
+      proc.once('spawn', () => { started = true; settled = true; resolve(); });
+      proc.once('error', error => { if (!started && !settled) { settled = true; reject(error); } });
+      proc.once('exit', (code, signal) => {
+        this.proc = undefined;
+        if (!started && !settled) { settled = true; reject(new Error(this.stopped ? 'scrcpy stopped before startup completed' : `scrcpy exited (${code ?? signal ?? 'unknown'})`)); }
+        if (!this.stopped) { this.stopped = true; this.h.onClose(code === 0 ? undefined : `scrcpy exited (${code ?? signal ?? 'unknown'})`); }
+      });
+    });
+  }
+
+  // 仅结束本次原生scrcpy客户端，不触碰ADB或其他设备连接；窗口关闭和扩展停止均复用此清理入口。
+  stop(): void {
+    this.stopped = true;
+    const proc = this.proc;
+    this.proc = undefined;
+    if (proc && proc.exitCode === null) { proc.kill(); }
+  }
 }
 
 // scrcpy资源由RuntimeContext统一定位；runtime-context及view-idle回归验证推送文件和清理。

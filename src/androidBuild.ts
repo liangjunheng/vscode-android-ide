@@ -3,12 +3,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
 import { adbPath } from './sdk';
-import { selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
+import { getAndroidDebugConfigurations, selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
 import { discoverVariantSources, NativeSourceModule } from './androidProjectModel';
 
 interface Project { id: string; label: string; root: string; wrapper: string; tasks: string[]; }
 interface ApkMetadata { applicationId: string; elements?: unknown; }
 interface Target { id: string; label: string; module: string; variant: string; assemble: string; install: string; }
+interface RunMode { id: string; label: string; action: 'run' | 'debug'; config?: vscode.DebugConfiguration; }
 interface Operation { controller: AbortController; done: Promise<void>; }
 interface OwnedProcess { child: ChildProcess; closed: Promise<void>; termination?: Promise<void>; }
 /** 当前 Build 选择解析出的调试源码身份，不包含设备或会话状态。 */
@@ -43,7 +44,7 @@ function buildTargets(tasks: string[]): Target[] {
 }
 
 // 只解析所选项目/模块/变体的APK metadata；匹配缺失返回undefined，坏JSON/非法ID及IO故障原样抛错，不扫描其他模块。
-// 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言隔离、切换及缺失/损坏区别，metadata and launcher failures断言run/debug仍拒绝缺失。
+// 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言隔离、切换及缺失/损坏区别，metadata and launcher failures断言Run拒绝缺失而Debug不强制要求metadata。
 function apkMetadataFor(project: Project, target: Target): ApkMetadata | undefined {
   const base = path.join(project.root, ...target.module.split(':'), 'build', 'outputs', 'apk');
   // 递归收集所选模块APK目录内metadata路径；目录不存在为空，其他IO异常不吞，current application ID回归覆盖缺失与多变体。
@@ -84,8 +85,8 @@ function nativeAbisFor(meta: ApkMetadata | undefined): string[] | undefined {
   return abis.size ? [...abis] : undefined;
 }
 
-// 构建运行/外部调试要求所选目标metadata；Native允许先从AGP/设备自动解析。
-// 回归：Node>=22，node --test tests/android-build.test.js；metadata and launcher failures验证run/debug缺失报错，run installs selected package验证所选包名及顺序。
+// 显式Run和精确项目模型查询要求所选目标metadata；Debug不依赖此必填契约。
+// 回归：node --test tests/android-build.test.js；metadata and launcher failures验证Run缺失报错而外部Debug不受影响，run installs selected package验证定向包名。
 function packageFor(project: Project, target: Target): string {
   const applicationId = applicationIdFor(project, target);
   if (applicationId === undefined) throw new Error('No APK metadata for ' + target.label);
@@ -103,10 +104,13 @@ export class AndroidBuildController implements vscode.Disposable {
   private disposed = false;
   private launched?: { serial: string; packageName: string; cwd: string };
   private debugSession?: vscode.DebugSession;
+  private debugTermination?: vscode.Disposable;
+  private runModeId = 'run';
   private outputText = '';
   private readonly output: vscode.OutputChannel;
 
-  // 保存状态出口并创建输出；npm test output 回归断言显示、截断及释放。
+  // 保存状态出口；调试会话监听在启动前建立并在所属会话终止后释放，避免错过立即终止事件。
+  // 回归：node --test tests/android-build.test.js，验证立即终止后可重入且不误停其他会话。
   constructor(private post: (message: any) => void) { this.output = vscode.window.createOutputChannel('Android Build'); }
 
   // 只读所选项目/模块/变体applicationId，可限定所属workspace；未知交Native/Explorer后备解析，真实故障不吞。
@@ -135,11 +139,15 @@ export class AndroidBuildController implements vscode.Disposable {
     return { packageName: metadata.applicationId, ...(abiSupported ? { abiSupported } : {}) };
   }
 
-  // 发布后端拥有的完整快照；npm test refresh/install/run/error 断言选择和状态。
+  // 发布项目、目标、运行模式和生命周期快照；npm test build panel 与 android-build 断言默认应用项、六个内置调试项和结束复位。
   private state(status: string, error?: string): void {
     const project = this.projects.find(p => p.id === this.projectId);
+    const targets = buildTargets(project?.tasks || []);
+    const target = targets.find(item => item.id === this.targetId);
+    const applicationLabel = target ? (target.module || ':').replace(/^:/, '') + ' | ' + target.variant : project?.label || 'Application';
+    const runModes = getAndroidDebugConfigurations().map((config, index) => ({ id: 'debug-' + index, label: config.name, action: 'debug' as const }));
     this.post({ type: 'buildState', projects: this.projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
-      targets: buildTargets(project?.tasks || []), target: this.targetId, busy: !!this.operation, running: !!this.launched, status, ...(error ? { error } : {}) });
+      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy: !!this.operation, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) });
   }
 
   // 有界保留日志并更新真实通道；npm test output 回归断言长度和失败诊断。
@@ -233,6 +241,15 @@ export class AndroidBuildController implements vscode.Disposable {
     return selectAndroidDebugConfiguration(folder);
   }
 
+  // 将面板选择的六个内置项映射为稳定调试配置；默认run项保持普通应用启动链。
+  private selectedRunMode(): RunMode {
+    if (this.runModeId === 'run') return { id: 'run', label: 'Application', action: 'run' };
+    const index = Number(this.runModeId.slice('debug-'.length));
+    const config = getAndroidDebugConfigurations()[index];
+    if (!config) throw new Error('Invalid run mode selection');
+    return { id: this.runModeId, label: config.name, action: 'debug', config };
+  }
+
   /**
    * 读取精确AGP模型的applicationId、源码根、moduleRoot和Native图；已知APK包名必须匹配，未知时优先AGP包名。
    * nativeModules 缺失保持未知/旧契约，显式 [] 保持已知无 Native 模块；不构建、不安装、不猜约定目录。
@@ -295,8 +312,9 @@ export class AndroidBuildController implements vscode.Disposable {
     return result!;
   }
 
-  // 内置Native直接调试现有应用，只读metadata且不运行Gradle安装/源码发现；其他动作保留原流程。
-  // 回归：Node>=22运行node --test tests/android-build.test.js，断言内置零Gradle/零模型、准确设备包名/ABI、缺metadata设备解析及取消/停止。
+  // Debug 只转发用户选中的配置，不隐式安装、启动、解析AGP源码或注入APK；Build/Install/Run继续使用原有显式流程。
+  // 内置配置缺包名时仅从所选metadata读取可选身份，缺失仍交给provider选择；只为本扩展调试类型补工作区根。
+  // 回归：node --test tests/android-build.test.js，验证六种模式、零Gradle/零模型、显式字段保留、取消及会话终止后可重入。
   private async execute(operation: Operation, action: string, serial?: string): Promise<string> {
     if (action === 'refresh') { await this.discover(operation); return this.projects.length ? 'Ready' : 'No Gradle project'; }
     const project = this.projects.find(p => p.id === this.projectId);
@@ -304,57 +322,72 @@ export class AndroidBuildController implements vscode.Disposable {
     if (!project || !target) throw new Error('Select a Gradle project and Android variant first.');
     if (action === 'build') { await this.run(operation, project.wrapper, [target.assemble, '--console=plain'], project.root); return 'Build succeeded'; }
     if (!serial || !/^[\w.:-]+$/.test(serial)) throw new Error('Select an online device serial first.');
-    const config = action === 'debug' ? await this.debugConfiguration(project) : undefined;
+    const selectedMode = action === 'run' ? this.selectedRunMode() : undefined;
+    const effectiveAction = selectedMode?.action ?? action;
+    const config = effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project) : undefined;
     this.check(operation);
-    if (action === 'debug' && !config) return 'Debug cancelled';
+    if (effectiveAction === 'debug' && !config) return 'Debug cancelled';
     const online = await this.run(operation, adbPath(), ['-s', serial, 'get-state'], project.root);
     if (online.trim() !== 'device') throw new Error('Device is not online: ' + serial);
-    const nativeDebug = action === 'debug' && config?.type === 'android-tools';
-    if (!nativeDebug) await this.run(operation, project.wrapper, [target.install, '--console=plain'], project.root, { ...process.env, ANDROID_SERIAL: serial });
-    if (action === 'install') return 'Install succeeded';
-    const metadata = nativeDebug ? apkMetadataFor(project, target) : undefined;
-    let packageName = nativeDebug ? config!.packageName ?? metadata?.applicationId : packageFor(project, target);
-    this.check(operation);
-    if (action === 'run') {
-      if (!packageName) throw new Error('No applicationId for selected variant');
+    if (action === 'install' || effectiveAction === 'run') {
+      this.state('Installing selected APK');
+      await this.run(operation, project.wrapper, [target.install, '--console=plain'], project.root, { ...process.env, ANDROID_SERIAL: serial });
+      if (action === 'install') return 'Install succeeded';
+      const packageName = packageFor(project, target);
       const result = await this.run(operation, adbPath(), ['-s', serial, 'shell', 'monkey', '-p', packageName, '-c', 'android.intent.category.LAUNCHER', '1'], project.root);
       if (/monkey aborted|no activities found|error:/i.test(result)) throw new Error(result);
-    } else {
-      const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
-      let debugConfig = config!;
-      if (nativeDebug) {
-        const abiSupported = config!.androidAbiSupported ?? nativeAbisFor(metadata);
-        debugConfig = { ...config!, androidProjectRoot: config!.androidProjectRoot ?? project.root, ...(abiSupported ? { androidAbiSupported: abiSupported } : {}) };
-      }
-      packageName ||= debugConfig.packageName;
-      const requested = { ...debugConfig, serial, packageName };
-      const listener = vscode.debug.onDidStartDebugSession(session => {
-        if (session.configuration.name === requested.name && session.configuration.type === requested.type && session.configuration.serial === serial && (packageName === undefined || session.configuration.packageName === packageName)) this.debugSession = session;
-      });
-      try {
-        const mode = config!.androidMode === 'kotlin-java' || config!.androidMode === 'native' || config!.androidMode === 'jvm-native'
-          ? config!.androidMode
-          : undefined;
-        this.debugSession = await startAndroidDebugging(folder, debugConfig, { serial, packageName, signal: operation.controller.signal, ...(mode ? { mode } : {}) });
-        const ok = !!this.debugSession;
-        if (!ok) throw new Error('Debug adapter rejected the configuration.');
-        packageName ||= this.debugSession?.configuration.packageName;
-        if (!packageName) throw new Error('Debug session did not resolve applicationId');
-        this.check(operation);
-      } catch (error) {
-        if (this.debugSession) { await vscode.debug.stopDebugging(this.debugSession); this.debugSession = undefined; }
-        throw error;
-      } finally { listener.dispose(); }
+      this.launched = { serial, packageName, cwd: project.root };
+      return 'Running';
     }
-    if (!packageName) throw new Error('No applicationId for selected variant');
-    this.launched = { serial, packageName, cwd: project.root };
-    return action === 'debug' ? 'Debug started' : 'Running';
+
+    const builtIn = config!.type === 'android-debug' || config!.type === 'android-tools' || (config!.type === 'kotlin-jvm' && config!.android === true);
+    const metadata = builtIn && !config!.packageName ? apkMetadataFor(project, target) : undefined;
+    const packageName = config!.packageName ?? metadata?.applicationId;
+    this.check(operation);
+    const debugProjectRoot = builtIn && !config!.androidProjectRoot ? { androidProjectRoot: project.root } : {};
+    const debugConfig = { ...config!, ...debugProjectRoot, ...(config!.packageName === undefined && packageName ? { packageName } : {}) };
+    const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
+    this.state('Starting Android debugger');
+    let started: vscode.DebugSession | undefined;
+    let owned: vscode.DebugSession | undefined;
+    let terminated = false;
+    const startListener = vscode.debug.onDidStartDebugSession(session => {
+      if (session.configuration.name === debugConfig.name && session.configuration.type === debugConfig.type && session.configuration.serial === serial && (packageName === undefined || session.configuration.packageName === packageName)) started = session;
+    });
+    const termination = vscode.debug.onDidTerminateDebugSession(session => {
+      if (session !== started && session !== owned) return;
+      terminated = true;
+      if (session === owned) {
+        this.debugSession = undefined;
+        this.debugTermination?.dispose();
+        this.debugTermination = undefined;
+        if (!this.disposed) this.state('Stopped');
+      }
+    });
+    try {
+      const session = await startAndroidDebugging(folder, debugConfig, { serial, ...(packageName ? { packageName } : {}), signal: operation.controller.signal });
+      this.check(operation);
+      if (terminated) throw new Error('Android debug session terminated during startup');
+      owned = session;
+      this.debugSession = owned;
+      this.debugTermination?.dispose();
+      this.debugTermination = termination;
+      return 'Debug started';
+    } catch (error) {
+      // 启动事件之后取消/拒绝也要回收已创建的所属会话，立即终止的会话则不能重复detach。
+      if (started && !terminated) await vscode.debug.stopDebugging(started);
+      if (this.debugSession === owned) this.debugSession = undefined;
+      throw error;
+    } finally {
+      startListener.dispose();
+      if (this.debugTermination !== termination) termination?.dispose();
+    }
   }
 
   // 用 operation 所有权拒绝重入，状态始终反馈；npm test reentry/stop/dispose 回归验证取消与失败。
   async handle(message: any, serial?: string): Promise<void> {
     if (this.disposed) throw new Error('Android build controller is disposed');
-    if (!message || message.type !== 'buildPanel' || !['refresh', 'project', 'target', 'build', 'install', 'run', 'debug', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
+    if (!message || message.type !== 'buildPanel' || !['refresh', 'project', 'target', 'build', 'install', 'run', 'runMode', 'debug', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
     if (message.action === 'output') { this.output.show(true); return; }
     if (message.action === 'stop') { return this.stop(); }
     if (this.operation || this.stopping) throw new Error('An Android operation is already running');
@@ -365,7 +398,15 @@ export class AndroidBuildController implements vscode.Disposable {
       else { const targets = buildTargets(this.projects.find(p => p.id === this.projectId)?.tasks || []); if (!targets.some(t => t.id === message.value)) throw new Error('Invalid target selection'); this.targetId = message.value; }
       this.state('Ready'); return;
     }
-    if (this.launched && ['run', 'debug'].includes(message.action)) throw new Error('Stop the current app before starting another run.');
+    if ((this.launched || this.debugSession) && ['run', 'debug'].includes(message.action)) throw new Error('Stop the current app before starting another run.');
+    if (message.action === 'runMode') {
+      if (this.launched || this.debugSession) throw new Error('Stop the current app before changing run mode.');
+      const modes = ['run', ...getAndroidDebugConfigurations().map((_, index) => 'debug-' + index)];
+      if (!modes.includes(message.value)) throw new Error('Invalid run mode selection');
+      this.runModeId = message.value;
+      this.state('Ready');
+      return;
+    }
     const operation: Operation = { controller: new AbortController(), done: Promise.resolve() };
     this.operation = operation;
     this.state(message.action === 'refresh' ? 'Discovering Gradle tasks' : message.action + ': ' + this.targetId);
@@ -376,7 +417,8 @@ export class AndroidBuildController implements vscode.Disposable {
     return operation.done;
   }
 
-  // 并发停止共享清理 Promise；npm test stop/cancel 断言指定进程/应用包且取消不启动下一步骤。
+  // 并发停止共享清理Promise；Debug只detach，只有Run写入launched才force-stop自己启动的包。
+  // 回归：node --test tests/android-build.test.js，验证Attach/Stop零force-stop、Run保留定向停止以及启动中取消回收会话。
   private stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopping = (async () => {
@@ -387,6 +429,8 @@ export class AndroidBuildController implements vscode.Disposable {
         try { await operation.done; } catch (error) { if (!(error instanceof Cancelled)) throw error; }
       }
       if (this.debugSession) { await vscode.debug.stopDebugging(this.debugSession); this.debugSession = undefined; }
+      this.debugTermination?.dispose();
+      this.debugTermination = undefined;
       if (this.launched) {
         const app = this.launched;
         const cleanup: Operation = { controller: new AbortController(), done: Promise.resolve() };

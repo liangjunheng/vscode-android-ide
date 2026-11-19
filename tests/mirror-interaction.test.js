@@ -9,19 +9,29 @@ const source = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'),
 // 转译真实投屏类并创建 Webview 入口，仅替换 VS Code 和设备依赖；返回页面、消息入口与 ADB 调用记录。
 function fixture() {
   const calls = [], messages = [], module = { exports: {} };
-  let receive, failure;
-  const sdk = { adb: async (...args) => { calls.push(args); if (failure) throw failure; } };
+  let receive, failure, packetHandler;
+  const receives = [];
+  const sdk = { adb: async (...args) => { calls.push(args); if (failure) throw failure; }, listDevices: async () => [{ serial: 'phone', state: 'device' }], grpcSupported: () => false, grpcPortFor: () => undefined, grpcTokenFor: () => undefined, adbPath: () => 'adb', runBuffer: async () => Buffer.alloc(0) };
   const vscode = { Uri: { file: p => p, joinPath: (...p) => p.join('/') } };
-  const dependencies = { vscode, './sdk': sdk, './emulatorGrpc': {}, './scrcpy': {}, './skin': {} };
+  class Scrcpy {
+    constructor(serial, jar, handlers) { packetHandler = handlers; this.connected = true; this.events = []; }
+    async start() {}
+    stop() {}
+    touch(...args) { this.events.push(['touch', ...args]); }
+    scroll(...args) { this.events.push(['scroll', ...args]); }
+    key(...args) { this.events.push(['key', ...args]); }
+    text(...args) { this.events.push(['text', ...args]); }
+  }
+  const dependencies = { vscode, './sdk': sdk, './emulatorGrpc': { grpcSupported: () => false, grpcPortFor: () => undefined }, './scrcpy': { ScrcpySession: Scrcpy, bundledJar: () => 'jar' }, './skin': { skinForAvd: () => undefined } };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
-    module, exports: module.exports, Buffer, process, console,
+    module, exports: module.exports, Buffer, process, console, AbortController,
     require: id => Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
   });
   const mirror = new module.exports.RunningDeviceView('');
   mirror.icons = () => ({});
-  const webview = { cspSource: 'test:', asWebviewUri: p => p, postMessage: m => messages.push(m), onDidReceiveMessage: fn => { receive = fn; } };
-  mirror.resolveWebviewView({ webview, onDidChangeVisibility() {}, onDidDispose() {} });
-  return { mirror, calls, messages, html: webview.html, receive: m => receive(m), fail: e => { failure = e; } };
+  const webview = { cspSource: 'test:', asWebviewUri: p => p, postMessage: m => messages.push(m), onDidReceiveMessage: fn => { receive = fn; receives.push(fn); } };
+  mirror.resolveWebviewView({ visible: true, webview, onDidChangeVisibility() {}, onDidDispose() {} });
+  return { mirror, calls, messages, receives, html: webview.html, receive: m => receive(m), fail: e => { failure = e; }, packet: (kind, data) => packetHandler.onPacket(kind, Buffer.from(data)) };
 }
 
 // 读取生产 CSS 的导航参数，供真实 layout 的 getComputedStyle 使用；避免测试仍模拟旧固定栏高。
@@ -71,6 +81,59 @@ test('mirror wake routes idempotent wake independently of transport and reports 
   assert.equal(f.messages.at(-1).text, 'device offline');
 });
 
+// 嵌入式scrcpy的触摸、滚轮、按键和文本消息必须统一进入当前session，不能落入截图ADB分支。
+test('embedded scrcpy input events dispatch to the active session', async () => {
+  const f = fixture(), events = [];
+  f.mirror.serial = 'phone';
+  f.mirror.session = {
+    touch: (...args) => events.push(['touch', ...args]),
+    scroll: (...args) => events.push(['scroll', ...args]),
+    key: (...args) => events.push(['key', ...args]),
+    text: (...args) => events.push(['text', ...args]),
+  };
+  await f.receive({ type: 'touch', action: 2, x: 0.25, y: 0.5, w: 1000, h: 2000 });
+  await f.receive({ type: 'scroll', x: 0.25, y: 0.5, v: -1, w: 1000, h: 2000 });
+  await f.receive({ type: 'key', code: '3' });
+  await f.receive({ type: 'text', text: 'abc' });
+  assert.deepEqual(events, [
+    ['touch', 2, 250, 1000, 1000, 2000],
+    ['scroll', 250, 1000, 1000, 2000, -1],
+    ['key', 3],
+    ['text', 'abc'],
+  ]);
+});
+
+// 旧Webview重建后继续发送的输入事件不得进入当前投屏session，避免事件错发到新设备。
+test('stale webview events are ignored after the view is replaced', async () => {
+  const f = fixture(), first = f.receives[0];
+  const events = [];
+  f.mirror.serial = 'phone';
+  f.mirror.session = { touch: (...args) => events.push(args) };
+  const webview = { cspSource: 'test:', asWebviewUri: p => p, postMessage() {}, onDidReceiveMessage: fn => f.receives.push(fn) };
+  f.mirror.resolveWebviewView({ visible: true, webview, onDidChangeVisibility() {}, onDidDispose() {} });
+  await first({ type: 'touch', action: 0, x: 0.5, y: 0.5, w: 100, h: 200 });
+  assert.deepEqual(events, []);
+});
+
+// 视频包未收到Webview ACK前不继续发送，待发delta只保留最新包，关键帧优先于过期delta。
+test('scrcpy video flow applies latest-frame backpressure', async () => {
+  const f = fixture();
+  f.mirror.serial = 'phone';
+  f.mirror.pickMode = () => 'scrcpy';
+  await f.mirror.restart();
+  await new Promise(resolve => setImmediate(resolve));
+  f.messages.length = 0;
+  f.packet('config', [1]);
+  f.packet('delta', [2]);
+  f.packet('delta', [3]);
+  assert.deepEqual(f.messages.map(m => [m.type, m.kind]), [['video', 'config'], ['video', 'delta'], ['video', 'delta']]);
+  await f.receive({ type: 'videoAck' });
+  f.packet('key', [4]);
+  f.packet('delta', [5]);
+  await f.receive({ type: 'videoAck' });
+  assert.deepEqual(f.messages.map(m => [m.type, m.kind]), [['video', 'config'], ['video', 'delta'], ['video', 'delta'], ['video', 'key'], ['video', 'delta']]);
+});
+
 // 执行生成页面的真实 bind/rel 函数；canvas 和 img 分别覆盖主键点击、拖动、右键和释放消息。
 test('mirror wake preserves click and drag input in every rendering mode', () => {
   const html = fixture().html;
@@ -79,7 +142,7 @@ test('mirror wake preserves click and drag input in every rendering mode', () =>
     for (const tag of ['canvas', 'img']) {
       const sent = [];
       const el = { tag, focus() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 400 }) };
-      const context = { mode, target: el, fw: 1000, fh: 2000, send: m => sent.push(JSON.parse(JSON.stringify(m))) };
+      const context = { mode, target: el, fw: 1000, fh: 2000, requestAnimationFrame: f => { f(); return 1; }, cancelAnimationFrame: () => {}, send: m => sent.push(JSON.parse(JSON.stringify(m))) };
       vm.runInNewContext(input + ';this.bindElement=bind;', context);
       context.bindElement(el);
       const event = { button: 0, buttons: 1, clientX: 100, clientY: 200, preventDefault() {} };
@@ -249,7 +312,8 @@ function loadingFixture() {
   const html = fixture().html;
   const nodes = { placeholder: { hidden: false }, 'placeholder-text': { textContent: '' } };
   const style = { removeProperty() {}, setProperty() {} };
-  let output, listener;
+  let output, listener, decoderInstance;
+  const decoderState = { queue: 0, decoded: [] };
   const context = {
     document: { getElementById: id => nodes[id] },
     frame: { dataset: { state: 'loading' }, style: {}, classList: { toggle() {} } }, stage: { style: {} },
@@ -257,16 +321,17 @@ function loadingFixture() {
     skin: { lw: 200, lh: 400, dw: 180, dh: 360, dx: 10, dy: 20, radius: 8 }, frameOn: true, skinOn: false,
     fw: 0, fh: 0, cv: { width: 300, height: 150, style }, img: { style }, fg: {}, msg: {}, mode: 'emulator',
     ctx: { putImageData() {}, drawImage() {} }, send() {}, sendVp() {}, place() {},
-    ImageData: class {}, decoder: undefined,
-    VideoDecoder: class { constructor(options) { output = options.output; } },
+    ImageData: class {}, EncodedVideoChunk: class { constructor(value) { Object.assign(this, value); } }, performance: { now: () => 1 }, decoder: undefined,
+    VideoDecoder: class { constructor(options) { output = options.output; decoderInstance = this; this.state = 'unconfigured'; } configure() { this.state = 'configured'; } close() { this.state = 'closed'; } get decodeQueueSize() { return decoderState.queue; } decode(chunk) { decoderState.decoded.push(chunk); } },
     addEventListener: (event, fn) => { listener = fn; },
   };
   vm.createContext(context);
   vm.runInContext(html.slice(html.indexOf('function layout(){'), html.indexOf('let vpT;')), context);
   vm.runInContext(html.slice(html.indexOf('function setMode(m){'), html.indexOf("addEventListener('message',")), context);
   vm.runInContext(html.slice(html.indexOf('function newDecoder(){'), html.indexOf('function onConfig(d){')), context);
+  vm.runInContext(html.slice(html.indexOf('function onConfig(d){'), html.indexOf('// ---- input')), context);
   vm.runInContext(html.slice(html.indexOf("addEventListener('message',"), html.indexOf("send({type:'ready'});")), context);
-  return { html, context, nodes, output: f => output(f), message: m => listener({ data: m }) };
+  return { html, context, nodes, output: f => output(f), message: m => listener({ data: m }), decoder: () => decoderInstance, decoderState };
 }
 
 // 加载占位须为黑底、居中图标/文案、1080x1920比例，已有皮肤和上次帧尺寸不得影响占位。
@@ -331,6 +396,25 @@ test('mirror loading ends on actual first frames and handles errors and reconnec
   f.message({ type: 'loading' });
   assert.equal(c.frame.dataset.state, 'loading');
   assert.equal(f.nodes.placeholder.hidden, false);
+});
+
+// 低延时视频限制解码积压，队列超过两帧时丢弃过期delta，关键帧仍可恢复显示。
+test('scrcpy decoder drops queued deltas but accepts recovery key frames', () => {
+  const f = loadingFixture();
+  f.message({ type: 'mode', mode: 'scrcpy' });
+  f.message({ type: 'video', kind: 'config', data: new Uint8Array([0, 0, 0, 1, 0x67, 0x64, 0, 0]) });
+  assert.equal(f.decoder().state, 'configured');
+  assert.deepEqual(f.decoderState.decoded, []);
+  f.decoderState.queue = 3;
+  f.message({ type: 'video', kind: 'delta', data: new Uint8Array([2]) });
+  assert.equal(f.decoderState.decoded.length, 0);
+  f.message({ type: 'video', kind: 'key', data: new Uint8Array([1]) });
+  assert.equal(f.decoderState.decoded.length, 1);
+  assert.equal(f.decoderState.decoded[0].type, 'key');
+  f.decoderState.queue = 0;
+  f.message({ type: 'video', kind: 'delta', data: new Uint8Array([3]) });
+  assert.equal(f.decoderState.decoded.length, 2);
+  assert.equal(f.decoderState.decoded[1].type, 'delta');
 });
 
 

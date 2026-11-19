@@ -37,8 +37,8 @@ test('compiled extension loads without optional image binaries or unpublished de
   assert.match(notices, /Apache License/);
   assert.doesNotMatch(notices, /Kotlin JVM Runtime Dependencies/);
   const manifest = require('../package.json');
-  assert.deepEqual(manifest.contributes.debuggers.map(item => item.type), ['android-tools', 'lldb']);
+  assert.deepEqual(manifest.contributes.debuggers.map(item => item.type).sort(), ['android-debug', 'android-tools', 'kotlin-jvm', 'lldb'].sort());
   assert.deepEqual(manifest.extensionDependencies, ['vadimcn.vscode-lldb']);
-  assert.equal(manifest.contributes.languages, undefined);
+  assert.deepEqual(manifest.contributes.languages, [{ id: 'kotlin', aliases: ['Kotlin', 'kotlin'], extensions: ['.kt', '.kts'] }]);
   assert.equal(manifest.contributes.grammars, undefined);
 });

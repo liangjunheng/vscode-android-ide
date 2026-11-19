@@ -42,13 +42,14 @@ test('removed Profiler source resources and dedicated tests stay absent', () => 
   assert.deepEqual(dedicated, []);
 });
 
-// 工具栏移除入口后仅七按钮且以Logcat结尾；真实模板和CSS六工具槽同时验证，边界缺失严格失败。
-test('Device Tools retains seven build actions ending with Show Logcat', () => {
+// 工具栏保留统一运行/调试控件并以Logcat结尾；真实模板和CSS五工具槽同时验证，边界缺失严格失败。
+test('Device Tools retains combined run debug action and Show Logcat', () => {
   const source = read('src/runningDevices.ts');
   const start = source.indexOf('<div class="build-actions">');
   const end = source.indexOf('<div class="build-status"', start);
   assert.ok(start >= 0 && end > start, 'build action template boundaries must exist');
   const ids = [...source.slice(start, end).matchAll(/<button id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(ids, ['build-run', 'build-build', 'build-install', 'build-debug', 'build-refresh', 'build-output', 'build-logcat']);
-  assert.match(read('media/build-panel.css'), /grid-template-columns:minmax\(20px,1fr\) repeat\(6,minmax\(16px,26px\)\)/);
+  assert.deepEqual(ids, ['build-run', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-logcat']);
+  assert.match(source.slice(start, end), /id="build-run-mode"/);
+  assert.match(read('media/build-panel.css'), /grid-template-columns:minmax\(80px,1fr\) repeat\(5,minmax\(16px,26px\)\)/);
 });

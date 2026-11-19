@@ -58,18 +58,25 @@
     "*",
     "onDebugResolve:android-tools",
     "onDebugDynamicConfigurations:android-tools",
-    "onDebugResolve:lldb"
+    "onDebugResolve:android-debug",
+    "onDebugDynamicConfigurations:android-debug",
+    "onDebugResolve:lldb",
+    "onDebugResolve:kotlin-jvm",
+    "onDebugDynamicConfigurations:kotlin-jvm"
   ],
   "scripts": {
-    "compile": "node esbuild.js",
-    "watch": "node esbuild.js --watch",
+    "compile": "npm run build:jvm && node esbuild.js",
+    "build:jvm": "node scripts/build-jvm-debugger.cjs",
+    "test:jvm": "node scripts/build-jvm-debugger.cjs --test",
+    "watch": "npm run build:jvm && node esbuild.js --watch",
     "typecheck": "tsc -p . --noEmit",
-    "vscode:prepublish": "npm run typecheck && node esbuild.js --production && node scripts/verify-core-runtime.cjs",
+    "vscode:prepublish": "npm run typecheck && npm run build:jvm && node esbuild.js --production && node scripts/verify-core-runtime.cjs",
     "package": "vsce package",
     "test": "node --test tests/*.test.js",
     "clean": "rm -rf dist *.vsix"
   },
   "contributes": {
+    "languages": [{ "id": "kotlin", "aliases": ["Kotlin", "kotlin"], "extensions": [".kt", ".kts"] }],
     "viewsContainers": {
       "activitybar": [
         {
@@ -193,6 +200,191 @@
       ]
     },
     "debuggers": [
+      {
+        "type": "kotlin-jvm",
+        "label": "Kotlin/Java (JVM)",
+        "languages": ["kotlin", "java"],
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "android": { "type": "boolean", "default": false },
+              "serial": { "type": "string" },
+              "target": { "type": "string", "default": "select" },
+              "pid": { "type": ["integer", "string"] },
+              "processId": { "type": ["integer", "string"] },
+              "packageName": { "type": "string" },
+              "apkPath": { "type": "string" },
+              "launchActivity": { "type": "string" },
+              "androidProjectRoot": { "type": "string" },
+              "androidModuleRoot": { "type": "string" },
+              "androidVariant": { "type": "string" },
+              "androidSourceRoots": { "type": "array", "items": { "type": "string" } },
+              "androidApkInstalled": { "type": "boolean" },
+              "androidMode": { "enum": ["kotlin-java"] },
+              "hostName": { "type": "string", "default": "localhost" },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "timeout": { "type": "number", "default": 30000 },
+              "projectRoot": { "type": "string", "default": "${workspaceFolder}" },
+              "sourcePaths": { "type": "array", "items": { "type": "string" } },
+              "stepFilters": { "type": "array", "items": { "type": "string" } },
+              "suspendAllThreads": { "type": "boolean", "default": false },
+              "showToString": { "type": "boolean", "default": true },
+              "asyncStackTraces": { "type": "boolean", "default": true },
+              "coroutineStepping": { "type": "boolean", "default": true },
+              "invocationTimeout": { "type": "number", "default": 5000 },
+              "logLevel": { "enum": ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] }
+            }
+          },
+          "launch": {
+            "properties": {
+              "android": { "type": "boolean", "default": false },
+              "serial": { "type": "string" },
+              "target": { "type": "string", "default": "select" },
+              "packageName": { "type": "string" },
+              "apkPath": { "type": "string" },
+              "launchActivity": { "type": "string" },
+              "androidProjectRoot": { "type": "string" },
+              "androidModuleRoot": { "type": "string" },
+              "androidVariant": { "type": "string" },
+              "androidSourceRoots": { "type": "array", "items": { "type": "string" } },
+              "androidApkInstalled": { "type": "boolean" },
+              "androidMode": { "enum": ["kotlin-java"] },
+              "mainClass": { "type": "string" },
+              "projectRoot": { "type": "string", "default": "${workspaceFolder}" },
+              "classPaths": { "type": "array", "items": { "type": "string" } },
+              "modulePaths": { "type": "array", "items": { "type": "string" } },
+              "vmArgs": { "type": ["string", "array"], "items": { "type": "string" } },
+              "args": { "type": ["string", "array"], "items": { "type": "string" } },
+              "cwd": { "type": "string", "default": "${workspaceFolder}" },
+              "env": { "type": "object" },
+              "javaExec": { "type": "string" },
+              "sourcePaths": { "type": "array", "items": { "type": "string" } },
+              "stepFilters": { "type": "array", "items": { "type": "string" } },
+              "suspendAllThreads": { "type": "boolean", "default": false },
+              "showToString": { "type": "boolean", "default": true },
+              "asyncStackTraces": { "type": "boolean", "default": true },
+              "coroutineStepping": { "type": "boolean", "default": true },
+              "invocationTimeout": { "type": "number", "default": 5000 },
+              "logLevel": { "enum": ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] }
+            }
+          }
+        },
+        "configurationSnippets": [
+          { "label": "Kotlin/Java: Attach to JVM", "body": { "type": "kotlin-jvm", "request": "attach", "name": "Attach to JVM (Kotlin/Java)", "hostName": "localhost", "port": 5005, "projectRoot": "^\"\\${workspaceFolder}\"" } },
+          { "label": "Kotlin/Java: Launch main class", "body": { "type": "kotlin-jvm", "request": "launch", "name": "Launch JVM (Kotlin/Java)", "mainClass": "${1:com.example.MainKt}", "projectRoot": "^\"\\${workspaceFolder}\"" } }
+        ]
+      },
+      {
+        "type": "android-debug",
+        "label": "Android Debug",
+        "languages": ["kotlin", "java", "c", "cpp"],
+        "variables": {
+          "pickAndroidProcess": "android-tools.pickAndroidProcess",
+          "abi": "android-tools.getBestAbi",
+          "mappedAbi": "android-tools.getBestMappedAbi"
+        },
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "mode": { "enum": ["native", "java", "dual"] },
+              "serial": { "type": "string", "description": "Android device serial; omit to select a device." },
+              "target": { "type": "string", "default": "select", "description": "Android serial, select, or last-selected." },
+              "pid": { "type": ["integer", "string"], "description": "Optional process id." },
+              "processId": { "type": ["integer", "string"], "description": "Optional process id or android-tools.pickAndroidProcess result." },
+              "packageName": { "type": "string" },
+              "projectRoot": { "type": "string", "default": "${workspaceFolder}" },
+              "sourcePaths": { "type": "array", "items": { "type": "string" } },
+              "resumeProcess": { "type": "boolean", "description": "Resume the waiting process after attach." },
+              "native": {
+                "type": "object",
+                "description": "Configuration passed to the Native debugger.",
+                "properties": {
+                  "sdkRoot": { "type": "string" },
+                  "ndkRoot": { "type": "string" },
+                  "abiSupported": { "type": "array", "items": { "enum": ["armeabi", "armeabi-v7a", "arm64-v8a", "x86", "x86_64"] } },
+                  "abi": { "enum": ["select", "armeabi", "armeabi-v7a", "arm64-v8a", "x86", "x86_64"] },
+                  "abiMap": { "type": "object", "additionalProperties": { "type": "string" } },
+                  "symbolSearchPaths": { "type": "array", "items": { "type": "string" }, "description": "Directories containing unstripped .so files." }
+                }
+              },
+              "java": {
+                "type": "object",
+                "description": "Configuration passed to the Kotlin/JVM debugger.",
+                "properties": {
+                  "type": { "const": "kotlin-jvm" },
+                  "name": { "type": "string" },
+                  "projectRoot": { "type": "string", "default": "${workspaceFolder}" },
+                  "sourcePaths": { "type": "array", "items": { "type": "string" } },
+                  "hostName": { "type": "string", "default": "localhost" },
+                  "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                }
+              }
+            }
+          },
+          "launch": {
+            "properties": {
+              "mode": { "enum": ["native", "java", "dual"] },
+              "serial": { "type": "string", "description": "Android device serial; omit to select a device." },
+              "target": { "type": "string", "default": "select", "description": "Android serial, select, or last-selected." },
+              "pid": { "type": ["integer", "string"], "description": "Optional process id." },
+              "processId": { "type": ["integer", "string"], "description": "Optional process id." },
+              "apkPath": { "type": "string", "description": "Optional APK to install for this launch." },
+              "packageName": { "type": "string" },
+              "launchActivity": { "type": "string" },
+              "projectRoot": { "type": "string", "default": "${workspaceFolder}" },
+              "sourcePaths": { "type": "array", "items": { "type": "string" } },
+              "resumeProcess": { "type": "boolean", "description": "Resume the waiting process after launch." },
+              "native": {
+                "type": "object",
+                "description": "Configuration passed to the Native debugger.",
+                "properties": {
+                  "sdkRoot": { "type": "string" },
+                  "ndkRoot": { "type": "string" },
+                  "abiSupported": { "type": "array", "items": { "enum": ["armeabi", "armeabi-v7a", "arm64-v8a", "x86", "x86_64"] } },
+                  "abi": { "enum": ["select", "armeabi", "armeabi-v7a", "arm64-v8a", "x86", "x86_64"] },
+                  "abiMap": { "type": "object", "additionalProperties": { "type": "string" } },
+                  "symbolSearchPaths": { "type": "array", "items": { "type": "string" }, "description": "Directories containing unstripped .so files." }
+                }
+              },
+              "java": {
+                "type": "object",
+                "description": "Configuration passed to the Kotlin/JVM debugger.",
+                "properties": {
+                  "type": { "const": "kotlin-jvm" },
+                  "name": { "type": "string" },
+                  "projectRoot": { "type": "string", "default": "${workspaceFolder}" },
+                  "sourcePaths": { "type": "array", "items": { "type": "string" } },
+                  "hostName": { "type": "string", "default": "localhost" },
+                  "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                  "mainClass": { "type": "string" },
+                  "classPaths": { "type": "array", "items": { "type": "string" } },
+                  "modulePaths": { "type": "array", "items": { "type": "string" } },
+                  "vmArgs": { "type": ["string", "array"], "items": { "type": "string" } },
+                  "args": { "type": ["string", "array"], "items": { "type": "string" } },
+                  "cwd": { "type": "string", "default": "${workspaceFolder}" },
+                  "env": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          { "type": "android-debug", "request": "launch", "name": "Android: Android Native Debug Launch", "mode": "native", "target": "select", "native": {} },
+          { "type": "android-debug", "request": "attach", "name": "Android: Android Native Debug Attach", "mode": "native", "target": "select", "native": {} },
+          { "type": "android-debug", "request": "launch", "name": "Android: Android JVM Debug Launch", "mode": "java", "target": "select", "java": { "type": "kotlin-jvm", "name": "Android JVM" } },
+          { "type": "android-debug", "request": "attach", "name": "Android: Android JVM Debug Attach", "mode": "java", "target": "select", "java": { "type": "kotlin-jvm", "name": "Android JVM" } },
+          { "type": "android-debug", "request": "launch", "name": "Android: Android Dual(Native and JVM) Debug Launch", "mode": "dual", "target": "select", "native": {}, "java": { "type": "kotlin-jvm", "name": "Android JVM" } },
+          { "type": "android-debug", "request": "attach", "name": "Android: Android Dual(Native and JVM) Debug Attach", "mode": "dual", "target": "select", "native": {}, "java": { "type": "kotlin-jvm", "name": "Android JVM" } }
+        ],
+        "configurationSnippets": [
+          { "label": "Android: Android Native Debug Launch", "body": { "type": "android-debug", "request": "launch", "name": "Native Debug Launch", "mode": "native", "target": "select", "apkPath": "^\"\\${workspaceFolder}/${1:app}/build/outputs/apk/debug/app-debug.apk\"", "packageName": "${2:com.example.app}", "launchActivity": "${3:com.example.app.MainActivity}", "native": { "abi": "${4|select,armeabi,armeabi-v7a,arm64-v8a,x86,x86_64|}", "symbolSearchPaths": ["^\"\\${workspaceFolder}/${5:app}/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/\\${command:abi}/\""] } } },
+          { "label": "Android: Android Native Debug Attach", "body": { "type": "android-debug", "request": "attach", "name": "Native Debug Attach", "mode": "native", "target": "select", "processId": "^\"\\${command:android-tools.pickAndroidProcess}\"", "packageName": "${1:com.example.app}", "native": { "abi": "${2|select,armeabi,armeabi-v7a,arm64-v8a,x86,x86_64|}", "symbolSearchPaths": ["^\"\\${workspaceFolder}/${3:app}/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/\\${command:abi}/\""] } } },
+          { "label": "Android: Android JVM Debug Launch", "body": { "type": "android-debug", "request": "launch", "name": "JVM Debug Launch", "mode": "java", "target": "select", "apkPath": "^\"\\${workspaceFolder}/${1:app}/build/outputs/apk/debug/app-debug.apk\"", "packageName": "${2:com.example.app}", "launchActivity": "${3:com.example.app.MainActivity}", "java": { "type": "kotlin-jvm", "name": "Android JVM", "sourcePaths": ["^\"\\${workspaceFolder}/${4:app}/src/main/java\""] } } },
+          { "label": "Android: Android JVM Debug Attach", "body": { "type": "android-debug", "request": "attach", "name": "JVM Debug Attach", "mode": "java", "target": "select", "processId": "^\"\\${command:android-tools.pickAndroidProcess}\"", "packageName": "${1:com.example.app}", "java": { "type": "kotlin-jvm", "name": "Android JVM", "sourcePaths": ["^\"\\${workspaceFolder}/${2:app}/src/main/java\""] } } },
+          { "label": "Android: Android Dual(Native and JVM) Debug Launch", "body": { "type": "android-debug", "request": "launch", "name": "Dual Debug Launch", "mode": "dual", "target": "select", "apkPath": "^\"\\${workspaceFolder}/${1:app}/build/outputs/apk/debug/app-debug.apk\"", "packageName": "${2:com.example.app}", "launchActivity": "${3:com.example.app.MainActivity}", "native": { "abi": "${4|select,armeabi,armeabi-v7a,arm64-v8a,x86,x86_64|}", "symbolSearchPaths": ["^\"\\${workspaceFolder}/${5:app}/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/\\${command:abi}/\""] }, "java": { "type": "kotlin-jvm", "name": "Android JVM", "sourcePaths": ["^\"\\${workspaceFolder}/${6:app}/src/main/java\""] } } },
+          { "label": "Android: Android Dual(Native and JVM) Debug Attach", "body": { "type": "android-debug", "request": "attach", "name": "Dual Debug Attach", "mode": "dual", "target": "select", "processId": "^\"\\${command:android-tools.pickAndroidProcess}\"", "packageName": "${1:com.example.app}", "native": { "abi": "${2|select,armeabi,armeabi-v7a,arm64-v8a,x86,x86_64|}", "symbolSearchPaths": ["^\"\\${workspaceFolder}/${3:app}/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/\\${command:abi}/\""] }, "java": { "type": "kotlin-jvm", "name": "Android JVM", "sourcePaths": ["^\"\\${workspaceFolder}/${4:app}/src/main/java\""] } } }
+        ]
+      },
       {
         "type": "android-tools",
         "label": "Android Native",
@@ -458,33 +650,7 @@
               }
             }
           }
-        },
-        "initialConfigurations": [
-          {
-            "type": "android-tools",
-            "request": "launch",
-            "name": "[内置] Android Native",
-            "androidMode": "native",
-            "mode": "native",
-            "target": "select",
-            "native": {}
-          }
-        ],
-        "configurationSnippets": [
-          {
-            "label": "[内置] Android Native",
-            "description": "Start the built-in Android Native debugger",
-            "body": {
-              "type": "android-tools",
-              "request": "launch",
-              "name": "[内置] Android Native",
-              "androidMode": "native",
-              "mode": "native",
-              "target": "select",
-              "native": {}
-            }
-          }
-        ]
+        }
       },
       {
         "type": "lldb",
@@ -581,6 +747,10 @@
     "configuration": {
       "title": "VSCode Android IDE",
       "properties": {
+        "android-ide.jvmDebugger.javaHome": { "type": "string", "default": "", "description": "Full JDK 17+ for the bundled JVM debugger; defaults to JAVA_HOME and PATH." },
+        "android-ide.jvmDebugger.adapterJvmArgs": { "type": "array", "items": { "type": "string" }, "default": ["-Xmx512m"] },
+        "android-ide.jvmDebugger.traceProtocol": { "type": "boolean", "default": false, "description": "Trace JVM DAP messages in the Android Kotlin/Java Debugger output channel." },
+        "android-ide.jvmDebugger.logLevel": { "type": "string", "enum": ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"], "default": "INFO" },
         "android-ide.embeddedEmulator": {
           "type": "boolean",
           "default": true,
@@ -591,6 +761,11 @@
           "scope": "window",
           "default": true,
           "description": "Show device mirroring in Device Tools. The mirror toggle saves this setting and restores it after extension restart."
+        },
+        "android-ide.nativeMirror": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run physical-device mirroring in an independent native scrcpy window instead of the VS Code Webview. Keep false to embed mirroring in Device Tools."
         },
         "android-ide.deviceViewMode": {
           "type": "string",
@@ -612,8 +787,9 @@
         },
         "android-ide.mirrorIntervalMs": {
           "type": "number",
-          "default": 150,
-          "description": "Minimum delay between screen captures in the screenshot fallback mode (physical devices without scrcpy support)."
+          "default": 0,
+          "minimum": 0,
+          "description": "Minimum delay between screen captures in the screenshot fallback mode; 0 captures the next frame immediately after the previous capture completes."
         },
         "android-ide.logcat.maxBytes": {
           "type": "number",
@@ -638,6 +814,8 @@
       }
     ],
     "breakpoints": [
+      { "language": "kotlin" },
+      { "language": "java" },
       {
         "language": "c"
       },

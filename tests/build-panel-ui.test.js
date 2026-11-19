@@ -32,7 +32,7 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
   assert.equal(f.sent.at(-1).type, 'logcat');
-  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', busy: false, deviceLoading: false, status: 'Ready' };
+  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', runMode: 'run', runModes: [{ id: 'run', label: 'app | debug', action: 'run' }, ...Array.from({ length: 6 }, (_, index) => ({ id: 'debug-' + index, label: 'Debug ' + index, action: 'debug' }))], busy: false, deviceLoading: false, status: 'Ready' };
   f.receive({ ...state, deviceLoading: true });
   assert.equal(get('build-project-loading').hidden, true);
   assert.equal(get('build-target-loading').hidden, true);
@@ -64,21 +64,32 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(f.sent.at(-1).value, 'root');
   get('build-target').onchange();
   assert.equal(f.sent.at(-1).action, 'target');
-  for (const action of ['run', 'build', 'install', 'debug', 'refresh', 'output']) { get('build-' + action).onclick(); assert.equal(f.sent.at(-1).action, action); }
+  assert.equal(get('build-run-mode').children.length, 8);
+  get('build-run-mode').value = 'debug-0';
+  get('build-run-mode').onchange();
+  assert.equal(f.sent.at(-1).action, 'runMode');
+  assert.equal(f.sent.at(-1).value, 'debug-0');
+  f.receive({ ...state, runMode: 'debug-0' });
+  assert.match(get('build-run-icon').className, /debug-alt/);
+  assert.equal(get('build-run')['aria-label'], 'Start debugging');
+  for (const action of ['run', 'build', 'install', 'refresh', 'output']) { get('build-' + action).onclick(); assert.equal(f.sent.at(-1).action, action); }
   assert.equal(get('build-wifi').onclick, undefined);
   assert.equal(f.sent.some(message => message.type === 'pairDevice'), false);
+  f.receive({ type: 'error', text: 'ADB timeout' });
+  assert.equal(get('build-status').textContent, 'ADB timeout');
+  assert.equal(get('build-status').classList?.failed, undefined);
   f.receive({ ...state, busy: true, deviceLoading: false, status: 'Gradle :app:installDebug' });
   assert.equal(get('build-project-loading').hidden, false);
   assert.equal(get('build-target-loading').hidden, false);
   assert.equal(get('build-device-loading').hidden, true);
-  assert.equal(get('build-run-label').textContent, 'Stop');
+  assert.match(get('build-run-icon').className, /debug-pause/);
   assert.equal(get('build-run').disabled, false);
   assert.equal(get('build-target').disabled, true);
   assert.equal(get('build-logcat').disabled, false);
   get('build-run').onclick();
   assert.equal(f.sent.at(-1).action, 'stop');
   f.receive({ ...state, busy: false, running: true });
-  assert.equal(get('build-run-label').textContent, 'Stop');
+  assert.match(get('build-run-icon').className, /debug-pause/);
   get('build-run').onclick();
   assert.equal(f.sent.at(-1).action, 'stop');
   f.receive({ ...state, error: 'Build failed' });
@@ -111,7 +122,7 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.equal(calls.at(-1)[0], 'android-ide.pairDevice');
   view.publishBuildState({ type: 'buildState', status: 'Ready' });
   assert.equal(calls.at(-1).status, 'Ready');
-  for (const id of ['build-project', 'build-target', 'build-run', 'build-install', 'build-debug', 'build-status', 'build-project-loading', 'build-target-loading', 'build-device-loading']) assert.ok(webview.html.includes('id="' + id + '"'));
+  for (const id of ['build-project', 'build-target', 'build-run-mode', 'build-run', 'build-install', 'build-status', 'build-project-loading', 'build-target-loading', 'build-device-loading']) assert.ok(webview.html.includes('id="' + id + '"'));
   assert.ok(webview.html.includes('build-panel.js'));
   const output = webview.html.indexOf('id="build-output"'), logcat = webview.html.indexOf('id="build-logcat"'), mirror = webview.html.indexOf('id="build-mirror"');
   assert.ok(mirror < output && output < logcat);
@@ -130,9 +141,11 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.equal(webview.html.includes('id="build-wifi"'), false);
   assert.equal(js.includes("get('build-wifi')"), false);
   assert.ok(css.includes('body.mirror-hidden #wrap'));
-  assert.ok(css.includes('repeat(6,minmax(16px,26px))'));
+  assert.ok(css.includes('repeat(5,minmax(16px,26px))'));
+  assert.ok(actionRow.includes('id="build-run-mode"'));
+  assert.equal(actionRow.includes('build-run-label'), false);
   const buttons = [...actionRow.matchAll(/<button id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(buttons, ['build-run', 'build-build', 'build-install', 'build-debug', 'build-refresh', 'build-output', 'build-logcat']);
+  assert.deepEqual(buttons, ['build-run', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-logcat']);
   assert.equal(webview.html.includes('build-profiler'), false);
   assert.ok(webview.html.includes('class="build-view-separator"'));
   assert.ok(webview.html.includes('class="build-view-modes"'));
@@ -148,11 +161,11 @@ test('build panel integration owns controller and connects both directions', asy
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
   // 模拟只读当前Gradle包名，断言Native工厂只在需要时按workspace调用。
   class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
-  const debugFactory = {};
+  const debugFactory = {}, jvmRegistrations = [];
   const extensionContext = { extensionPath: 'extension-root', subscriptions };
   const factoryContexts = [], packageResolvers = [];
-  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; } } };
-  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: (context, packageResolver) => { factoryContexts.push(context); packageResolvers.push(packageResolver); return debugFactory; } } };
+  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; }, onDidTerminateDebugSession: () => ({ dispose() {} }) } };
+  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: (context, packageResolver) => { factoryContexts.push(context); packageResolvers.push(packageResolver); return debugFactory; } }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger: context => { jvmRegistrations.push(context); } } };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   module.exports.activate(extensionContext);
@@ -160,10 +173,10 @@ test('build panel integration owns controller and connects both directions', asy
   assert.equal(commandNames.includes('android-ide.openProfiler'), false);
   assert.ok(commandNames.includes('android-ide.showLogcat'));
 
-  // 回归扩展调试接线：activate 必须以 android-tools 类型注册准确工厂，避免调试入口静默缺失。
-  assert.equal(registrations.length, 1);
-  assert.equal(registrations[0][0], 'android-tools');
-  assert.equal(registrations[0][1], debugFactory);
+  // 回归扩展调试接线：android-tools与android-debug共享准确工厂，避免六模式外部入口静默缺失。
+  assert.deepEqual(registrations.map(item => item[0]).sort(), ['android-debug', 'android-tools'].sort());
+  assert.ok(registrations.every(item => item[1] === debugFactory));
+  assert.deepEqual(jvmRegistrations, [extensionContext]);
   assert.equal(factoryContexts[0], extensionContext);
   assert.equal(calls.some(call => call[0] === 'selected-package'), false);
   build.applicationId = 'com.selected.gradle';

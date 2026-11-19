@@ -95,6 +95,12 @@ The second review found process-discovery errors overwritten by stop failures, A
 
 Unchanged and unregistered Java/profile classes and simpleperf helpers are not part of the Native runtime call chain. The locked original source snapshot is unchanged. This audit does not claim real-device execution.
 
+## Project-built Native Symbols
+
+Native symbol loading uses project build-target records and ELF debug information instead of a saved manual file whitelist. All unique project-built libraries for the selected ABI load automatically. Duplicate library names automatically use the newest file modification time; ties use deterministic path ordering. No picker or manual whitelist is used, and every session reevaluates the current build outputs. The resulting relative file list is written atomically to the current project's `.vscode/android-native-symbols.json` for inspection only. The current project/package/ABI's old manual selection is removed without deleting another project's records. Precompiled, external and packaging-copy libraries are not automatically loaded, and missing build evidence does not open a manual external-library picker.
+
+Executable checks: `node --test tests/native-project-libraries.test.js tests/native-symbol-selection.test.js tests/native-codelldb.test.js`. Discovery tests validate build provenance, ELF/DWARF and ABI; selection tests validate automatic loading, duplicate cancellation and stale-record correction; parent-session tests verify exact module commands. These checks do not prove the local binary matches the installed APK or that source breakpoints bind on a real device.
+
 ## Remaining Limits
 
 Real-device breakpoint, step and variable inspection require an authorized Android device, a debuggable APK and matching unstripped native symbols; these were not performed. Device/ADB behavior is covered through boundary mocks, not claimed as a real-device success. NDK discovery preserves the original reverse lexicographic folder selection and does not parse Gradle ndkVersion/ndkPath or local.properties to choose the project build NDK. Explicit debugger.ndkPath is the deterministic project-local override.

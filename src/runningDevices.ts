@@ -3,9 +3,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { ChildProcess, spawn } from 'child_process';
-import { Device, adb, sdkRoot, adbPath, grpcPortFor, grpcTokenFor, listDevices, runBuffer } from './sdk';
+import { Device, adb, sdkRoot, adbPath, nativeScrcpyPath, grpcPortFor, grpcTokenFor, listDevices, runBuffer } from './sdk';
 import { EmulatorSession, grpcSupported } from './emulatorGrpc';
-import { ScrcpySession, bundledJar } from './scrcpy';
+import { NativeScrcpySession, ScrcpySession, bundledJar } from './scrcpy';
 import { Skin, skinForAvd } from './skin';
 
 type Mode = 'emulator' | 'scrcpy' | 'screencap';
@@ -22,8 +22,15 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private get mirrorVisible() { return this.deviceViewMode === 'mirror'; }
   private forced?: Mode; // set after a failure to skip a mode that does not work
   private session?: ScrcpySession;
+  private nativeSession?: NativeScrcpySession;
+  private nativeMirror = true;
   private emu?: EmulatorSession;
   private inflight = false;
+  private videoInFlight = 0;
+  private videoAwaitingKey = false;
+  private static readonly videoWindow = 3;
+  private pendingVideoConfig?: Uint8Array;
+  private pendingVideo?: { kind: 'key' | 'delta'; data: Uint8Array };
   private pending?: { w: number; h: number; data: Uint8Array };
   private viewport = { w: 1080, h: 2200 };
   private mirrorConnection?: { serial: string; controller: AbortController; starting?: Promise<void> };
@@ -31,6 +38,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private readonly mirrorStarts = new Set<Promise<void>>();
   private readonly mirrorReleases = new Set<Promise<void>>();
   private capturing = false;
+  private continuousCapture = false;
   private loop?: NodeJS.Timeout;
   private size = { w: 0, h: 0 };
   private skin?: Skin;
@@ -42,7 +50,9 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   constructor(private extPath: string, private buildAction?: (message: any, serial?: string) => Promise<void>,
     private mirrorPreference?: { visible: boolean; save: (visible: boolean) => PromiseLike<void>; mode?: DeviceViewMode; saveMode?: (mode: DeviceViewMode) => PromiseLike<void> },
     private selectionChanged?: (serial?: string) => Promise<void> | void,
-    private explorer?: ExplorerSurface) {
+    private explorer?: ExplorerSurface,
+    private useNativeMirror = false) {
+    this.nativeMirror = useNativeMirror;
     this.deviceViewMode = mirrorPreference?.mode ?? (mirrorPreference?.visible === false ? 'hidden' : 'mirror');
   }
 
@@ -84,8 +94,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     });
   }
 
-  // 输入 VS Code 视图，安装消息与生命周期监听并输出带配置初始状态的 HTML。
-  // 回归：npm test 的 build panel bridge / initial mirror state 及 mirror preference 断言初始隐藏和握手。
+  // 输入 VS Code 视图，安装消息与生命周期监听并输出带配置初始状态的 HTML；旧视图事件必须在重建后被丢弃。
+  // 回归：npm test 的 build panel bridge / initial mirror state、mirror preference 和 mirror-interaction 事件分发断言初始隐藏、握手及事件归属。
   // 下拉主题随资源传递且不改变 CSP；npm test dropdown 接线断言检查 resolveWebviewView 与 html 调用链。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
@@ -93,7 +103,10 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(path.join(this.extPath, 'media')), media, vscode.Uri.file(path.join(this.extPath, 'media', 'icons'))] };
     const art = (n: string) => view.webview.asWebviewUri(vscode.Uri.file(path.join(this.extPath, 'media', 'icons', n))).toString();
     view.webview.html = html(view.webview, view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')), this.icons(), { dark: art('devices-lineup-dark.png'), light: art('devices-lineup-light.png'), panel: art('../build-panel.js'), style: art('../build-panel.css'), dropdownStyle: art('../dropdowns.css'), mirrorVisible: this.mirrorVisible, deviceViewMode: this.deviceViewMode, processesScript: art('../device-processes/processes.js'), processesStyle: art('../device-processes/processes.css'), explorerScript: art('../device-explorer/main.js'), explorerStyle: art('../device-explorer/main.css') });
-    view.webview.onDidReceiveMessage((m) => this.onMessage(m).catch((e) => this.post({ type: 'error', text: e.message })));
+    view.webview.onDidReceiveMessage((m) => {
+      if (this.view !== view) { return; }
+      return this.onMessage(m).catch((e) => this.post({ type: 'error', text: e.message }));
+    });
     view.onDidChangeVisibility(() => this.restart());
     view.onDidDispose(() => { if (this.view !== view) { return; } this.view = undefined; void this.dispose().catch(error => vscode.window.showErrorMessage(String(error))); });
   }
@@ -124,7 +137,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   }
 
   mirroredSerial(): string | undefined {
-    return this.mirrorVisible && this.view?.visible && (this.session || this.emu || this.loop) ? this.serial : undefined;
+    return this.mirrorVisible && this.view?.visible && (this.nativeSession || this.session || this.emu || this.loop) ? this.serial : undefined;
   }
 
   stopMirroring() {
@@ -139,8 +152,11 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.cancelMirrorIdle();
     this.mirrorConnection?.controller.abort(new Error('Mirroring connection closed')); this.mirrorConnection = undefined;
     if (this.loop) { clearInterval(this.loop); this.loop = undefined; }
+    this.continuousCapture = false;
+    const nativeSession = this.nativeSession; this.nativeSession = undefined; nativeSession?.stop();
     const session = this.session, emu = this.emu; this.session = undefined; this.emu = undefined;
     this.trackMirrorRelease(session?.stop()); emu?.stop(); this.pending = undefined; this.inflight = false;
+    this.videoInFlight = 0; this.videoAwaitingKey = false; this.pendingVideoConfig = undefined; this.pendingVideo = undefined;
   }
 
   // 异步forward清理由提供方持有并报告失败，销毁等待它结束；view-idle回归验证释放任务不遗留。
@@ -151,7 +167,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 
   // 只在首次切出时安排60秒断开，反复切其他视图不重置期限；view-idle回归精确验证59999/60000ms边界。
   private idleMirror(): void {
-    if (this.mirrorIdle || !(this.mirrorConnection || this.session || this.emu || this.loop)) { return; }
+    if (this.mirrorIdle || !(this.mirrorConnection || this.nativeSession || this.session || this.emu || this.loop || this.continuousCapture)) { return; }
     this.mirrorIdle = setTimeout(() => { this.mirrorIdle = undefined; if (!this.mirrorVisible || !this.view?.visible) { this.stop(); this.post({ type: 'loading' }); } }, 60000);
     this.mirrorIdle.unref?.();
   }
@@ -160,7 +176,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private cancelMirrorIdle(): void { if (this.mirrorIdle) { clearTimeout(this.mirrorIdle); this.mirrorIdle = undefined; } }
 
   // 连接状态来自实际会话/截图循环，关闭过的对象不能被当作已连接；view-idle回归验证异常关闭后的重连。
-  private mirrorConnected(): boolean { return !!(this.session?.connected || this.emu?.connected || this.loop); }
+  private mirrorConnected(): boolean { return !!(this.nativeSession?.connected || this.session?.connected || this.emu?.connected || this.loop || this.continuousCapture); }
 
   // 提供方销毁立即关闭投屏并等待创建任务结束，清理Explorer所有闲置会话；view-idle与activate回归验证全资源回收。
   async dispose(): Promise<void> {
@@ -181,7 +197,10 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.cancelMirrorIdle();
     const current = this.mirrorConnection;
     if (current?.starting) { await current.starting; return; }
-    if (current && !current.controller.signal.aborted && this.mirrorConnected()) { this.flush(); return; }
+    if (current && !current.controller.signal.aborted && this.mirrorConnected()) {
+      if (this.continuousCapture && !this.capturing) { void this.capture(true); }
+      this.flush(); return;
+    }
     this.stop();
     if (this.mirrorStarts.size) { await Promise.allSettled([...this.mirrorStarts]); }
     if (!this.serial || !this.mirrorVisible || !this.view?.visible) { return; }
@@ -197,10 +216,33 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   // 创建任务只有一个真实所有者，快速切回共用它，不使用代次标记；view-idle回归验证并发ready/切换零重复start。
   private async connectMirror(connection: { serial: string; controller: AbortController }): Promise<void> {
     connection.controller.signal.throwIfAborted();
+    if (this.nativeMirror) { await this.startNativeScrcpy(connection.serial); return; }
     const mode = this.pickMode(connection.serial);
     if (mode === 'emulator') { await this.startEmulator(connection.serial); }
     else if (mode === 'scrcpy') { await this.startScrcpy(); }
     else { this.startScreencap(); }
+  }
+
+  // 启动独立原生scrcpy窗口，视频解码和渲染完全脱离VS Code；失败直接报告，不回退到高延迟Webview链路。
+  private async startNativeScrcpy(serial: string): Promise<void> {
+    const connection = this.mirrorConnection; if (!connection) { throw new Error('Mirror connection owner is missing'); }
+    const session = new NativeScrcpySession(serial, {
+      onClose: (reason) => {
+        if (connection.controller.signal.aborted || this.nativeSession !== session) { return; }
+        this.nativeSession = undefined;
+        if (reason) { this.post({ type: 'error', text: `Native scrcpy stopped: ${reason}` }); }
+      },
+    }, nativeScrcpyPath());
+    this.nativeSession = session;
+    try {
+      await session.start();
+    } catch (error: any) {
+      if (!connection.controller.signal.aborted) {
+        this.nativeSession = undefined;
+        session.stop();
+        this.post({ type: 'error', text: `Native scrcpy could not start: ${error.message}` });
+      }
+    }
   }
 
   // 用户按钮先保存配置，失败不改变显示状态；npm test mirror preference 回归断言持久化、幂等和失败传播。
@@ -280,19 +322,48 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     this.post({ type: 'rgba', ...f });
   }
 
-  // scrcpy创建与回调归单一连接所有者，闲置期可复用；view-idle回归验证单start、关闭状态及超时。
+  // scrcpy只允许有限视频包进入Webview，待发内容按关键帧优先保留，丢弃delta后等待新的关键帧恢复参考链。
+  private flushVideo() {
+    if (!this.mirrorVisible || !this.view?.visible || this.videoInFlight >= RunningDeviceView.videoWindow) { return; }
+    if (this.pendingVideoConfig) {
+      const data = this.pendingVideoConfig;
+      this.pendingVideoConfig = undefined;
+      this.videoInFlight++;
+      this.post({ type: 'video', kind: 'config', data });
+      return;
+    }
+    const packet = this.pendingVideo;
+    if (!packet || (this.videoAwaitingKey && packet.kind !== 'key')) { return; }
+    this.pendingVideo = undefined;
+    this.videoInFlight++;
+    this.post({ type: 'video', kind: packet.kind, data: packet.data });
+  }
+
+  // scrcpy创建与回调归单一连接所有者，视频只保留一个在途包和最新待发包；view-idle及mirror-interaction回归验证停止、背压和关键帧优先。
   private async startScrcpy() {
     const connection = this.mirrorConnection; if (!connection) { throw new Error('Mirror connection owner is missing'); }
     const serial = this.serial!;
     this.post({ type: 'mode', mode: 'scrcpy' });
+    const maxSize = Math.min(1280, Math.max(200, Math.max(this.viewport.w, this.viewport.h)));
     const session = new ScrcpySession(serial, bundledJar(this.extPath), {
-      onPacket: (kind, data) => { if (!connection.controller.signal.aborted) { this.post({ type: 'video', kind, data: new Uint8Array(data) }); } },
+      onPacket: (kind, data) => {
+        if (connection.controller.signal.aborted) { return; }
+        const bytes = new Uint8Array(data);
+        if (kind === 'config') { this.pendingVideoConfig = bytes; }
+        else if (kind === 'key') { this.pendingVideo = { kind, data: bytes }; this.videoAwaitingKey = false; }
+        else if (!this.videoAwaitingKey) {
+          if (this.pendingVideo?.kind === 'delta') { this.pendingVideo = undefined; this.videoAwaitingKey = true; }
+          else if (!this.pendingVideo) { this.pendingVideo = { kind, data: bytes }; }
+        }
+        this.flushVideo();
+      },
+
       onClose: (reason) => {
         if (connection.controller.signal.aborted) { return; }
         this.session = undefined; this.trackMirrorRelease(session.stop());
         if (reason) { this.post({ type: 'error', text: `Stream stopped: ${reason}` }); }
       },
-    });
+    }, maxSize);
     this.session = session;
     try {
       await session.start();
@@ -309,11 +380,14 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     if (this.mirrorVisible && this.view?.visible) { void this.restart().catch(error => this.post({ type: 'error', text: String(error) })); }
   }
 
-  // 按 android-ide.mirrorIntervalMs 启动截图计时器；需活动镜像会话，无返回值，停止逻辑拥有计时器。配置前缀回归核验读取位置。
+  // 进入截图回退时立即采集；间隔为0时上一帧完成后马上采集下一帧，隐藏期间保留连接归属，否则按配置周期采集。配置前缀回归验证首帧和周期回调。
   private startScreencap() {
     this.post({ type: 'mode', mode: 'screencap' });
-    const every = vscode.workspace.getConfiguration('android-ide').get<number>('mirrorIntervalMs', 150);
-    this.loop = setInterval(() => this.capture(), every);
+    const every = vscode.workspace.getConfiguration('android-ide').get<number>('mirrorIntervalMs', 0);
+    const continuous = every <= 0;
+    this.continuousCapture = continuous;
+    void this.capture(continuous);
+    if (!continuous) { this.loop = setInterval(() => { void this.capture(); }, every); }
   }
 
   // 查询全部设备并发布快照；发现期间通知三行加载状态，初次发现选第一台在线设备，断开则清空并同步日志，已清空不自动回退。
@@ -343,11 +417,12 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     return { back: url(k.back), mask: url(k.mask), lw: k.lw, lh: k.lh, dx: k.dx, dy: k.dy, dw: k.dw, dh: k.dh, radius: k.radius };
   }
 
-  // 截图循环闲置时不发ADB，明确断开中止正在读取的进程；view-idle回归验证信号、串号及非活动零读取。
-  private async capture() {
+  // 截图循环闲置时不发ADB；连续模式只在成功送出一帧后立即取下一帧，隐藏时暂停并在恢复时继续，断开时中止当前读取。view-idle回归验证信号、串号及非活动零读取。
+  private async capture(continuous = false) {
     const connection = this.mirrorConnection;
     if (this.capturing || !connection || !this.mirrorVisible || !this.view?.visible) { return; }
     this.capturing = true;
+    let delivered = false;
     try {
       const png = await runBuffer(adbPath(), ['-s', connection.serial, 'exec-out', 'screencap', '-p'], connection.controller.signal);
       if (connection.controller.signal.aborted || !this.mirrorVisible || !this.view?.visible) { return; }
@@ -355,11 +430,15 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
         this.size = { w: png.readUInt32BE(16), h: png.readUInt32BE(20) };
       }
       this.post({ type: 'frame', data: png.toString('base64'), ...this.size });
+      delivered = true;
     } catch (e: any) {
       if (connection.controller.signal.aborted) { return; }
       this.post({ type: 'error', text: e.message });
       await this.refreshDevices();
-    } finally { this.capturing = false; }
+    } finally {
+      this.capturing = false;
+      if (continuous && delivered && this.mirrorConnection === connection && this.mirrorVisible && this.view?.visible) { void this.capture(true); }
+    }
   }
 
   // 分派 Webview 输入；wake 对当前设备发送只亮屏不切换电源的命令，失败交由消息入口报告。
@@ -389,6 +468,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
       case 'wake': if (s) { await adb(s, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); } return;
       case 'openDM': vscode.commands.executeCommand('android-ide.addDevice'); return;
       case 'viewport': this.viewport = { w: Math.max(200, m.w), h: Math.max(200, m.h) }; if (this.mirrorVisible && this.view?.visible) { this.emu?.setViewport(this.viewport); } return;
+      case 'videoAck': if (m.awaitKey) { this.videoAwaitingKey = true; } this.videoInFlight = Math.max(0, this.videoInFlight - 1); return this.flushVideo();
       case 'ack': this.inflight = false; return this.flush();
       case 'rotate': if (this.emu) { this.emu.rotate(m.dir); return; } if (s) { return this.rotate(s, m.dir); } return;
       case 'record': if (s) { return this.toggleRecording(s); } return;
@@ -556,7 +636,7 @@ body.empty #empty{display:flex}
 <div class="build-surface">
 <div class="build-target-row"><i class="codicon codicon-package" aria-hidden="true"></i><select id="build-target" aria-label="Module and build variant" title="Module and build variant"><button type="button"><selectedcontent></selectedcontent><i id="build-target-loading" class="codicon codicon-loading codicon-modifier-spin build-loading" aria-label="Loading Android variants" hidden></i></button><option value="">No Android variants</option></select></div>
 <div class="build-device-row"><div id="tab"><i class="dot" id="tdot"></i><select id="dev" aria-label="Device" title="Select Device"><button type="button"><span class="dk" id="tic-d">${icons['virtual-dark']}</span><span class="lt" id="tic-l">${icons['virtual-light']}</span><selectedcontent></selectedcontent><i id="build-device-loading" class="codicon codicon-loading codicon-modifier-spin build-loading" aria-label="Loading devices" hidden></i></button><option value="">Select Device</option></select><i class="codicon codicon-chevron-down" id="chev"></i></div><span class="build-view-separator" role="separator" aria-orientation="vertical"></span><div class="build-view-modes" role="group" aria-label="Device view"><button id="build-mirror" title="Show mirroring" aria-label="Show mirroring" aria-pressed="false"><i class="codicon codicon-device-desktop"></i></button><button id="build-explorer" title="Show Device Explorer" aria-label="Show Device Explorer" aria-pressed="false"><i class="codicon codicon-folder-opened"></i></button><button id="build-processes" title="Show Processes" aria-label="Show Processes" aria-pressed="false"><i class="codicon codicon-server-process"></i></button></div></div>
-<div class="build-actions"><button id="build-run" title="Build, install and run"><i id="build-run-icon" class="codicon codicon-play"></i><span id="build-run-label">Run</span></button><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-debug" title="Debug app" aria-label="Debug app"><i class="codicon codicon-debug-alt"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button></div>
+<div class="build-actions"><div class="build-run-control"><select id="build-run-mode" aria-label="Run or debug mode" title="Run or debug mode"><button type="button"><selectedcontent></selectedcontent></button><option value="run">Application</option></select><button id="build-run" title="Build, install and run" aria-label="Run app"><i id="build-run-icon" class="codicon codicon-play"></i></button></div><button id="build-build" title="Build APK" aria-label="Build APK"><i class="codicon codicon-tools"></i></button><button id="build-install" title="Install APK" aria-label="Install APK"><i class="codicon codicon-cloud-download"></i></button><button id="build-refresh" title="Refresh Gradle projects" aria-label="Refresh Gradle projects"><i class="codicon codicon-refresh"></i></button><button id="build-output" title="Show build output" aria-label="Show build output"><i class="codicon codicon-output"></i></button><button id="build-logcat" title="Show Logcat" aria-label="Show Logcat">${icons['logcat']}</button></div>
 <div class="build-status" role="status" aria-live="polite"><i id="build-progress" class="codicon"></i><span id="build-status">No Gradle project</span></div>
 </div></div>
 <section id="device-explorer" hidden></section>
@@ -657,7 +737,8 @@ document.addEventListener('click',()=>menu.style.display='none');
 document.getElementById('m-ext').onclick=()=>send({type:'ext'});document.getElementById('m-log').onclick=()=>send({type:'logcat'});;
 
 // ---- video decoding (scrcpy H.264 annex-B) ----
-let decoder,configData,spsKey,needKey=true;
+// 只在解码积压超过两帧时丢弃delta，避免延迟扩散同时保持连续播放；mirror-interaction.test.js验证队列丢帧与恢复解码。
+let decoder,configData,spsKey,codecName,needKey=true;
 // 创建视频解码器并在实际绘制首帧后退出加载；npm test 的 mirror loading 和 navigation frame updates 验证真实回调。
 function newDecoder(){
  if(decoder&&decoder.state!=='closed')decoder.close();
@@ -673,30 +754,33 @@ function onConfig(d){
  const i=d.findIndex((b,k)=>k>=3&&d[k-3]===0&&d[k-2]===0&&d[k-1]===1&&(b&31)===7);
  const hex=x=>x.toString(16).padStart(2,'0');
  const codec=i>=0?'avc1.'+hex(d[i+1])+hex(d[i+2])+hex(d[i+3]):'avc1.640033';
- if(key!==spsKey||!decoder||decoder.state==='closed'){spsKey=key;newDecoder();decoder.configure({codec,optimizeForLatency:true})}
+ if(key!==spsKey||!decoder||decoder.state==='closed'){spsKey=key;codecName=codec;newDecoder();decoder.configure({codec,optimizeForLatency:true})}
 }
 function onVideo(kind,raw){
  const d=raw instanceof Uint8Array?raw:new Uint8Array(raw);
- if(kind==='config'){onConfig(d);return}
- if(!decoder||decoder.state!=='configured')return;
- if(needKey&&kind!=='key')return;
+ if(kind==='config'){onConfig(d);send({type:'videoAck'});return}
+ if(!decoder||decoder.state!=='configured'){send({type:'videoAck'});return}
+ if(needKey&&kind!=='key'){send({type:'videoAck'});return}
+ if(decoder.decodeQueueSize>2&&kind!=='key'){needKey=true;decoder.reset();decoder.configure({codec:codecName||'avc1.640033',optimizeForLatency:true});send({type:'videoAck',awaitKey:true});return}
  let data=d;
  if(kind==='key'&&configData){data=new Uint8Array(configData.length+d.length);data.set(configData);data.set(d,configData.length)}
  if(kind==='key')needKey=false;
- if(decoder.decodeQueueSize>8&&kind!=='key')return;
  decoder.decode(new EncodedVideoChunk({type:kind==='key'?'key':'delta',timestamp:performance.now()*1000,data}));
+ send({type:'videoAck'});
 }
 
 // ---- input ----
 const rel=e=>{const r=target.getBoundingClientRect();return{x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}};
-let down=null;
+let down=null,movePending=null,moveFrame=0;
+const raf=typeof requestAnimationFrame==='function'?requestAnimationFrame:f=>setTimeout(f,0);
+const caf=typeof cancelAnimationFrame==='function'?cancelAnimationFrame:clearTimeout;
 // 绑定画面输入；主键按下发送幂等唤醒并保留各模式触摸/拖动，右键不触发唤醒。
-// 回归：npm test，tests/mirror-interaction.test.js 的 mirror wake 执行 canvas/img 三模式按下、移动和释放并断言消息。
+// 拖动移动按显示帧合并，保留最新坐标，避免控制消息队列落后于画面。
 function bind(el){
  el.onmousedown=e=>{if(e.button!==0)return;e.preventDefault();el.focus();send({type:'wake'});const p=rel(e);down={...p,t:Date.now()};
   if(mode!=='screencap')send({type:'touch',action:0,...p,w:fw,h:fh})};
- el.onmousemove=e=>{if(down&&mode!=='screencap'&&e.buttons)send({type:'touch',action:2,...rel(e),w:fw,h:fh})};
- const up=e=>{if(!down)return;const u=rel(e);
+ el.onmousemove=e=>{if(down&&mode!=='screencap'&&e.buttons){movePending=rel(e);if(!moveFrame)moveFrame=raf(()=>{moveFrame=0;const p=movePending;movePending=null;if(down&&p)send({type:'touch',action:2,...p,w:fw,h:fh})})}};
+ const up=e=>{if(!down)return;if(moveFrame){caf(moveFrame);moveFrame=0}movePending=null;const u=rel(e);
   if(mode!=='screencap')send({type:'touch',action:1,...u,w:fw,h:fh});
   else if(Math.hypot(u.x-down.x,u.y-down.y)<0.015)send({type:'tap',x:u.x,y:u.y});
   else send({type:'swipe',x:down.x,y:down.y,x2:u.x,y2:u.y,ms:Date.now()-down.t});
@@ -738,7 +822,7 @@ addEventListener('message',({data:m})=>{
  else if(m.type==='rgba')onRgba(m);
  else if(m.type==='recording'){rec.classList.toggle('on',m.on);rec.title=m.on?'Stop recording':'Record screen';clearInterval(tm);timer.textContent='';if(m.on){const t0=Date.now();tm=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timer.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500)}}
  else if(m.type==='frame'){fw=m.w;fh=m.h;img.src='data:image/png;base64,'+m.data;layout();msg.textContent=m.w+'×'+m.h}
- else if(m.type==='mode'){setMode(m.mode);spsKey=undefined;if(m.mode==='scrcpy'&&typeof VideoDecoder==='undefined')send({type:'noDecoder'})}
+ else if(m.type==='mode'){setMode(m.mode);spsKey=undefined;codecName=undefined;if(m.mode==='scrcpy'&&typeof VideoDecoder==='undefined')send({type:'noDecoder'})}
  else if(m.type==='loading')setPresentation('loading');
   else if(m.type==='devices')renderDevices(m);
  else if(m.type==='select'){dev.value=m.serial}

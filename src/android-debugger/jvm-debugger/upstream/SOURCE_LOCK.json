@@ -1,0 +1,282 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "E:/kotlin-debugger-main",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sourcePath": "LICENSE",
+      "bytes": 1912,
+      "sha256": "56477d6d8c29af5665e78d2f1fe7ba551939064856bf8cfadb6e6058ab3ced00"
+    },
+    {
+      "path": "adapter/pom.xml",
+      "sourcePath": "adapter/pom.xml",
+      "bytes": 8066,
+      "sha256": "ff7d0c7a3082616c4966daa09af71d3494e4203c79e4d87d39e507864854fa1d"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/App.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/App.kt",
+      "bytes": 497,
+      "sha256": "d7e3a22507ede95f863a9efb3214dd50857e9bed1eb569e3890332098a84fad0"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Basic.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Basic.kt",
+      "bytes": 1084,
+      "sha256": "920ddcb965141a9b58e410bdd3220d0f5dd1d3cf004d797be80f0b5a2d95b5ad"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Coroutines.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Coroutines.kt",
+      "bytes": 779,
+      "sha256": "b306bcf9e3789ee74c7e4ad5fd569746c448b8ef8be15885559c0ee0197fd86c"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Exceptions.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Exceptions.kt",
+      "bytes": 430,
+      "sha256": "5d68ec89a3258743e9a0aeeae5f911f396dafe583927c17b2a20a23c874031f3"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Generics.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Generics.kt",
+      "bytes": 878,
+      "sha256": "d7d64fe24d6e0eac2420c51cae927f850a5dfc0c1199a7e414ee4874721b2df0"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Inline.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Inline.kt",
+      "bytes": 304,
+      "sha256": "78476f76d05e661ff2973a4b1fe642b5036676997ccba80b8c5b0a46f04375c5"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Lambdas.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Lambdas.kt",
+      "bytes": 726,
+      "sha256": "65a4428fc1c5d32c3818a51f91ad35617fa1d20434a605a8a8b6a21489dad01f"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/Loop.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/Loop.kt",
+      "bytes": 543,
+      "sha256": "ff372b15d79a242de127c49775ce40b6a253c7db2ac27af23d281b49c5946932"
+    },
+    {
+      "path": "adapter/src/fixtures/kotlin/fixture/util/Timing.kt",
+      "sourcePath": "adapter/src/fixtures/kotlin/fixture/util/Timing.kt",
+      "bytes": 534,
+      "sha256": "ca6ea70006ae4ccf65177d2a9590be787a74476fddd6410e8aa1b1d578850ed5"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/Main.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/Main.kt",
+      "bytes": 2973,
+      "sha256": "711d115e5fe9959fdea376f2bd6f02742be76a29a2a4babc32802864ac475b17",
+      "upstreamSha256": "4c7cc0824e724b20500af0e5590fffa93b03565aa770dd8125826b1355fc9037",
+      "adaptation": "JDK诊断设置路径改为android-ide.jvmDebugger.javaHome，避免扩展前缀冲突"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/dap/KotlinDebugServer.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/dap/KotlinDebugServer.kt",
+      "bytes": 25986,
+      "sha256": "8596bdd6da28779112ed2108f161f47ca732f9bd281309a808dc2093b67cf1aa"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/eval/Evaluator.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/eval/Evaluator.kt",
+      "bytes": 46942,
+      "sha256": "925abd136ab02150a80218bee05951e6c9d7654d06f54564bc425da7c66bfade"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/eval/Lexer.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/eval/Lexer.kt",
+      "bytes": 6085,
+      "sha256": "00a1fcbf117bcd110cd55e8fc46eb55c455f69ea86afe492f31e6b9332d79823"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/eval/Parser.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/eval/Parser.kt",
+      "bytes": 7924,
+      "sha256": "02b20273a1bea88655a619a34a0b6d2a93377781de1d123396e789d2166e6058"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/jdi/Kotlin.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/jdi/Kotlin.kt",
+      "bytes": 8405,
+      "sha256": "ce66b1950f9bf593c5445ec05a5beeb6be8fb4bf85b70e84bc922572a107e010"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/jdi/StackBuilder.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/jdi/StackBuilder.kt",
+      "bytes": 9767,
+      "sha256": "be66dde60a522d66b96b0d88623334535587edfb2845a7a66475a6b4c2fcafa4"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/jdi/Values.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/jdi/Values.kt",
+      "bytes": 22923,
+      "sha256": "1e1f2fbd11866e2423f4cc78761071e4a9c1405553b616be1493ce7eb588ea5f"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/BreakpointManager.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/BreakpointManager.kt",
+      "bytes": 19152,
+      "sha256": "e4b1f4173cf3779877402600af4f10cdfd4892cabe7ee0dc49ae1393e0bef416"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/DebugEvents.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/DebugEvents.kt",
+      "bytes": 603,
+      "sha256": "3216fc79e7d3ec74595ad5155c3fe8ddc4143eaa0d89a78ff000215c4a4ff681"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/DebugSession.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/DebugSession.kt",
+      "bytes": 35258,
+      "sha256": "2ac52dfebc35c114ad7ffd613c057185b90aef7009dea440ecf73a57ac21bf33"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/Handles.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/Handles.kt",
+      "bytes": 1461,
+      "sha256": "635776c864bd5c123e6658af2db283f023dc7d8915de58af9e5886e9c46c3be6"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/SessionConfig.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/SessionConfig.kt",
+      "bytes": 5420,
+      "sha256": "f8eba2e032dbeca2e0749f70074dc2b2e4d825275d05b7b0644e2c0bd41a62f8"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/SourceIndex.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/SourceIndex.kt",
+      "bytes": 7138,
+      "sha256": "47e392b365136505c8591cb8d10f8b1c58e913b5bede37d27bfcc089e54c430c"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/session/VmConnector.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/VmConnector.kt",
+      "bytes": 10234,
+      "sha256": "c6649f53e479c08ee83025d9ce2873f8c4b4b1f006ddda381d64b22dc7a777a7"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/util/HitCondition.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/util/HitCondition.kt",
+      "bytes": 791,
+      "sha256": "51174e224d571a7718a811fd688213cc148de131a9647e4fbcb4ebc0cd493d43"
+    },
+    {
+      "path": "adapter/src/main/kotlin/dev/ktdebug/util/Log.kt",
+      "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/util/Log.kt",
+      "bytes": 2050,
+      "sha256": "806598c32096fe5935c8c674ef209f820cc630bfe2ab91accbeabfe53c71ea43"
+    },
+    {
+      "path": "adapter/src/test/kotlin/dev/ktdebug/AttachDebugTest.kt",
+      "sourcePath": "adapter/src/test/kotlin/dev/ktdebug/AttachDebugTest.kt",
+      "bytes": 19817,
+      "sha256": "7b654a3e35a7f183f2c0bb42998cf6069599aa38de06ca7627fc02a7a626eb87",
+      "upstreamSha256": "49282951876e728a38cd9ae09ad2ab5e98e73bc914b264e904d9e7b7db7e4fd1",
+      "adaptation": "迁移适配：四处fixture源路径比较先将反斜杠归一化为正斜杠，兼容Windows并保留全部调试断言"
+    },
+    {
+      "path": "adapter/src/test/kotlin/dev/ktdebug/DapHarness.kt",
+      "sourcePath": "adapter/src/test/kotlin/dev/ktdebug/DapHarness.kt",
+      "bytes": 12537,
+      "sha256": "db88096f5dbf52fc52bcd92bc8b5e4750357bfedea8e9b1b1f294fada3958985"
+    },
+    {
+      "path": "adapter/src/test/kotlin/dev/ktdebug/LaunchDebugTest.kt",
+      "sourcePath": "adapter/src/test/kotlin/dev/ktdebug/LaunchDebugTest.kt",
+      "bytes": 3767,
+      "sha256": "7f45918c8d624dd2eb90cebdccb5990b4ad664ee7de684b4a74e2ed127019ffa"
+    },
+    {
+      "path": "adapter/src/test/kotlin/dev/ktdebug/SpringBootDebugTest.kt",
+      "sourcePath": "adapter/src/test/kotlin/dev/ktdebug/SpringBootDebugTest.kt",
+      "bytes": 14168,
+      "sha256": "01652fdf5ef9dfa481d70a0ebcd668287f0ff3e08e242ff5828f297b359fc4ec",
+      "upstreamSha256": "9fd3b00233d6565ddab10c95a14f880c3aa0a2026d35999ec2dd1ee489b03231",
+      "adaptation": "迁移适配：三处Spring源路径比较先将反斜杠归一化为正斜杠，兼容Windows并保留全部调试断言"
+    },
+    {
+      "path": "adapter/src/test/kotlin/dev/ktdebug/UnitTests.kt",
+      "sourcePath": "adapter/src/test/kotlin/dev/ktdebug/UnitTests.kt",
+      "bytes": 7442,
+      "sha256": "00b628ecefc44e7b24a38ae91ce092756ac9ff47be2af374eba401ba3953def5"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/.vscode/launch.json",
+      "sourcePath": "samples/spring-boot-kotlin-demo/.vscode/launch.json",
+      "bytes": 612,
+      "sha256": "d0accc638a89e2fd929a1b0d98703afd70b8dd81584095107e50e2a44c9e43d1"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/README.md",
+      "sourcePath": "samples/spring-boot-kotlin-demo/README.md",
+      "bytes": 2074,
+      "sha256": "68c96caa079296a7f496ae4fea5962a2d78a5bf8f58f1307a9da5a242546d1c8"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/pom.xml",
+      "sourcePath": "samples/spring-boot-kotlin-demo/pom.xml",
+      "bytes": 3103,
+      "sha256": "4dc3d65ba28e3b4baec0a98dead3b2dac2b33011607576e49b9f7078d735ec52"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/DemoApplication.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/DemoApplication.kt",
+      "bytes": 383,
+      "sha256": "2df27f48df86d7caee4cb7d9b72aab001382793f3f05b8d1400f7c776176be82"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/domain/Models.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/domain/Models.kt",
+      "bytes": 1037,
+      "sha256": "91e9b5204549508740436d2d2e6149936f337bfb9f54032d65347f3294997349"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/repo/Repository.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/repo/Repository.kt",
+      "bytes": 920,
+      "sha256": "e4e793ee1152cf7d14e54284a1f648cf643cbb6d3a3397ffd33d431943daf495"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/service/CatalogClient.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/service/CatalogClient.kt",
+      "bytes": 514,
+      "sha256": "26e7d3ecbcac0285a6630bb2395f06ffe98c018c2549dd0c0f26db693ad795cd"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/service/OrderService.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/service/OrderService.kt",
+      "bytes": 1604,
+      "sha256": "3bb2a2c797f951975a1aaa341904edfe798705feb46f11001a8a6821b50927a5"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/service/PricingService.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/service/PricingService.kt",
+      "bytes": 1252,
+      "sha256": "31954fe67d39653b64d940b5a6c5c692dd164c748b7efa297b3eede095c47f51"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/support/Instrumentation.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/support/Instrumentation.kt",
+      "bytes": 1050,
+      "sha256": "6e8381a5689f9e11b939a5c67d464d8e0d520bd1213367649f3e5555e0da8710"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/web/OrderController.kt",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/kotlin/com/example/demo/web/OrderController.kt",
+      "bytes": 1989,
+      "sha256": "143394283ebf6e00480f23a613dfb65ba8fe86d58bd0740f2394468c303d42b7"
+    },
+    {
+      "path": "samples/spring-boot-kotlin-demo/src/main/resources/application.properties",
+      "sourcePath": "samples/spring-boot-kotlin-demo/src/main/resources/application.properties",
+      "bytes": 85,
+      "sha256": "af8a392b57f06635094524cced7446ec991bf3026bee7bddff5296f1d8c3c8e4"
+    }
+  ]
+}

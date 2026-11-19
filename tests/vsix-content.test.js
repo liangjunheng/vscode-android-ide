@@ -14,7 +14,7 @@ function fixture(t) {
   const manifest = { name: 'android-runtime-fixture', version: '1.0.0', publisher: 'fixture', engines: { vscode: '^1.95.0' }, description: 'Package content regression', main: './dist/extension.js', activationEvents: ['onStartupFinished'], license: 'MIT', repository: { type: 'git', url: 'https://github.com/microsoft/vscode-extension-samples.git' } };
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
   fs.copyFileSync(path.join(__dirname, '../.vscodeignore'), path.join(root, '.vscodeignore'));
-  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
+  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'resources/jvm-debugger/kotlin-debug-adapter.jar', 'resources/jvm-debugger/LICENSE', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
   const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/native-debugger/upstream/src/debugMain.js', 'dist/extension.js.map', 'dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'runtime/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE', 'android-debugger/jvm/adapter.js'];
   for (const file of included.concat(excluded)) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
@@ -26,7 +26,7 @@ function fixture(t) {
 // 直接vsce package必须执行类型检查、生产构建和真实资源完整性门禁，任何失败阻止发布。
 test('direct vsce package runs the production build', () => {
   const script = require('../package.json').scripts['vscode:prepublish'];
-  assert.equal(script, 'npm run typecheck && node esbuild.js --production && node scripts/verify-core-runtime.cjs');
+  assert.equal(script, 'npm run typecheck && npm run build:jvm && node esbuild.js --production && node scripts/verify-core-runtime.cjs');
   assert.equal(script.includes('--if-present'), false);
 });
 
@@ -94,6 +94,10 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
   }
   assert.ok(files.has('resources/platform-tools/runtime-manifest.json'));
   assert.ok(files.has('resources/platform-tools/adb-runtime-provenance.json'));
+  assert.ok(files.has('resources/jvm-debugger/kotlin-debug-adapter.jar'));
+  assert.ok(fs.existsSync(path.join(root, 'resources/jvm-debugger/LICENSE')));
+  assert.ok(files.has('resources/jvm-debugger/LICENSE'));
+  assert.deepEqual(fs.readFileSync(path.join(root, 'resources/jvm-debugger/LICENSE')), fs.readFileSync(path.join(root, 'src/android-debugger/jvm-debugger/upstream/LICENSE')));
   assert.equal([...files].some(name => name.startsWith('runtime/')), false);
   assert.equal(files.has('resources/scrcpy-server.jar'), false);
   assert.equal(files.has('resources/scrcpy-LICENSE.txt'), false);
@@ -143,7 +147,8 @@ async function activateBundle(source, extensionPath) {
     DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2},
     debug: {
       registerDebugAdapterDescriptorFactory: (id, factory) => { state.debuggers.push(id); factories.set(id, factory); return disposable(); },
-      registerDebugConfigurationProvider: (id,provider,trigger) => { state.providers.push(id); if(trigger===2) { assert.equal(provider.resolveDebugConfiguration,undefined); state.dynamicNames.push(...provider.provideDebugConfigurations().map(config=>config.name)); } return disposable(); },
+      registerDebugConfigurationProvider: (id,provider,trigger) => { state.providers.push(id); if(trigger===2) { assert.equal(typeof provider.resolveDebugConfiguration,'function'); state.dynamicNames.push(...provider.provideDebugConfigurations().map(config=>config.name)); } return disposable(); },
+      registerDebugAdapterTrackerFactory: (id, tracker) => { assert.equal(id, 'kotlin-jvm'); assert.equal(typeof tracker.createDebugAdapterTracker, 'function'); return disposable(); },
       onDidStartDebugSession: disposable,
       onDidTerminateDebugSession: disposable,
     },
@@ -160,8 +165,14 @@ async function activateBundle(source, extensionPath) {
   // 通过真实 Native 描述符等待异步注册结算，再释放父适配器；不创建后端进程或连接设备。
   const descriptor = await factories.get('android-tools').createDebugAdapterDescriptor({ id: 'packaged-activation-check', configuration: {} });
   await descriptor.implementation.dispose();
-  assert.deepEqual(state.providers.sort(), ['android-tools', 'android-tools', 'lldb']);
-  assert.deepEqual(state.dynamicNames,['[内置] Android Native']);
+  assert.deepEqual(state.debuggers.sort(), ['android-debug', 'android-tools', 'kotlin-jvm']);
+  assert.deepEqual(state.providers.sort(), ['android-debug', 'android-debug', 'android-tools', 'kotlin-jvm', 'kotlin-jvm', 'lldb']);
+  assert.deepEqual(state.dynamicNames.sort(), [
+    'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
+    'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',
+    'Android: Android Dual(Native and JVM) Debug Launch', 'Android: Android Dual(Native and JVM) Debug Attach',
+    'Kotlin/Java: Attach to JVM',
+  ].sort());
   for (const owned of context.subscriptions) await owned?.dispose?.();
   module.exports.deactivate();
   for (const entries of Object.values(state)) entries.sort();

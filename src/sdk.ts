@@ -22,6 +22,10 @@ export function adbPath() {
   const root = sdkRoot();
   return (root && existingRuntimeFile(sdkToolPath(root, 'adb'))) || exe('adb');
 }
+
+// 读取项目本机配置中的原生scrcpy路径，未配置时交给系统PATH解析；独立窗口回归验证启动参数不经过Webview。
+export const nativeScrcpyPath = (projectRoot?: string) => readProjectLocalConfig(projectRoot).scrcpyPath || exe('scrcpy');
+
 // 模拟器与命令行依赖共用RuntimeContext，缺内置工具时使用外部SDK；runtime-context回归覆盖。
 export function emulatorPath() { return getRuntimeContext()?.dependencies.emulator ?? sdkToolPath(sdkRoot(), 'emulator'); }
 // AVD管理工具使用平台脚本后缀；runtime-context回归验证Windows bat及SDK版本目录。

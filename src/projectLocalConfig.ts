@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 /** 项目本机路径配置；仅来自项目内 JSON，不读取或同步 VS Code 设置。 */
 export interface ProjectLocalConfig {
   sdkPath?: string;
+  scrcpyPath?: string;
   downloadDirectory?: string;
   debugger?: {
     adbPath?: string;
@@ -70,9 +71,9 @@ export function readProjectLocalConfig(projectRoot?: string): ProjectLocalConfig
   } catch (error) {
     throw new Error(`${filename}: invalid JSON: ${String(error)}`, { cause: error });
   }
-  const config = configObject(parsed, ['sdkPath', 'downloadDirectory', 'debugger'], filename, 'config');
+  const config = configObject(parsed, ['sdkPath', 'scrcpyPath', 'downloadDirectory', 'debugger'], filename, 'config');
   const result: ProjectLocalConfig = {};
-  for (const key of ['sdkPath', 'downloadDirectory'] as const) {
+  for (const key of ['sdkPath', 'scrcpyPath', 'downloadDirectory'] as const) {
     if (Object.hasOwn(config, key)) {
       const value = configPath(config[key], root, filename, key);
       if (value !== undefined) result[key] = value;

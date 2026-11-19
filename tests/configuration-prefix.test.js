@@ -28,7 +28,8 @@ test('android-ide configuration schema replaces command and view identities', ()
   const properties = p.contributes.configuration.properties;
   assert.deepEqual(Object.keys(properties).filter(key => key.startsWith('android-ide.')).sort(), [
     'android-ide.deviceViewMode', 'android-ide.embeddedEmulator', 'android-ide.explorer.packageFilter',
-    'android-ide.fixSoftwareRendering', 'android-ide.logcat.maxBytes', 'android-ide.mirrorIntervalMs', 'android-ide.mirrorVisible',
+    'android-ide.fixSoftwareRendering', 'android-ide.logcat.maxBytes', 'android-ide.mirrorIntervalMs', 'android-ide.mirrorVisible', 'android-ide.nativeMirror',
+    'android-ide.jvmDebugger.javaHome', 'android-ide.jvmDebugger.adapterJvmArgs', 'android-ide.jvmDebugger.traceProtocol', 'android-ide.jvmDebugger.logLevel',
   ].sort());
   const declaredSettings = new Set();
   for (const key of Object.keys(properties).filter(key => key.startsWith('android-debug.'))) assert.equal(declaredSettings.has(key), true, key);
@@ -49,7 +50,7 @@ test('machine specific paths are absent from VSCode settings', () => {
   assert.ok(validation.some(item => item.fileMatch.includes('/.vscode/android-ide.local.json') && item.url === './schemas/android-ide.local.schema.json'));
   const schema = require('../schemas/android-ide.local.schema.json');
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(Object.keys(schema.properties).sort(), ['debugger', 'downloadDirectory', 'sdkPath']);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['debugger', 'downloadDirectory', 'scrcpyPath', 'sdkPath']);
   assert.deepEqual(Object.keys(schema.properties.debugger.properties).sort(), ['adbPath', 'lldbDapPath', 'ndkPath', 'symbolSearchPaths']);
   for (const document of ['README.md', 'CONTRIBUTING.md']) {
     const text = fs.readFileSync(path.join(__dirname, '..', document), 'utf8');
@@ -83,7 +84,7 @@ test('runtime registers only android-ide commands and views', () => {
     vscode, './deviceManager': deviceManager,
     './runningDevices': { RunningDeviceView: Provider }, './deviceExplorer': { DeviceExplorerController: Provider },
     './androidBuild': { AndroidBuildController: Provider }, './logcat': { LogcatView: Provider },
-    './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) },
+    './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} },
   });
   extension.activate({ extensionPath: '', subscriptions: [] });
   const p = require('../package.json');
@@ -121,7 +122,7 @@ test('emulator launch arguments read android-ide configuration', async () => {
   assert.deepEqual(gpu, ['/avd']);
 });
 
-// 无设备执行截图定时器入口，输入新配置的间隔；断言默认参数、定时周期及句柄归属，不运行真实计时器。
+// 无设备执行截图定时器入口，输入新配置的间隔；断言立即首帧、定时周期及句柄归属，不运行真实计时器。
 test('screenshot fallback reads android-ide capture interval', () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/runningDevices.ts'), 'utf8');
   const start = source.indexOf('  private startScreencap() {');
@@ -132,15 +133,26 @@ test('screenshot fallback reads android-ide capture interval', () => {
   const ctx = vm.createContext({
     vscode: { workspace: { getConfiguration: section => {
       assert.equal(section, 'android-ide');
-      return { get: (key, fallback) => { assert.equal(key, 'mirrorIntervalMs'); assert.equal(fallback, 150); return 321; } };
+      return { get: (key, fallback) => { assert.equal(key, 'mirrorIntervalMs'); assert.equal(fallback, 0); return 321; } };
     } } },
     setInterval: (fn, ms) => { callback = fn; interval = ms; return 7; },
   });
   vm.runInContext(transformSync(method, { loader: 'ts' }).code, ctx);
-  let captured = false;
-  const messages = [], owner = { post: m => messages.push(m.type), capture: () => { captured = true; } };
+  let captures = 0;
+  const messages = [], owner = { post: m => messages.push(m.type), capture: () => { captures++; } };
   ctx.owner = owner;
   vm.runInContext('startScreencap.call(owner)', ctx);
   assert.equal(interval, 321); assert.equal(owner.loop, 7); assert.deepEqual(messages, ['mode']);
-  callback(); assert.equal(captured, true);
+  assert.equal(captures, 1);
+  callback(); assert.equal(captures, 2);
+
+  let immediateCaptures = 0, immediateInterval = false;
+  const immediate = vm.createContext({
+    vscode: { workspace: { getConfiguration: () => ({ get: (key, fallback) => { assert.equal(key, 'mirrorIntervalMs'); assert.equal(fallback, 0); return 0; } }) } },
+    setInterval: () => { immediateInterval = true; return 8; },
+  });
+  vm.runInContext(transformSync(method, { loader: 'ts' }).code, immediate);
+  immediate.owner = { post() {}, capture: () => { immediateCaptures++; } };
+  vm.runInContext('startScreencap.call(owner)', immediate);
+  assert.equal(immediateCaptures, 1); assert.equal(immediateInterval, false);
 });

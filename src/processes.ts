@@ -3,7 +3,7 @@ import { DeviceExplorerProcesses, ExplorerProcess } from './deviceExplorerProces
 import { selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
 import type { NativeSourceModule } from './androidProjectModel';
 
-/** Build 提供的精确项目模型及可选运行时Native依赖；Attach project回归断言身份/signal和nativeModules缺失、空数组及原始producer元组贯穿提供方。 */
+/** 保留已有调用方的可选Build项目模型类型；Processes调试不调用该提供方，controller回归断言所有模式均零模型查询。 */
 
 // 独立进程视图负责追踪、包过滤、操作与连接释放，Explorer共享区域管理激活及60秒闲置保留。
 // 回归：tests/device-explorer-controller.test.js执行真实本模块，覆盖Files/Processes互斥及tracker关闭。
@@ -21,8 +21,9 @@ export class ProcessesController {
   // 真实追踪句柄存在且未失败/取消才可复用；view-idle回归验证返回时不重复watch及错误后重连。
   get connected(): boolean { return !!this.stopWatching && !this.failure && !this.signal.aborted; }
 
-  // 固定设备和作用域signal，不在构造时建立连接；controller回归断言Files视图零tracker。
-  constructor(private readonly serial: string, private readonly signal: AbortSignal, private readonly post: (message: unknown) => void, private readonly resolveDebugProject?: DebugProjectResolver) {
+  // 固定设备和作用域signal，不在构造时建立连接；保留旧resolver参数兼容调用方，但调试不调用它。
+  // 回归：node --test tests/device-explorer-controller.test.js，验证Files视图零tracker与所有Attach模式零模型。
+  constructor(private readonly serial: string, private readonly signal: AbortSignal, private readonly post: (message: unknown) => void, _resolveDebugProject?: DebugProjectResolver) {
     this.backend = new DeviceExplorerProcesses(serial);
   }
 
@@ -77,8 +78,8 @@ export class ProcessesController {
   // 只释放自己已有的tracker，不等待当前创建任务自身；view-idle回归验证stop只执行一次。
   private async stopTracker(): Promise<void> { const stop = this.stopWatching; this.stopWatching = undefined; await stop?.(); }
 
-  // 动作使用激活signal；内置Native Attach直接绑定设备/PID，不查询Gradle模型，外部配置不注入项目字段。
-  // 回归：Node>=22运行 node --test tests/device-explorer-controller.test.js，断言Native零模型查询、设备/PID/ABI、外部隔离及取消。
+  // 选择三个内置Attach或任意外部配置，确认后绑定当前PID并交给设备连接生命周期；视图隐藏不取消已交接启动。
+  // 回归：process-attach-start.test.js与device-explorer-controller.test.js验证完整菜单、三模式启动、取消及错误通知。
   async handle(message: any, signal: AbortSignal = this.signal): Promise<void> {
     this.check(signal);
     if (!ProcessesController.handles(message.action)) { throw new Error('Unknown Processes action'); }
@@ -87,20 +88,26 @@ export class ProcessesController {
     if (message.action === 'backup' || message.action === 'restore') { throw new Error('Android Studio BackupService integration is not available in this extension'); }
     if (message.action === 'debug') {
       const folder = await this.debugWorkspaceFolder(signal);
-      if (!folder) return;
-      const config = await selectAndroidDebugConfiguration(folder);
       this.check(signal);
-      if (!this.rows.includes(row)) { throw new Error('Selected process is no longer available'); }
+      if (!this.rows.includes(row)) throw new Error('Selected process is no longer available');
+      if (!folder) return;
+      const config = await selectAndroidDebugConfiguration(folder, 'attach');
+      this.check(signal);
+      if (!this.rows.includes(row)) throw new Error('Selected process is no longer available');
       if (!config) return;
-      let selected = config;
-      if (config.type === 'android-tools') {
-        // 直接附加现有进程，不为调试触发Gradle源码模型；符号目录保留配置原值。
-        selected = { ...config, androidProjectRoot: config.androidProjectRoot ?? folder.uri.fsPath };
-        const abi = row.abi && ['armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'].includes(row.abi) ? row.abi : undefined;
-        if (abi && (!selected.native?.abi || selected.native.abi === 'select')) selected = { ...selected, native: { ...selected.native, abi } };
+      const android = config.type === 'android-debug' || config.type === 'android-tools' || (config.type === 'kotlin-jvm' && config.android === true);
+      let selected = android ? { ...config, androidProjectRoot: config.androidProjectRoot ?? folder.uri.fsPath } : config;
+      // Java默认源码由工作区扫描；Native/Dual仅用真实canonical ABI补缺，不覆盖显式选择，也不查询AGP模型。
+      const native = config.type === 'android-tools' || (config.type === 'android-debug' && ['native', 'dual'].includes(config.mode ?? 'native'));
+      const abi = row.abi && ['armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'].includes(row.abi) ? row.abi : undefined;
+      if (native && abi && selected.native?.abi === undefined) selected = { ...selected, native: { ...selected.native, abi } };
+      const packageName = config.packageName ?? row.packageName;
+      try {
+        await startAndroidDebugging(folder, selected, { serial: this.serial, processId: row.pid, pid: row.pid, ...(packageName ? { packageName } : {}), signal: this.signal });
+      } catch (error) {
+        await vscode.window.showErrorMessage('Android process attach failed: ' + String(error));
+        throw error;
       }
-      const mode = selected.type === 'android-tools' && (selected.androidMode === 'kotlin-java' || selected.androidMode === 'native' || selected.androidMode === 'jvm-native') ? selected.androidMode : undefined;
-      await startAndroidDebugging(folder, selected, { serial: this.serial, processId: row.pid, pid: row.pid, packageName: row.packageName, signal, ...(mode ? { mode } : {}) });
       return;
     }
     const answer = await vscode.window.showWarningMessage(message.action + ' ' + (row.name || row.pid) + '?', { modal: true }, 'Continue');

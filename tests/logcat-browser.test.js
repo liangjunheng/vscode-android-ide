@@ -231,6 +231,45 @@ test('Device Tools browser clips long device labels', {skip:!enabled,timeout:600
   }
 });
 
+// LOGCAT_BROWSER=1 node --test --test-name-pattern="run mode" tests/logcat-browser.test.js：真实面板验证纯图标、六项debug、结束复位、宽度缩减及设备弹窗同款样式。
+test('Device Tools run mode browser matches device picker and icon-only actions', {skip:!enabled,timeout:60000}, async t => {
+  const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(new Error('Run mode browser deadline')),45000);t.after(()=>clearTimeout(deadline));
+  const data=await fixture(),page=await browser(t,data,controller.signal),source=await fs.readFile(path.join(root,'src/runningDevices.ts'),'utf8');
+  const markup=source.slice(source.indexOf('<div id="tabs"'),source.indexOf('<section id="device-explorer"')).replace(/\$\{icons\['([^']+)'\]\}/g,(_,key)=>data.icons[key])+'<section id="device-explorer" hidden></section>';
+  const iconsCSS=(await fs.readFile(path.join(root,'media/codicons/codicon.css'),'utf8')).replace(/url\([^)]*\)/g,'url(data:font/ttf;base64,'+(await fs.readFile(path.join(root,'media/codicons/codicon.ttf'))).toString('base64')+')');
+  const css=iconsCSS+source.slice(source.indexOf('<style>')+7,source.indexOf('</style>'))+await fs.readFile(path.join(root,'media/build-panel.css'),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
+  await page.evaluate('document.querySelectorAll("style").forEach(style=>style.remove());document.body.innerHTML='+JSON.stringify(markup)+';document.head.appendChild(Object.assign(document.createElement("style"),{textContent:'+JSON.stringify(css)+'}));window.send=message=>window.__hostMessages.push(message)');
+  await page.evaluate(await fs.readFile(path.join(root,'media/build-panel.js'),'utf8'));
+  const state={type:'buildState',projects:[{id:'root',label:'Project'}],project:'root',targets:[{id:':app:Debug',label:'app | Debug'}],target:':app:Debug',runMode:'run',runModes:[{id:'run',label:'app',action:'run'},...Array.from({length:6},(_,index)=>({id:'debug-'+index,label:'Android debug configuration '+index,action:'debug'}))],busy:false,running:false,status:'Ready'};
+  await page.post(state);await page.post({type:'devices',serial:'phone'});
+  await page.evaluate('document.getElementById("dev").appendChild(Object.assign(document.createElement("option"),{value:"phone",textContent:"Android device"}));document.getElementById("dev").value="phone"');
+  for(const theme of ['dark','light'])for(const width of [240,360,480]){
+    await page.viewport(width);
+    await page.evaluate('document.body.className='+JSON.stringify('vscode-'+theme)+';document.body.style.setProperty("--vscode-menu-background",'+JSON.stringify(theme==='light'?'#fff':'#252526')+');document.body.style.setProperty("--vscode-menu-foreground",'+JSON.stringify(theme==='light'?'#202020':'#ccc')+');document.body.style.setProperty("--vscode-dropdown-background",'+JSON.stringify(theme==='light'?'#fff':'#333')+')');
+    const sizes=await page.evaluate('(()=>{const group=document.querySelector(".build-run-control"),mode=document.getElementById("build-run-mode"),run=document.getElementById("build-run"),actual=mode.getBoundingClientRect().width,before={grid:getComputedStyle(group.parentElement).gridTemplateColumns,width:group.parentElement.getBoundingClientRect().width,group:group.getBoundingClientRect().width};group.style.width="100%";const full=mode.getBoundingClientRect().width,after={grid:getComputedStyle(group.parentElement).gridTemplateColumns,width:group.parentElement.getBoundingClientRect().width,group:group.getBoundingClientRect().width};group.style.removeProperty("width");return{actual,full,before,after,button:run.getBoundingClientRect().width,text:run.textContent.trim(),labels:run.querySelectorAll("span").length}})()');
+    assert.ok(Math.abs(sizes.actual/sizes.full-2/3)<.02,JSON.stringify({width,sizes}));assert.equal(sizes.button,26);assert.equal(sizes.text,'');assert.equal(sizes.labels,0);
+    const properties=['backgroundColor','color','borderRadius','padding','borderWidth','boxShadow','maxHeight','overflowY','fontSize'];
+    const styles=[];
+    for(const id of ['dev','build-run-mode']){
+      const point=await page.evaluate('(()=>{const r=document.getElementById('+JSON.stringify(id)+').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
+      await page.mouse('mousePressed',point.x,point.y);await page.mouse('mouseReleased',point.x,point.y);await page.frames();
+      const actual=await page.evaluate('(()=>{const s=document.getElementById('+JSON.stringify(id)+'),p=getComputedStyle(s,"::picker(select)"),o=getComputedStyle(s.selectedOptions[0]),r=s.getBoundingClientRect(),first=s.options[0].getBoundingClientRect();return{open:s.matches(":open"),appearance:getComputedStyle(s).appearance,popup:Object.fromEntries('+JSON.stringify(properties)+'.map(k=>[k,p[k]])),option:{height:o.minHeight,padding:o.padding,radius:o.borderRadius,background:o.backgroundColor,check:getComputedStyle(s.selectedOptions[0],"::checkmark").content},left:r.left,firstLeft:first.left,inset:parseFloat(p.paddingLeft)+parseFloat(p.borderLeftWidth)}})()');
+      assert.equal(actual.open,true,id);assert.equal(actual.appearance,'base-select',id);assert.ok(Math.abs(actual.firstLeft-actual.inset-actual.left)<1,JSON.stringify(actual));styles.push(actual);await page.key('Escape');
+    }
+    assert.deepEqual(styles[0].popup,styles[1].popup);assert.deepEqual(styles[0].option,styles[1].option);
+    if(width===360)await page.screenshot('run-mode-'+theme);
+  }
+  for(let index=0;index<6;index++){
+    await page.post({...state,runMode:'debug-'+index});
+    assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-alt');
+    assert.equal(await page.evaluate('getComputedStyle(document.getElementById("build-run-icon"),"::before").content'),'"'+String.fromCharCode(0xeb91)+'"');
+    await page.click('build-run');assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'),'run');
+    await page.post({...state,runMode:'debug-'+index,running:true});assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-pause');
+    await page.post({...state,runMode:'debug-'+index,running:false,status:'Stopped'});assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-alt');
+  }
+  await page.post(state);assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-play');
+});
+
 // 构造真实 batch 记录；同毫秒元数据复现独立首行与 msg 内换行边界。
 function item(msg) { return {ts:'2026-11-16 18:00:00.001',pid:123,tid:456,lv:'I',tag:'SharedTag',pkg:'com.browser.fixture',rx:1,msg}; }
 

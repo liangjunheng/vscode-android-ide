@@ -1,8 +1,8 @@
 (function () {
   const get = (id) => document.getElementById(id);
   const project = get('build-project'), target = get('build-target');
-  const status = get('build-status'), run = get('build-run');
-  let state = { busy: false, deviceLoading: true, targets: [] }, serial = '';
+  const status = get('build-status'), run = get('build-run'), runMode = get('build-run-mode');
+  let state = { busy: false, deviceLoading: true, targets: [], runModes: [] }, serial = '';
   let viewMode = document.body.dataset.deviceViewMode || (document.body.dataset.mirrorVisible === 'false' ? 'hidden' : 'mirror');
 
   // 输入宿主选项与选择值，保留下拉按钮及其加载图标；npm test 的 build panel UI 回归验证转义、空列表和选择。
@@ -14,17 +14,19 @@
     select.value = value || '';
   }
 
-  // 分别根据Gradle和设备状态控制对应加载图标；build-panel-ui回归覆盖初始化、同步完成和设备数据完成。
+  // 根据Gradle、设备和运行模式控制加载图标、暂停状态及开始图标；build-panel-ui回归覆盖应用项、六个debug项、选择和结束复位。
   function render() {
     project.disabled = state.busy;
     target.disabled = state.busy || !state.targets.length;
+    runMode.disabled = state.busy || state.running;
+    const selectedMode = (state.runModes || []).find(mode => mode.id === (runMode.value || state.runMode)) || { action: 'run' };
     const stoppable = state.busy || state.running;
     run.disabled = !stoppable && (!serial || !state.target);
-    run.title = stoppable ? 'Stop task or app' : 'Build, install and run';
-    run.setAttribute('aria-label', state.busy ? 'Stop task' : 'Run app');
-    get('build-run-icon').className = 'codicon codicon-' + (stoppable ? 'debug-stop' : 'play');
-    get('build-run-label').textContent = stoppable ? 'Stop' : 'Run';
-    for (const action of ['build', 'install', 'debug']) get('build-' + action).disabled = state.busy || !state.target || (action !== 'build' && !serial);
+    run.title = stoppable ? 'Pause task or app' : selectedMode.action === 'debug' ? 'Start debugging' : 'Build, install and run';
+    run.setAttribute('aria-label', stoppable ? 'Pause task or app' : selectedMode.action === 'debug' ? 'Start debugging' : 'Run app');
+    run.setAttribute('data-mode', selectedMode.action);
+    get('build-run-icon').className = 'codicon codicon-' + (stoppable ? 'debug-pause' : selectedMode.action === 'debug' ? 'debug-alt' : 'play');
+    for (const action of ['build', 'install']) get('build-' + action).disabled = state.busy || !state.target || (action !== 'build' && !serial);
     get('build-logcat').disabled = false;
     get('build-project-loading').hidden = !state.busy;
     get('build-target-loading').hidden = !state.busy;
@@ -55,8 +57,9 @@
   function action(name, value) { send({ type: 'buildPanel', action: name, value }); }
   project.onchange = () => action('project', project.value);
   target.onchange = () => action('target', target.value);
-  run.onclick = () => action(state.busy || state.running ? 'stop' : 'run');
-  for (const name of ['build', 'install', 'debug', 'refresh', 'output']) get('build-' + name).onclick = () => action(name);
+  runMode.onchange = () => { state.runMode = runMode.value; render(); action('runMode', runMode.value); };
+  run.onclick = () => action(state.busy || state.running ? 'stop' : 'run', runMode.value);
+  for (const name of ['build', 'install', 'refresh', 'output']) get('build-' + name).onclick = () => action(name);
   // 日志使用当前设备，投屏开关由宿主确认状态；npm test UI 回归验证按钮消息和 aria-pressed。
   get('build-logcat').onclick = () => send({ type: 'logcat' });
   // 设备选择框后的三个按钮共用唯一模式，重复点击选中项隐藏，不再绑定Wi-Fi按钮；device-view-mode及build-panel-ui回归断言互斥、消息及无旧绑定。
@@ -68,11 +71,14 @@
       state = { ...message, deviceLoading: message.deviceLoading ?? state.deviceLoading };
       options(project, message.projects || [], message.project, 'No Gradle project');
       options(target, message.targets || [], message.target, 'No Android variants');
+      options(runMode, message.runModes || [{ id: 'run', label: 'Application', action: 'run' }], message.runMode || runMode.value || 'run', 'No run mode');
+      state.runMode = runMode.value;
       render();
     } else if (message.type === 'deviceViewMode') { viewMode = message.mode; render();
     } else if (message.type === 'mirrorVisibility') { viewMode = message.mode || (message.visible ? 'mirror' : 'hidden'); render();
     } else if (message.type === 'devices') { serial = message.serial || ''; state.deviceLoading = false; render(); }
     else if (message.type === 'deviceLoading') { state.deviceLoading = message.loading; render(); }
+    else if (message.type === 'error') { state = { ...state, error: message.text }; render(); }
   });
   render();
   action('refresh');

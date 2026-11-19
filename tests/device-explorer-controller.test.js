@@ -35,7 +35,7 @@ async function fixture(options = {}) {
     Uri: { file: p => ({ scheme: 'file', fsPath: p, path: p }), parse: value => ({ scheme: value.split(':')[0], fsPath: (value.split('://')[1] || value), path: (value.split('://')[1] || value) }) },
     commands: { executeCommand: async (...args) => calls.push(['command', ...args]) },
     env: { clipboard: { writeText: async value => calls.push(['clipboard', value]) } },
-    window: { showInformationMessage: async message => { calls.push(['information', message]); }, showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async (list, settings) => { calls.push(['picker', Array.from(list), settings]); return options.quickPick ? options.quickPick(list, settings) : list[0]; } },
+    window: { showErrorMessage: async message => { calls.push(['errorNotification', message]); }, showInformationMessage: async message => { calls.push(['information', message]); }, showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async (list, settings) => { calls.push(['picker', Array.from(list), settings]); return options.quickPick ? options.quickPick(list, settings) : list[0]; } },
     debug: { onDidStartDebugSession: listener => { vscode._debugListener = listener; return { dispose() { if (vscode._debugListener === listener) vscode._debugListener = undefined; } }; }, startDebugging: async (...args) => { calls.push(['debug', ...args]); if (options.debugResult ?? true) vscode._debugListener?.({ configuration: args[1] }); return options.debugResult ?? true; } },
   };
   const debuggerModule = { exports: {} };
@@ -49,7 +49,7 @@ async function fixture(options = {}) {
   const Controller = module.exports.DeviceExplorerController;
   const resolveDebugProject = Object.hasOwn(options, 'resolveDebugProject') ? options.resolveDebugProject : async (packageName, workspaceRoot, signal) => { calls.push(['debugProject', packageName, workspaceRoot, signal]); return { androidProjectRoot: temp, androidModuleRoot: path.join(temp, 'app'), androidVariant: 'debug', androidSourceRoots: [path.join(temp, 'generated-sources')], ...(options.nativeModules !== undefined ? { androidNativeModules: options.nativeModules } : {}) }; };
   const controller = new Controller(message => { posts.push(message); options.onPost?.(message, controller); }, Object.hasOwn(options, 'currentApplicationId') ? options.currentApplicationId : () => 'com.example.app', resolveDebugProject);
-  return { controller, posts, calls, processState, config, temp, get stopCount() { return stopCount; }, async close() { await controller.dispose(); await fsp.rm(temp, { recursive: true, force: true }); } };
+  return { controller, posts, calls, processState, config, temp, vscode, get stopCount() { return stopCount; }, async close() { await controller.dispose(); await fsp.rm(temp, { recursive: true, force: true }); } };
 }
 
 // 验证设备隐藏、同串号复用和串号切换都会关闭旧作用域并发布正确状态。
@@ -161,33 +161,55 @@ test('process actions require owned rows and distinguish kill from force stop', 
   } finally { await f.close(); }
 });
 
+/** Processes只展示Native/Java/Dual Attach，所有模式均直接转发设备身份且零AGP模型。 */
+test('Android process attaches all three modes without project models or installation', async () => {
+  for (const mode of ['native', 'java', 'dual']) {
+    const f = await fixture({ quickPick: items => items.find(item => item.config?.mode === mode), resolveDebugProject: async () => { throw new Error('Debug must not query Gradle'); } });
+    try {
+      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+      f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app', abi: 'arm64-v8a' }]);
+      await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+      const config = f.calls.find(call => call[0] === 'debug')[2];
+      assert.equal(config.type, 'android-debug'); assert.equal(config.mode, mode);
+      assert.equal(config.request, 'attach'); assert.equal(config.pid, 42); assert.equal(config.processId, 42);
+      assert.equal(config.serial, 'phone'); assert.equal(config.packageName, 'com.example.app');
+      assert.equal(config.androidProjectRoot, f.temp); assert.equal(config.androidVariant, undefined);
+      assert.equal(config.java?.sourcePaths, undefined);
+      assert.equal(config.native?.abi, mode === 'java' ? undefined : 'arm64-v8a');
+      assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
+      assert.deepEqual(f.calls.find(call => call[0] === 'picker')[1].map(item => item.config.request), ['attach', 'attach', 'attach']);
+      assert.equal(f.posts.some(message => message.error), false);
+    } finally { await f.close(); }
+  }
+});
+
 // 内置 Native Attach 直接传递真实设备/PID/package/workspace root/canonical ABI；不查询 Build project model。
 test('Android attach built-in Native starts direct Run and Debug without project-model lookup', async () => {
-  const f = await fixture({ quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+  const f = await fixture({ quickPick: items => items.find(item => item.config?.mode === 'native') });
   try {
     await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
     f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app', abi: 'armeabi-v7a' }]);
     await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42, androidModuleRoot: '/forged', androidVariant: 'release' });
     const picker = f.calls.find(call => call[0] === 'picker');
-    assert.deepEqual(picker[1].map(item => item.config.androidMode), ['native']);
+    assert.deepEqual(picker[1].map(item => item.config.mode), ['native', 'java', 'dual']);
     assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
     const launched = f.calls.find(call => call[0] === 'debug')[2];
-    assert.equal(launched.type, 'android-tools'); assert.equal(launched.request, 'attach');
-    assert.equal(launched.androidMode, 'native'); assert.equal(launched.serial, 'phone');
+    assert.equal(launched.type, 'android-debug'); assert.equal(launched.request, 'attach');
+    assert.equal(launched.mode, 'native'); assert.equal(launched.androidMode, undefined); assert.equal(launched.serial, 'phone');
     assert.equal(launched.pid, 42); assert.equal(launched.processId, 42); assert.equal(launched.packageName, 'com.example.app');
     assert.equal(launched.native.abi, 'armeabi-v7a');
     assert.equal(launched.androidProjectRoot, f.temp);
     assert.equal(launched.androidModuleRoot, undefined); assert.equal(launched.androidVariant, undefined); assert.equal(launched.androidSourceRoots, undefined);
     const commandIndex = f.calls.findIndex(call => call[0] === 'command' && call[1] === 'workbench.view.debug');
     const debugIndex = f.calls.findIndex(call => call[0] === 'debug');
-    assert.ok(commandIndex >= 0 && commandIndex < debugIndex);
+    assert.ok(debugIndex >= 0 && commandIndex > debugIndex);
     assert.equal(f.posts.some(message => message.error || message.message === 'Process action complete'), false);
   } finally { await f.close(); }
 });
 
 // 未知包名交真实PID的Native provider解析，UI位数标签不能当ABI。
 test('Android attach forwards unknown package for device discovery and does not guess ABI display labels', async () => {
-  const f = await fixture({ resolveDebugProject: async () => { throw new Error('unknown package must not query an unrelated model'); }, quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+  const f = await fixture({ resolveDebugProject: async () => { throw new Error('unknown package must not query an unrelated model'); }, quickPick: items => items.find(item => item.config?.mode === 'native') });
   try {
     await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
     f.processState.onUpdate([{ pid: 42, name: 'unknown', abi: '64-bit (arm64)' }]);
@@ -205,28 +227,28 @@ test('Android attach Native skips project-model lookup and starts a direct sessi
     { resolveDebugProject: async () => { throw new Error('Gradle model must not be queried'); } },
   ];
   for (const options of cases) {
-    const f = await fixture({ ...options, quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+    const f = await fixture({ ...options, quickPick: items => items.find(item => item.config?.mode === 'native') });
     try {
       await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
       f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
       await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
       const launched = f.calls.find(call => call[0] === 'debug')[2];
       assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
-      assert.equal(launched.type, 'android-tools'); assert.equal(launched.request, 'attach');
-      assert.equal(launched.androidMode, 'native'); assert.equal(launched.serial, 'phone');
+      assert.equal(launched.type, 'android-debug'); assert.equal(launched.request, 'attach');
+      assert.equal(launched.mode, 'native'); assert.equal(launched.androidMode, undefined); assert.equal(launched.serial, 'phone');
       assert.equal(launched.pid, 42); assert.equal(launched.processId, 42);
       assert.equal(launched.packageName, 'com.example.app'); assert.equal(launched.androidProjectRoot, f.temp);
       assert.equal(f.posts.some(message => message.error), false);
     } finally { await f.close(); }
   }
-  const f = await fixture({ nativeModules: [], quickPick: items => items.find(item => item.config?.androidMode === 'native') });
+  const f = await fixture({ nativeModules: [], quickPick: items => items.find(item => item.config?.mode === 'native') });
   try {
     await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
     f.processState.onUpdate([{ pid: 42, name: 'app', packageName: 'com.example.app' }]);
     await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
     const launched = f.calls.find(call => call[0] === 'debug')[2];
     assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
-    assert.equal(launched.androidMode, 'native'); assert.equal(launched.androidProjectRoot, f.temp);
+    assert.equal(launched.mode, 'native'); assert.equal(launched.androidMode, undefined); assert.equal(launched.androidProjectRoot, f.temp);
     assert.equal(launched.androidNativeModules, undefined);
   } finally { await f.close(); }
 });
@@ -255,6 +277,28 @@ test('Attach revalidates process identity and cancellation after configuration s
   }
 });
 
+// workspace选择也是异步边界，PID消失或操作取消后不能再弹调试配置选择或启动会话。
+test('Attach revalidates row and operation signal after workspace selection', async () => {
+  for (const outcome of ['gone', 'cancel']) {
+    let enter, release; const entered = new Promise(resolve => { enter = resolve; });
+    const pick = new Promise(resolve => { release = resolve; });
+    const f = await fixture({ quickPick: () => { enter(); return pick; } });
+    try {
+      const folder = f.vscode.workspace.workspaceFolders[0];
+      f.vscode.workspace.workspaceFolders.push({ name: 'other', uri: { fsPath: f.temp + '-other' } });
+      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+      f.processState.onUpdate([{ pid: 42, packageName: 'com.example.app' }]);
+      const pending = f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 }); await entered;
+      if (outcome === 'gone') f.processState.onUpdate([]);
+      else f.controller.scope.controller.abort();
+      release({ folder }); await pending;
+      assert.equal(f.calls.filter(call => call[0] === 'picker').length, 1);
+      assert.equal(f.calls.some(call => call[0] === 'debug'), false);
+      if (outcome === 'gone') assert.match(f.posts.at(-1).error, /no longer available/);
+    } finally { release(); await f.close(); }
+  }
+});
+
 // Attach project：第三方配置原名和自有字段保留，不调用本扩展的项目模型提供方。
 test('Attach project leaves external configurations and their project mapping untouched', async () => {
   const f = await fixture({ resolveDebugProject: async () => { throw new Error('Must not query external project'); }, quickPick: items => items.find(item => item.config?.type === 'external-debugger') });
@@ -266,6 +310,52 @@ test('Attach project leaves external configurations and their project mapping un
     const launched = f.calls.find(call => call[0] === 'debug')[2];
     assert.equal(launched.name, 'Original Custom Attach'); assert.equal(launched.customField, 17); assert.equal(launched.pid, 42);
     assert.equal(Object.hasOwn(launched, 'androidModuleRoot'), false); assert.equal(Object.hasOwn(launched, 'androidMode'), false);
+  } finally { await f.close(); }
+});
+
+// Processes始终合并三个内置Attach和全部外部配置，选Launch仍绑定当前进程附加且原选项不变。
+test('Processes includes external launch and attach configurations alongside built-in attaches', async () => {
+  for (const scenario of ['launch-only', 'cancel', 'explicit']) {
+    const f = await fixture({ quickPick: items => scenario === 'cancel' ? undefined : items.find(item => item.config.name === 'User config'), resolveDebugProject: async () => { throw new Error('No AGP lookup'); } });
+    try {
+      const selected = { name: 'User config', type: 'android-debug', request: scenario === 'launch-only' ? 'launch' : 'attach', mode: 'dual',
+        packageName: 'com.user.explicit', apkPath: '/explicit.apk', androidProjectRoot: '/root', preLaunchTask: 'prepare',
+        sourcePaths: ['top'], java: { type: 'kotlin-jvm', sourcePaths: ['java'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
+      f.config.launch.push(selected);
+      await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+      f.processState.onUpdate([{ pid: 42, packageName: 'com.row.other', abi: 'arm64-v8a' }]);
+      await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+      const debug = f.calls.find(call => call[0] === 'debug');
+      const picker = f.calls.find(call => call[0] === 'picker');
+      assert.equal(picker[1].length, 4); assert.equal(picker[1][3].config, selected);
+      assert.deepEqual(picker[1].slice(0, 3).map(item => item.config.mode), ['native', 'java', 'dual']);
+      if (scenario === 'cancel') { assert.equal(debug, undefined); assert.equal(f.posts.some(message => message.error), false); }
+      else {
+        const config = debug[2];
+        assert.equal(config.packageName, selected.packageName); assert.equal(config.mode, 'dual'); assert.equal(config.request, 'attach');
+        assert.equal(config.pid, 42); assert.equal(config.processId, 42);
+        assert.equal(config.native.abi, 'x86'); assert.deepEqual(Array.from(config.java.sourcePaths), ['java']);
+        assert.deepEqual(Array.from(config.sourcePaths), ['top']); assert.equal(config.preLaunchTask, 'prepare');
+        assert.equal(config.apkPath, '/explicit.apk'); assert.equal(config.androidProjectRoot, '/root');
+        assert.equal(selected.pid, undefined); assert.equal(selected.native.abi, 'x86');
+        assert.equal(selected.request, scenario === 'launch-only' ? 'launch' : 'attach');
+      }
+      assert.equal(f.calls.some(call => call[0] === 'debugProject' || ['kill', 'forceStop'].includes(call[0])), false);
+    } finally { await f.close(); }
+  }
+});
+
+// 旧Android JVM外部配置也不自动AGP索引，用户sourcePaths必须保留，根目录提供默认扫描范围。
+test('Processes Android JVM attach preserves sourcePaths without invoking the Build resolver', async () => {
+  const f = await fixture({ quickPick: items => items.find(item => item.config?.name === 'JVM'), resolveDebugProject: async () => { throw new Error('No Gradle model'); } });
+  try {
+    f.config.launch.push({ name: 'JVM', type: 'kotlin-jvm', request: 'attach', android: true, sourcePaths: ['user-source'] });
+    await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
+    f.processState.onUpdate([{ pid: 42, packageName: 'com.example.app' }]);
+    await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });
+    const config = f.calls.find(call => call[0] === 'debug')[2];
+    assert.deepEqual(Array.from(config.sourcePaths), ['user-source']); assert.equal(config.androidProjectRoot, f.temp);
+    assert.equal(config.androidVariant, undefined); assert.equal(f.calls.some(call => call[0] === 'debugProject'), false);
   } finally { await f.close(); }
 });
 

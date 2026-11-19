@@ -5,7 +5,7 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 import * as android from './android';
 import { Device } from './commonTypes';
 import { nativeToolchainOverrides, resolveNativeToolchain } from '../../nativeToolchain';
-import { resolveLauncherActivity } from '../../nativeTarget';
+import { adbExec, resolveLauncherActivity } from '../../nativeTarget';
 import { nativeLibraryCommands } from '../../nativeSymbols';
 
 /** 原工厂的宿主适配接口：仅提供配置准备/释放，不提供调试引擎；native-codelldb.test.js通过真实工厂验证。 */
@@ -45,7 +45,11 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     private startup?: Promise<void>;
     private closing?: Promise<void>;
     private resourcesClosing?: Promise<void>;
+    private earlyChildStop?: Promise<PromiseSettledResult<void>[]>;
     private subscriptions: vscode.Disposable[];
+    private readonly controller = new AbortController();
+    private pendingChild?: { type: string; session?: vscode.DebugSession; failure?: Error };
+    private childFailure?: Error;
 
     /** 原会话事件改为会话自有监听，避免延续到扩展结束；native-codelldb.test.js断言监听释放。 */
     constructor(context: vscode.ExtensionContext, session: vscode.DebugSession, private host: NativeSessionHost, private released: () => void) {
@@ -55,16 +59,26 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         this.subscriptions = [vscode.debug.onDidStartDebugSession(this.onDidStartDebugSession), vscode.debug.onDidTerminateDebugSession(this.onDidTerminateDebugSession)];
     }
 
-    /** 原child登记逻辑限定Native和所属父会话；native-codelldb.test.js验证精确child身份。 */
+    /** 仅登记本次正在启动且父身份精确匹配的两类 child；同文件验证外部/错误类型不能冒充启动成功。 */
     private onDidStartDebugSession = (debugSession: vscode.DebugSession) => {
-        if (debugSession.parentSession?.id === this.session.id && debugSession.type === 'lldb') this.childSessions[debugSession.id] = debugSession;
+        const pending = this.pendingChild;
+        if (debugSession.parentSession?.id !== this.session.id || !pending || pending.session || debugSession.type !== pending.type) return;
+        pending.session = debugSession;
+        this.childSessions[debugSession.id] = debugSession;
     };
 
-    /** 原终止事件只响应所属child，完成清理后通知父终止；native-codelldb.test.js覆盖结束及后台错误。 */
+    /** 任一必要 child 退出即取消启动并关闭双方，关闭期间退出不递归；同文件覆盖 start 内退出、Dual 单边退出和清理异常。 */
     private onDidTerminateDebugSession = (debugSession: vscode.DebugSession) => {
         if (!(debugSession.id in this.childSessions)) return;
         delete this.childSessions[debugSession.id];
-        if (!Object.keys(this.childSessions).length) void this.dispose().then(() => this.sendEvent(new debugadapter.TerminatedEvent()), this.host.report);
+        if (this.controller.signal.aborted || this.closing || this.resourcesClosing) return;
+        this.childFailure = new Error(debugSession.type + ' child session terminated');
+        if (this.pendingChild) this.pendingChild.failure = this.childFailure;
+        this.controller.abort(this.childFailure);
+        void this.dispose().then(() => this.sendEvent(new debugadapter.TerminatedEvent()), error => {
+            this.host.report(error);
+            this.sendEvent(new debugadapter.TerminatedEvent());
+        });
     };
 
     /** 保留原DAP控制台输出；native-codelldb.test.js经真实DAP事件通道执行。 */
@@ -82,13 +96,49 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             "sourceLanguages": ["c", "cpp"],
             "androidNativeToolchain": (config as Record<string, unknown>).androidNativeToolchain ?? nativeToolchainOverrides(config.native),
         };
-        let excludeProperties = ["abi", "abiSupported", "abiMap", "sdkRoot", "ndkRoot"];
+        let excludeProperties = ["abi", "abiSupported", "abiMap", "sdkRoot", "ndkRoot", "androidNativeToolchain", "androidLldbServerSocket"];
         if (config.native) for (let key in config.native) if (!excludeProperties.includes(key)) lldbConfig[key] = structuredClone(config.native[key]);
         if (config.androidNativeLibraries?.length) {
             if (lldbConfig.preRunCommands !== undefined && (!Array.isArray(lldbConfig.preRunCommands) || lldbConfig.preRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native preRunCommands must be a string array');
             lldbConfig.preRunCommands = [...(lldbConfig.preRunCommands ?? []), ...nativeLibraryCommands(config.androidNativeLibraries)];
         }
+        Object.assign(lldbConfig, { type: 'lldb', request: 'attach', pid: this.host.processId({ ...config, pid, processId: pid }), androidTarget: config.target.udid, androidPackageName: config.packageName, androidProjectRoot: config.androidProjectRoot });
         return lldbConfig;
+    }
+
+    /** 启动并核验实际 child start，提前终止视为失败；不以 startDebugging 的布尔值伪造会话；同文件覆盖拒绝、缺事件和退出。 */
+    private async startChild(config: vscode.DebugConfiguration): Promise<void> {
+        this.checkOpen();
+        const pending: NonNullable<DebugAdapter['pendingChild']> = { type: config.type };
+        this.pendingChild = pending;
+        try {
+            const success = await vscode.debug.startDebugging(this.session.workspaceFolder, config, { parentSession: this.session });
+            if (pending.failure) throw pending.failure;
+            if (!success) throw new Error((config.type === 'lldb' ? 'CodeLLDB' : 'JVM') + ' rejected the child configuration');
+            if (!pending.session) throw new Error((config.type === 'lldb' ? 'CodeLLDB' : 'JVM') + ' did not report a child session');
+            this.checkOpen();
+        } finally { this.pendingChild = undefined; }
+    }
+
+    /** 克隆 JVM 选项但锁定 Android 身份与 attach，不传用户端口，由 bundled JVM 分配 tcp:0；同文件覆盖嵌套源码优先和防覆盖。 */
+    private prepareJavaDebugConfiguration(pid: string): vscode.DebugConfiguration {
+        const config = this.config;
+        const java = structuredClone(config.java ?? {});
+        for (const field of ['port', 'host', 'hostName', 'androidTarget', 'androidPid', 'apkPath', 'launchActivity', 'signal']) delete java[field];
+        return { ...java, type: 'kotlin-jvm', name: java.name ?? 'Android JVM', request: 'attach', android: true,
+            serial: config.target.udid, target: config.target.udid, pid: Number(pid), processId: Number(pid), packageName: config.packageName,
+            androidProjectRoot: config.androidProjectRoot, projectRoot: config.java?.projectRoot ?? config.projectRoot ?? config.androidProjectRoot ?? this.session.workspaceFolder?.uri.fsPath,
+            sourcePaths: structuredClone(config.java?.sourcePaths ?? config.sourcePaths ?? config.androidSourceRoots) };
+    }
+
+    /** 按模式接线真实子会话，Dual 必须先 Native 再 JVM；只有 Native 执行临时 VM.Resume；同文件六组合与顺序断言。 */
+    private async attachChildren(pid: string, response: DebugProtocol.Response): Promise<void> {
+        const mode = this.config.mode ?? 'native';
+        if (mode !== 'java') await this.attachToProcess(pid, response);
+        if (mode !== 'native') {
+            this.consoleLog('Starting JVM debugger for process ' + pid);
+            await this.startChild(this.prepareJavaDebugConfiguration(pid));
+        } else await this.resumeProcess(pid);
     }
 
     /** 保留原 Native 子会话启动顺序；前置为父配置已解析，宿主持有 server 供失败回滚。未发现本地符号目录仅附加成功后警告，不要求猜路径；
@@ -108,14 +158,12 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             if (!codeLldb.isActive) await codeLldb.activate();
         }
         this.checkOpen();
-        let lldbSuccess = await vscode.debug.startDebugging(this.session.workspaceFolder, lldbConfig, {parentSession: this.session});
-        if (!lldbSuccess) throw new Error('CodeLLDB rejected the native child configuration');
-        if (!Object.keys(this.childSessions).length) throw new Error('CodeLLDB did not report a native child session');
+        await this.startChild(lldbConfig);
         if (!config.androidNativeLibraries?.length && (!Array.isArray(config.native?.symbolSearchPaths) || config.native.symbolSearchPaths.length === 0)) {
-            void vscode.window.showWarningMessage('Android Native debugger attached, but no local Native .so files were found in symbolSearchPaths. C/C++ source breakpoints may not bind. Source indexing does not guarantee matching debug symbols are available.');
+            void vscode.window.showWarningMessage('Android Native debugger attached, but no project-built .so files with debug information were found for this ABI. Build the project with Native debug information and use the matching APK. External and precompiled libraries are not loaded automatically.');
         }
         this.checkOpen();
-        response.success = lldbSuccess;
+        response.success = true;
         this.consoleLog('Attached to process ' + pid);
     }
 
@@ -134,35 +182,39 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     protected async attachRequest(response: DebugProtocol.AttachResponse): Promise<void> {
         await this.beginRequest(response, async () => {
             let pid = String(this.host.processId(this.config));
-            await this.attachToProcess(pid, response);
-            await this.resumeProcess(pid);
+            await this.attachChildren(pid, response);
         });
     }
 
-    /** 原安装/启动/取进程/attach/resume顺序保留；沿用上游规则取启动后JDWP列表最后一项作为Native PID，同文件launch回归。 */
+    /** 仅显式 APK 安装一次，无 -W 启动后按精确包查询唯一 PID；Java 不解析 NDK，attach 不进入本路径；同文件六组合/PID/取消回归。 */
     protected async launchRequest(response: DebugProtocol.LaunchResponse): Promise<void> {
         await this.beginRequest(response, async () => {
             let config = this.config;
             let target: Device = config.target;
+            const signal = this.controller.signal;
+            const javaOnly = config.mode === 'java';
+            const adb = javaOnly ? config.androidAdbPath : resolveNativeToolchain(config.androidProjectRoot, nativeToolchainOverrides(config.native)).adb;
             if (config.apkPath) {
                 this.consoleLog('Installing ' + config.apkPath);
-                await android.installApp(target, config.apkPath);
+                await adbExec(adb, target.udid, ['install', '-r', config.apkPath], signal);
                 this.checkOpen();
-                config.packageName ||= await android.getPackageNameFromApk(config.apkPath, config.androidProjectRoot, nativeToolchainOverrides(config.native));
+                if (!config.packageName) {
+                    if (javaOnly) throw new Error('Java launch with apkPath requires packageName');
+                    config.packageName = await android.getPackageNameFromApk(config.apkPath, config.androidProjectRoot, nativeToolchainOverrides(config.native));
+                }
             }
             if (!config.packageName || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName)) throw new Error('A valid package name is required.');
-            const toolchain = resolveNativeToolchain(config.androidProjectRoot, nativeToolchainOverrides(config.native));
-            config.launchActivity ||= await resolveLauncherActivity(toolchain.adb, target.udid, config.packageName);
+            config.launchActivity ||= await resolveLauncherActivity(adb, target.udid, config.packageName, signal);
             this.checkOpen();
-            this.consoleLog('Launching the app activity ' + config.packageName + '/' + config.launchActivity);
-            await android.launchApp(target, config.packageName, config.launchActivity);
+            const component = config.packageName + '/' + config.launchActivity;
+            if (!/^[\w.$]+\/[\w.$]+$/.test(component)) throw new Error('Invalid Android launch component');
+            this.consoleLog('Launching the app activity ' + component);
+            const output = await adbExec(adb, target.udid, ['shell', 'am', 'start', '-D', '-n', component], signal);
+            if (/Error:|Exception|Status:\s*(?!ok\b)\S+/i.test(output)) throw new Error('Android launch failed: ' + output.trim());
             this.checkOpen();
-            // 沿用原项目Launch逻辑：取启动后JDWP列表的最后一个进程，避免设备返回的进程名与包名不一致时误报get-pid。
-            let processList = await android.getProcessList(target, false);
-            let process = processList.length ? processList[processList.length - 1] : undefined;
-            if (!process?.pid) throw new Error("Could not get pid for the app. Please ensure that the app is launched correctly.");
-            await this.attachToProcess(process.pid, response);
-            await this.resumeProcess(process.pid);
+            const pid = (await adbExec(adb, target.udid, ['shell', 'pidof', config.packageName], signal)).trim();
+            this.host.processId({ ...config, pid, processId: pid });
+            await this.attachChildren(pid, response);
         });
     }
 
@@ -170,7 +222,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     private async beginRequest(response: DebugProtocol.Response, action: () => Promise<void>): Promise<void> {
         if (this.startup || this.closing) { response.success = false; response.message = 'Native session has already started or closed'; this.sendResponse(response); return; }
         this.startup = (async () => {
-            try { this.config = await this.host.resolveSession(this.session.configuration); this.checkOpen(); await action(); response.success = true; }
+            try { this.config = await this.host.resolveSession({ ...this.session.configuration, signal: this.controller.signal }); this.checkOpen(); await action(); response.success = true; }
             catch (error) {
                 let failure = error;
                 try { await this.closeResources(); } catch (cleanup) { failure = new AggregateError([error, cleanup], 'Native startup and cleanup failed'); }
@@ -182,7 +234,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     }
 
     /** 已请求关闭则阻止后续异步启动与resume；native-codelldb.test.js门闩验证。 */
-    private checkOpen(): void { if (this.closing) throw new Error('Native session is closing'); }
+    private checkOpen(): void { if (this.childFailure) throw this.childFailure; this.controller.signal.throwIfAborted(); if (this.closing) throw new Error('Native session is closing'); }
 
     /** 原disconnect仍等待本会话child与JDWP，额外等待自有server并返回清理错误；同文件disconnect回归。 */
     protected async disconnectRequest(response: DebugProtocol.DisconnectResponse): Promise<void> {
@@ -191,14 +243,31 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         this.sendResponse(response);
     }
 
-    /** 多入口共享关闭Promise；native-codelldb.test.js验证关闭中启动和重复dispose。 */
+    /** 关闭时先取消 ADB 并停止已出现 child，解除仍在 startDebugging 的依赖，再等待启动结算；同文件门闩验证不死锁和错误聚合。 */
     override async dispose(): Promise<void> {
-        await (this.closing ||= (async () => { try { await this.startup; await this.closeResources(); } finally { this.releaseListeners(); super.dispose(); } })());
+        if (!this.closing) {
+            this.controller.abort(this.childFailure ?? new Error('Native session is closing'));
+            this.closing = Promise.resolve().then(async () => {
+                const errors: unknown[] = [];
+                try {
+                    const children = Object.values(this.childSessions);
+                    this.childSessions = {};
+                    this.earlyChildStop = Promise.allSettled(children.map(child => vscode.debug.stopDebugging(child)));
+                    const results = await this.earlyChildStop;
+                    errors.push(...results.filter((value): value is PromiseRejectedResult => value.status === 'rejected').map(value => value.reason));
+                    await this.startup;
+                    try { await this.closeResources(); } catch (error) { errors.push(error); }
+                    if (errors.length) throw new AggregateError(errors, 'Android sessions cleanup failed');
+                } finally { this.releaseListeners(); super.dispose(); }
+            });
+        }
+        await this.closing;
     }
 
     /** child先结束，再结算server/JDWP，所有失败聚合；native-codelldb.test.js验证顺序与等待。 */
     private async closeResources(): Promise<void> {
         await (this.resourcesClosing ||= (async () => {
+            await this.earlyChildStop;
             const children = await Promise.allSettled(Object.values(this.childSessions).map(child => vscode.debug.stopDebugging(child)));
             const resources: Promise<unknown>[] = [];
             if (this.socket) resources.push(this.host.releaseNative(this.socket));

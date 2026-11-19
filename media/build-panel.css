@@ -17,16 +17,19 @@
 #tab #tdot{display:none!important}
 .build-actions{display:flex;gap:3px;align-items:center;min-width:0;height:29px}
 .build-actions button,.build-view-modes button{width:26px;height:26px;border-radius:4px;flex:none}
-.build-actions #build-run{width:auto;min-width:58px;flex:1;justify-content:flex-start;gap:6px;padding:0 8px;background:var(--vscode-button-secondaryBackground);font:inherit}
+.build-run-control{display:flex;width:calc((100% - 26px) * 2 / 3 + 26px);min-width:0;height:28px}
+#build-run-mode{display:inline-flex;align-items:center;gap:8px;padding:2px 6px;border:1px solid var(--vscode-dropdown-border,var(--vscode-input-border,var(--vscode-panel-border,#555)));border-radius:6px;background:var(--vscode-dropdown-background,var(--vscode-input-background));color:inherit;font:inherit;min-width:0;flex:1;overflow:hidden;cursor:pointer;box-sizing:border-box}
+#build-run{width:26px!important;min-width:26px!important;justify-content:center;padding:0;border-radius:0 4px 4px 0!important;background:var(--vscode-button-secondaryBackground);font:inherit}
 #build-run .codicon{color:var(--vscode-testing-iconPassed,#73c991)}
+#build-run[data-mode="debug"] .codicon{color:var(--vscode-icon-foreground)}
 button:disabled{opacity:.4;cursor:default}
 .build-status{display:flex;align-items:center;gap:5px;min-width:0;height:19px;font-size:11px;color:var(--vscode-descriptionForeground)}
 #build-status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 #build-status.failed{color:var(--vscode-errorForeground)}
 .build-status>.codicon{flex:none}
 select:focus-visible,button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}
-@media(max-width:260px){#build-root-count{display:none}.build-actions{gap:1px}.build-actions button{width:23px}.build-actions #build-run{min-width:45px;padding:0 4px}}
-.build-actions{display:grid;grid-template-columns:minmax(20px,1fr) repeat(6,minmax(16px,26px));gap:2px}
+@media(max-width:260px){#build-root-count{display:none}.build-actions{gap:1px}.build-actions button{width:23px}}
+.build-actions{display:grid;grid-template-columns:minmax(80px,1fr) repeat(5,minmax(16px,26px));gap:2px}
 .build-view-separator{height:18px;width:1px;flex:none;background:var(--vscode-panel-border,#555)}
 .build-view-modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;height:26px;min-width:0;flex:0 0 82px}
 .build-view-modes button[aria-pressed="true"]{background:var(--vscode-toolbar-activeBackground,var(--vscode-list-inactiveSelectionBackground))}
@@ -35,5 +38,5 @@ select:focus-visible,button:focus-visible{outline:1px solid var(--vscode-focusBo
 .build-actions button svg{width:16px;height:16px}
 #build-mirror[aria-pressed="true"]{background:var(--vscode-toolbar-activeBackground,var(--vscode-list-inactiveSelectionBackground))}
 body.mirror-hidden #wrap,body.mirror-hidden #bar,body.mirror-hidden #msg,body.mirror-hidden #empty{display:none}
-@media(max-width:300px){.build-actions #build-run-label{display:none}.build-actions #build-run{justify-content:center;padding:0}}
+@media(max-width:300px){.build-actions #build-run{justify-content:center;padding:0}}
 #build-logcat svg{width:20px;height:20px;max-width:100%;flex:none}

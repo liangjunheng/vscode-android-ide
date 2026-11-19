@@ -1,11 +1,13 @@
 import type * as vscode from 'vscode';
 import type { Device } from 'appium-adb';
 
-/** Native-only Android 调试配置；父会话把它转换为 CodeLLDB 子会话。 */
+/** 统一 Android 三模式配置；android-tools 兼容 Native-only，android-debug 由父会话接线 CodeLLDB/JVM children。 */
 export interface AndroidNativeDebugConfiguration extends vscode.DebugConfiguration {
-  type: 'android-tools';
+  type: 'android-tools' | 'android-debug';
   androidMode?: 'native';
-  mode?: 'native';
+  mode?: 'native' | 'java' | 'dual';
+  java?: { type?: 'kotlin-jvm'; name?: string; sourcePaths?: string[]; [option: string]: unknown };
+  sourcePaths?: string[];
   target?: string | (Device & { androidProjectRoot?: string });
   serial?: string;
   pid?: number | string;

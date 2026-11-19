@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 
-/** 使用主工具链ADB执行argv，Node signal管理取消；native-target.test.js断言参数、取消和原始错误cause。 */
+/** ADB使用argv、30秒命令边界和调用方取消信号；native-target.test.js验证超时参数、取消及原始错误cause。 */
 export function adbExec(adb: string, serial: string, args: string[], signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(adb, ['-s', serial, ...args], { windowsHide: true, maxBuffer: 64 * 1024 * 1024, signal }, (error, stdout, stderr) => {
+    execFile(adb, ['-s', serial, ...args], { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 30000, signal }, (error, stdout, stderr) => {
       if (error) reject(new Error(String(stderr || stdout || error.message).trim(), { cause: error })); else resolve(String(stdout));
     });
   });

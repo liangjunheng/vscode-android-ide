@@ -15,7 +15,7 @@ function fixture() {
 test('Native default Activity resolves exact selected app component through argv and preserves cancellation signal', async () => {
   const f = fixture(); f.output = 'priority=0\r\ncom.other/Other\r\ncom.example.app/.MainActivity\r\n'; const signal = new AbortController().signal;
   assert.equal(await f.api.resolveLauncherActivity('adb with space', 'serial', 'com.example.app', signal), '.MainActivity');
-  assert.equal(f.calls[0].command, 'adb with space'); assert.equal(f.calls[0].options.signal, signal); assert.equal(f.calls[0].options.windowsHide, true);
+  assert.equal(f.calls[0].command, 'adb with space'); assert.equal(f.calls[0].options.signal, signal); assert.equal(f.calls[0].options.windowsHide, true); assert.equal(f.calls[0].options.timeout, 30000);
   assert.deepEqual(Array.from(f.calls[0].args), ['-s', 'serial', 'shell', 'cmd', 'package', 'resolve-activity', '--brief', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', 'com.example.app']);
 });
 

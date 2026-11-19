@@ -9,5 +9,7 @@ resources/platform-tools/*/* -text
 resources/licenses/** -text
 src/android-debugger/native-debugger/upstream/source/** -text
 src/android-debugger/native-debugger/upstream/LICENSE -text
+src/android-debugger/jvm-debugger/upstream/** -text
+src/android-debugger/jvm-debugger/java.ts -text
 # Upstream license documents are opaque payloads, not locally formatted text.
 resources/platform-tools/*/NOTICE.txt -diff
