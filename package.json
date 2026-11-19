@@ -53,7 +53,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "*",
+    "workspaceContains:**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}",
     "onDebugResolve:android-tools",
     "onDebugDynamicConfigurations:android-tools",
     "onDebugResolve:android-debug",
@@ -80,14 +80,16 @@
         {
           "id": "androidTools",
           "title": "Device Tools",
-          "icon": "media/icons/device-manager.svg"
+          "icon": "media/icons/device-manager.svg",
+          "when": "android-ide.hasAndroidProject"
         }
       ],
       "panel": [
         {
           "id": "androidLogcat",
           "title": "Logcat",
-          "icon": "media/icons/logcat.svg"
+          "icon": "media/icons/logcat.svg",
+          "when": "android-ide.hasAndroidProject"
         }
       ]
     },
@@ -96,14 +98,16 @@
         {
           "type": "webview",
           "id": "android-ide.runningDevice",
-          "name": "Device Tools"
+          "name": "Device Tools",
+          "when": "android-ide.hasAndroidProject"
         }
       ],
       "androidLogcat": [
         {
           "type": "webview",
           "id": "android-ide.logcat",
-          "name": "Logcat"
+          "name": "Logcat",
+          "when": "android-ide.hasAndroidProject"
         }
       ]
     },
@@ -179,6 +183,12 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "android-ide.showLogcat",
+          "when": "android-ide.hasAndroidProject"
+        }
+      ],
       "view/title": [
         {
           "command": "android-ide.createAvd",

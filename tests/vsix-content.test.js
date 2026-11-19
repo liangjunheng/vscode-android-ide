@@ -135,14 +135,28 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
 // 输入实际bundle文本和安装根，在宿主API边界替换VS Code但禁止访问源码相对模块；返回真实注册项。
 // Node>=22执行本文件：生产/开发注册项相同，资源逐字节相同，且停用后释放控制器。
 async function activateBundle(source, extensionPath) {
-  const state = { commands: [], views: [], debuggers: [], providers: [], dynamicNames: [] };
+  const state = { commands: [], views: [], debuggers: [], providers: [], dynamicNames: [], contexts: [] };
   const factories = new Map();
   const disposable = () => ({ dispose() {} });
   const vscode = {
     Uri: { file: filename => ({ fsPath: filename }) },
-    workspace: { isTrusted: true, workspaceFolders: [], getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: disposable },
+    workspace: {
+      isTrusted: true,
+      workspaceFolders: [],
+      findFiles: async () => [],
+      getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }),
+      onDidChangeConfiguration: disposable,
+      onDidCreateFiles: disposable,
+      onDidDeleteFiles: disposable,
+      onDidRenameFiles: disposable,
+      onDidChangeWorkspaceFolders: disposable,
+    },
     window: { createOutputChannel: () => ({ appendLine() {}, dispose() {}, show() {} }), registerWebviewViewProvider: id => { state.views.push(id); return disposable(); }, showErrorMessage: async () => undefined },
-    commands: { registerCommand: id => { state.commands.push(id); return disposable(); } },
+    commands: {
+      registerCommand: id => { state.commands.push(id); return disposable(); },
+      executeCommand: async (id, ...args) => { if (id === 'setContext') state.contexts.push(args); },
+    },
+
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2},
     debug: {
@@ -167,6 +181,7 @@ async function activateBundle(source, extensionPath) {
   await descriptor.implementation.dispose();
   assert.deepEqual(state.debuggers.sort(), ['android-debug', 'android-tools', 'kotlin-jvm']);
   assert.deepEqual(state.providers.sort(), ['android-debug', 'android-debug', 'android-tools', 'kotlin-jvm', 'kotlin-jvm', 'lldb']);
+  assert.deepEqual(state.contexts, [['android-ide.hasAndroidProject', false]]);
   assert.deepEqual(state.dynamicNames.sort(), [
     'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
     'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',

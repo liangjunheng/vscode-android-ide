@@ -71,8 +71,15 @@ test('manifest exposes the unified Android debug fallback and real extension ent
   const p = require('../package.json');
   assert.equal(p.main, './dist/extension.js');
   assert.match(fs.readFileSync(path.join(root, 'src/extension.ts'), 'utf8'), /export function activate\(/);
+  assert.ok(p.activationEvents.includes('workspaceContains:**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}'));
+  assert.equal(p.activationEvents.includes('*'), false);
   assert.ok(p.activationEvents.includes('onDebugResolve:android-debug'));
   assert.ok(p.activationEvents.includes('onDebugDynamicConfigurations:android-debug'));
+  assert.equal(p.contributes.viewsContainers.activitybar[0].when, 'android-ide.hasAndroidProject');
+  assert.equal(p.contributes.viewsContainers.panel[0].when, 'android-ide.hasAndroidProject');
+  assert.equal(p.contributes.views.androidTools[0].when, 'android-ide.hasAndroidProject');
+  assert.equal(p.contributes.views.androidLogcat[0].when, 'android-ide.hasAndroidProject');
+  assert.deepEqual(p.contributes.menus.commandPalette, [{ command: 'android-ide.showLogcat', when: 'android-ide.hasAndroidProject' }]);
   assert.deepEqual(p.contributes.debuggers.map(d => d.type), ['kotlin-jvm', 'android-debug', 'android-tools', 'lldb']);
   assert.deepEqual(p.extensionDependencies, ['vadimcn.vscode-lldb']);
   assert.equal(p.scripts['build:jvm'], 'node scripts/build-jvm-debugger.cjs');

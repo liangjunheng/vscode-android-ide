@@ -9,9 +9,27 @@ import { createAndroidDebugAdapterFactory } from './android-debugger/native-debu
 import { initializeRuntimeContext, resetRuntimeContext } from './runtimeContext';
 import { registerJvmDebugger } from './android-debugger/jvm-debugger/adapter';
 
+/** 检测工作区是否包含 Android 项目入口，并同步控制设备视图的工作台可见性。 */
+async function refreshGradleProjectContext(): Promise<void> {
+  const files = await vscode.workspace.findFiles(
+    '**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}',
+    '**/{node_modules,.git,.gradle,build}/**',
+    1,
+  );
+  await vscode.commands.executeCommand('setContext', 'android-ide.hasAndroidProject', files.length > 0);
+}
+
 // 注册共享设备区域及配置监听，以延迟只读闭包将 Build 当前选择提供给 Explorer；输入扩展上下文，订阅交其释放，无返回值。
 // 构建状态广播两侧，动作共用一个控制器；node --test tests/build-panel-ui.test.js 断言双向选择/启停接线，tests/device-selection-sync.test.js 断言设备同步；mirror-configuration.test.js覆盖配置接线。
 export function activate(ctx: vscode.ExtensionContext) {
+  // Android 工作区才显示设备视图；文件增删改名或工作区切换后重新计算上下文。
+  refreshGradleProjectContext().catch(error => vscode.window.showErrorMessage(String(error)));
+  ctx.subscriptions.push(
+    vscode.workspace.onDidCreateFiles(() => refreshGradleProjectContext().catch(error => vscode.window.showErrorMessage(String(error)))),
+    vscode.workspace.onDidDeleteFiles(() => refreshGradleProjectContext().catch(error => vscode.window.showErrorMessage(String(error)))),
+    vscode.workspace.onDidRenameFiles(() => refreshGradleProjectContext().catch(error => vscode.window.showErrorMessage(String(error)))),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => refreshGradleProjectContext().catch(error => vscode.window.showErrorMessage(String(error)))),
+  );
   // 初始化唯一运行时上下文，集中管理当前平台和扩展内置依赖。
   initializeRuntimeContext(ctx.extensionPath);
   // 显式四态配置优先，未配置则兼容旧布尔项；device-view-mode回归验证迁移与设置页同步。

@@ -813,6 +813,26 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
     await page.post({type:'batch',items:[item('CACHE-APPENDED-LAST')]});await atEnd(page,'CACHE-APPENDED-LAST');
   });
 
+  // 搜索按可见字段从左到右、再按日志行从上到下循环；目标匹配同时必须完整落在视口内。
+  // 前置为长字段和多个同词记录，成功条件是计数顺序、当前词矩形及横纵滚动后的实际可见性。
+  await t.test('search follows visual order and keeps the match visible',async()=>{
+    await page.viewport(480); await page.post({type:'reset'}); await page.format('standard');
+    const keyword = 'ORDERED_MATCH';
+    await page.post({type:'batch',items:[
+      {...item('first message '+keyword),msg:'prefix '.repeat(100)+keyword,tag:keyword,pkg:'package.one'},
+      {...item('second message '+keyword),tag:'tag.two',pkg:'package.two'},
+      {...item('third message '+keyword),tag:'tag.three',pkg:'package.three'}
+    ]});
+    await page.search(keyword);
+    const state = () => page.evaluate("(()=>{const sc=document.getElementById('sc'),box=sc.getBoundingClientRect(),row=document.querySelector('.row.cur'),mark=row?.querySelector('mark'),r=mark?.getBoundingClientRect();return{count:document.getElementById('scount').textContent,text:row?.textContent,scrollTop:sc.scrollTop,scrollLeft:sc.scrollLeft,visible:!!r&&r.left>=box.left-1&&r.right<=box.right+1&&r.top>=box.top-1&&r.bottom<=box.bottom+1}})()");
+    assert.equal((await state()).count,'1/4'); assert.equal((await state()).visible,true);
+    await page.key('Enter'); assert.equal((await state()).count,'2/4'); assert.equal((await state()).visible,true);
+    await page.key('Enter'); assert.equal((await state()).count,'3/4'); assert.equal((await state()).visible,true);
+    await page.key('Enter'); assert.equal((await state()).count,'4/4'); assert.equal((await state()).visible,true);
+    await page.key('Enter'); assert.equal((await state()).count,'1/4'); assert.equal((await state()).visible,true);
+    await page.post({type:'reset'});
+  });
+
   // 虚拟和 wrap 均覆盖：非跟随追加及真实 1MiB 前部淘汰后，存活锚点仍位于相同屏幕位置。
   await t.test('surviving scroll anchors stay stable through append and prefix eviction',async()=>{
     for(const wrap of [false,true]){
@@ -882,6 +902,24 @@ test('Logcat real browser regressions',{skip:enabled?false:'Set LOGCAT_BROWSER=1
       await page.evaluate("[...document.querySelectorAll('.menu div')].find(n=>n.textContent==='Copy message').click()");
       assert.deepEqual(await page.evaluate("window.__hostMessages.filter(m=>m.type==='copy').at(-1)"),{type:'copy',text:record.msg});
     }
+    await page.post({type:'reset'});
+    await page.post({type:'batch',items:[item('clear first'),item('clear second\nwith newline')]});
+    await page.evaluate("document.querySelector('#win .row .m').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:80,clientY:140}))");
+    assert.equal(await page.evaluate("[...document.querySelectorAll('.menu div')].some(n=>n.textContent==='Clear Logcat')"),true);
+    await page.evaluate("[...document.querySelectorAll('.menu div')].find(n=>n.textContent==='Clear Logcat').click()");
+    await page.frames();
+    assert.deepEqual(await page.evaluate("window.__hostMessages.at(-1)"),{type:'clear'});
+    assert.equal(await page.evaluate("document.querySelectorAll('#win .row').length"),0);
+    await page.post({type:'batch',items:[item('after clear')]});
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#win .row .m')].map(n=>n.textContent)"),['after clear']);
+    await page.post({type:'reset'});
+    await page.post({type:'batch',items:[item('copy first'),item('copy second')]});
+    await page.evaluate("(()=>{const rows=document.querySelectorAll('#win .row .m'),range=document.createRange();range.setStart(rows[0].firstChild,0);range.setEnd(rows[1].firstChild,rows[1].textContent.length);const s=getSelection();s.removeAllRanges();s.addRange(range);})()");
+    const copied = await page.evaluate("(()=>{let text='';const data={setData:(type,value)=>{if(type==='text/plain')text=value}};const event=new ClipboardEvent('copy',{bubbles:true,cancelable:true});Object.defineProperty(event,'clipboardData',{value:data});document.getElementById('row-viewport').dispatchEvent(event);return text})()");
+    assert.equal(copied,'copy first\ncopy second');
+    await page.evaluate("(()=>{const data=new DataTransfer();data.setData('text/plain'," + JSON.stringify('copy first\ncopy second') + ");const event=new ClipboardEvent('paste',{bubbles:true,cancelable:true});Object.defineProperty(event,'clipboardData',{value:data});document.getElementById('row-viewport').dispatchEvent(event)})()");
+    await page.frames();
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('.row.local .m')].map(n=>n.textContent)"),['copy first','copy second']);
     await page.screenshot('matrix-multiline');await page.post({type:'reset'});
   });
 

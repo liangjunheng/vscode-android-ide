@@ -5,10 +5,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-// npm test：扩展必须在VS Code初始化阶段激活，避免设备视图和命令等启动能力等待启动完成事件。
-test('extension activates during VS Code initialization', () => {
-  assert.ok(require('../package.json').activationEvents.includes('*'));
-  assert.equal(require('../package.json').activationEvents.includes('onStartupFinished'), false);
+// npm test：Android 工作区通过 Gradle 或 Manifest 文件匹配激活，调试入口仍由专用事件触发，不使用全局启动激活。
+test('extension activates for Android workspaces', () => {
+  const events = require('../package.json').activationEvents;
+  assert.ok(events.includes('workspaceContains:**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}'));
+  assert.equal(events.includes('*'), false);
+  assert.equal(events.includes('onStartupFinished'), false);
 });
 
 // 编译输入与rootDir同属src；Node>=22运行node --test tests/configuration-prefix.test.js，通过本机TypeScript CLI的showConfig JSON断言全部扩展源码仍受strict检查，第三方参考源码不被误收。
@@ -63,11 +65,22 @@ test('machine specific paths are absent from VSCode settings', () => {
 test('runtime registers only android-ide commands and views', () => {
   const commands = new Set(), views = new Set();
   const vscode = {
-    workspace: { getConfiguration: section => {
+    workspace: {
+      findFiles: async () => [],
+      onDidCreateFiles: () => ({ dispose() {} }),
+      onDidDeleteFiles: () => ({ dispose() {} }),
+      onDidRenameFiles: () => ({ dispose() {} }),
+      onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
+      getConfiguration: section => {
       assert.equal(section, 'android-ide');
       return { get: (key, fallback) => fallback, inspect: () => undefined };
-    }, onDidChangeConfiguration: () => ({ dispose() {} }) },
-    commands: { registerCommand: (id, handler) => { assert.equal(typeof handler, 'function'); assert.ok(!commands.has(id)); commands.add(id); return { dispose() {} }; } },
+      },
+      onDidChangeConfiguration: () => ({ dispose() {} }),
+    },
+    commands: {
+      registerCommand: (id, handler) => { assert.equal(typeof handler, 'function'); assert.ok(!commands.has(id)); commands.add(id); return { dispose() {} }; },
+      executeCommand: async () => undefined,
+    },
     window: { registerWebviewViewProvider: id => { views.add(id); return { dispose() {} }; } },
     debug: { registerDebugAdapterDescriptorFactory: () => ({ dispose() {} }) },
   };
