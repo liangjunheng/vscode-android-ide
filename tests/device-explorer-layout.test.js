@@ -37,7 +37,7 @@ test('Explorer toolbar browser clicks upload and application reveal', {skip:!pro
       await page.setContent(fixture());
       await page.addStyleTag({content:':root{--vscode-font-family:Segoe UI;--vscode-foreground:#ddd;--vscode-descriptionForeground:#aaa;--vscode-editor-background:#1e1e1e;--vscode-list-activeSelectionBackground:#094771}body{background:#1e1e1e}'});
       await page.evaluate(()=>{window.sent=[];window.send=m=>{window.sent.push(m);if(m.transferId)window.dispatchEvent(new MessageEvent('message',{data:{type:'explorerUploadAck',serial:m.serial,transferId:m.transferId,action:m.action}}));};});
-      for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')});
+      for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')+(file==='media/build-panel.js'?';initBuildPanel(send);':'')});
       await page.evaluate(()=>{const send=data=>window.dispatchEvent(new MessageEvent('message',{data}));send({type:'deviceViewMode',mode:'explorer'});send({type:'explorerState',serial:'phone',tab:'files',active:true});send({type:'explorerFiles',path:'/',entries:[{path:'/file',name:'file',kind:'file'}]});});
       await page.evaluate(()=>document.fonts.ready);
       const bar=page.locator('.files-view .toolbar'),buttons=bar.locator('button');assert.equal(await buttons.count(),6);
@@ -66,7 +66,7 @@ test('compact file columns use intrinsic font widths in empty and populated dire
     try{
       await page.setContent(fixture());await page.evaluate(()=>{window.send=()=>{};window.deliver=data=>window.dispatchEvent(new MessageEvent('message',{data}));});
       await page.addStyleTag({content:':root{--vscode-font-family:Segoe UI}'});
-      for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')});
+      for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')+(file==='media/build-panel.js'?';initBuildPanel(send);':'')});
       await page.evaluate(()=>{deliver({type:'deviceViewMode',mode:'explorer'});deliver({type:'explorerState',serial:'s',tab:'files',active:true});deliver({type:'explorerFiles',path:'/',entries:[]});});
       // 以同字体的真实文字节点Range量宽，不复用生产样本值或近似像素。
       const inspect=()=>page.evaluate(()=>{
@@ -96,7 +96,7 @@ test('file columns resize from measured widths and keep rows aligned', {skip:!pr
   try{
     const page=await browser.newPage({viewport:{width:1000,height:700}});
     await page.setContent(fixture());await page.evaluate(()=>{window.send=()=>{};});
-    for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')});
+    for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')+(file==='media/build-panel.js'?';initBuildPanel(send);':'')});
     await page.evaluate(()=>{const send=data=>window.dispatchEvent(new MessageEvent('message',{data}));send({type:'deviceViewMode',mode:'explorer'});send({type:'explorerState',serial:'s',tab:'files',active:true});send({type:'explorerFiles',path:'/',entries:[{path:'/a',name:'very-long-name-'.repeat(40),kind:'file',permissions:'permissions-'.repeat(30),modified:1700000000000,size:1e30}]});});
     const widths=()=>page.locator('.file-head').evaluate(head=>[...head.children].map(c=>c.getBoundingClientRect().width));
     const aligned=()=>page.evaluate(()=>{const head=[...document.querySelector('.file-head').children],cells=[...document.querySelector('.file-row').children];return head.every((h,i)=>{const a=h.getBoundingClientRect(),b=cells[i].getBoundingClientRect();return Math.abs(a.x-b.x)<1&&Math.abs(a.width-b.width)<1;});});
@@ -121,7 +121,7 @@ test('file tree expansion keeps selected viewport anchor after locate and async 
   const {chromium}=require(process.env.EXPLORER_PLAYWRIGHT),browser=await chromium.launch({executablePath:process.env.EXPLORER_BROWSER,headless:true});
   try{
     const page=await browser.newPage({viewport:{width:333,height:600}});await page.setContent(fixture());await page.evaluate(()=>{window.sent=[];window.send=m=>window.sent.push(m);window.deliver=data=>window.dispatchEvent(new MessageEvent('message',{data}));});
-    for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')});
+    for(const file of ['media/build-panel.js','media/device-processes/processes.js','media/device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(root,file),'utf8')+(file==='media/build-panel.js'?';initBuildPanel(send);':'')});
     await page.evaluate(()=>{deliver({type:'deviceViewMode',mode:'explorer'});deliver({type:'explorerState',serial:'s',tab:'files',active:true});deliver({type:'explorerFiles',path:'/',entries:[...Array.from({length:80},(_,i)=>({path:'/a'+i,name:'a'+i,kind:'directory'})),{path:'/target',name:'target',kind:'directory'}]});});
     const row=page.locator('.file-row[data-path="/target"]');await row.scrollIntoViewIfNeeded();await row.click();
     await page.evaluate(()=>{window.originalList=document.querySelector('.file-list');window.originalRow=document.querySelector('.file-row[data-path="/target"]');});
@@ -152,7 +152,7 @@ test('Explorer files scroll in aligned columns and process cards never scroll ho
         await page.setContent(html);
         await page.addStyleTag({ content: ':root{--vscode-font-family:Segoe UI;--vscode-font-size:13px;--vscode-editor-background:' + (theme === 'dark' ? '#202124' : '#fff') + ';--vscode-foreground:' + (theme === 'dark' ? '#ddd' : '#222') + ';--vscode-icon-foreground:var(--vscode-foreground);--vscode-descriptionForeground:var(--vscode-foreground);--vscode-input-foreground:var(--vscode-foreground);--vscode-dropdown-foreground:var(--vscode-foreground);--vscode-dropdown-background:var(--vscode-editor-background)}body{background:var(--vscode-editor-background)}' });
         await page.evaluate(theme => { window.sent = []; window.send = message => window.sent.push(message); document.body.classList.toggle('vscode-light', theme === 'light'); }, theme);
-        for (const file of ['media/build-panel.js', 'media/device-processes/processes.js', 'media/device-explorer/main.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(root, file), 'utf8') });
+        for (const file of ['media/build-panel.js', 'media/device-processes/processes.js', 'media/device-explorer/main.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(root, file), 'utf8') + (file === 'media/build-panel.js' ? ';initBuildPanel(send);' : '') });
         await page.evaluate(mode => {
           const deliver = data => window.dispatchEvent(new MessageEvent('message', { data }));
           deliver({ type: 'deviceViewMode', mode });

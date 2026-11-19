@@ -18,13 +18,13 @@ test('Logcat device selector matches the Format arrow', () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/logcat.ts'), 'utf8');
   assert.ok(source.includes('<div class="device-select"><select id="dev" title="Device" aria-label="Device"><button type="button"><selectedcontent></selectedcontent></button></select></div>'));
   assert.match(rule('.device-select'), /position:relative/);
-  assert.match(rule('.device-select'), /flex:0 1 220px/);
+  assert.match(rule('.device-select'), /flex:0 1 calc\(220px \* 2 \/ 3\)/);
   assert.match(rule('.device-select #dev'), /width:100%/);
   assert.ok(!source.includes('device-select-arrow'));
   assert.doesNotMatch(rule('.device-select #dev'), /appearance:none|padding-inline-end/);
   const shared = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
   assert.ok(shared.includes('body #header #dev,body #header #fmt{display:flex;align-items:center;gap:8px;padding-inline-end:8px}'));
-  assert.ok(shared.includes('#header selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'));
+  assert.ok(shared.includes('#header selectedcontent,body #tabs selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'));
   assert.ok(shared.includes('#header select::picker-icon{position:static;flex:0 0 16px;margin-inline-start:0;pointer-events:none}'));
   assert.ok(js.includes('sel.innerHTML = '));
   assert.ok(js.includes('<selectedcontent></selectedcontent></button>'));

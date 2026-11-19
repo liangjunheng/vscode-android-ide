@@ -112,6 +112,32 @@ test('android-build real task formats and refresh selections', async t => {
   await f.controller.dispose();
 });
 
+// npm test：双面板sync在发现、运行、失败和停止阶段只回放同一快照，不重入任务或清除选择。
+test('android-build sync replays shared state without repeating discovery or losing lifecycle', async t => {
+  const f = fixture(t);
+  f.hold = true;
+  const initial = f.action('sync');
+  await new Promise(resolve => setImmediate(resolve));
+  const count = f.calls.length;
+  await f.action('sync');
+  assert.equal(f.last().busy, true);
+  assert.equal(f.calls.length, count);
+  f.hold = false; f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await initial;
+  await f.action('target', ':app:Release');
+  await f.action('runMode', 'debug-0');
+  const selected = f.last();
+  await f.action('sync'); assert.equal(f.last(), selected);
+  await f.action('target', ':app:Debug'); await f.action('runMode', 'run');
+  await f.action('run', undefined, 'phone');
+  const running = f.last(); await f.action('sync'); assert.equal(f.last(), running); assert.equal(f.last().running, true);
+  await f.action('stop'); const stopped = f.last(); await f.action('sync'); assert.equal(f.last(), stopped); assert.equal(f.last().running, false);
+  f.fail = 'Gradle sync failure'; await assert.rejects(f.action('build'), /Gradle sync failure/);
+  const failed = f.last(), commands = f.calls.length;
+  await f.action('sync'); assert.equal(f.last(), failed); assert.match(f.last().error, /Gradle sync failure/); assert.equal(f.calls.length, commands);
+  await f.controller.dispose();
+});
+
 // npm test：无项目、缺 wrapper、每次信任变化和非法消息均明确失败，不执行命令。
 test('android-build empty workspace and unavailable prerequisites', async t => {
   const f = fixture(t); f.roots = [];

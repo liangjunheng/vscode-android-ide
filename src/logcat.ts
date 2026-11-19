@@ -37,8 +37,12 @@ export class LogcatView implements vscode.WebviewViewProvider {
   private processWatch?: { owner: DeviceExplorerProcesses; stop?: () => Promise<void> };
   private processRows = new Map<number, { pkg: string; started: boolean }>();
 
-  // 输入扩展路径及选择回调，保留未创建视图时的设备；npm test device selection sync 回归覆盖延迟打开。
-  constructor(private extPath: string, private selectionChanged?: (serial?: string) => Promise<void> | void) {}
+  // 保存设备同步和共享构建动作入口；node --test tests/build-panel-ui.test.js 验证所选串号与错误传播，tests/device-selection-sync.test.js 验证晚打开。
+  constructor(private extPath: string, private selectionChanged?: (serial?: string) => Promise<void> | void,
+    private buildAction?: (message: any, serial?: string) => Promise<void>) {}
+
+  // 将唯一控制器的快照送入当前视图；脚本初始化后用sync补发，node --test tests/build-panel-ui.test.js 断言广播和重建回显。
+  publishBuildState(message: unknown) { this.post(message); }
 
   /**
    * 读取 android-ide.logcat.maxBytes 并校验 Logcat 内存上限；输入为 VS Code 配置，输出为 64 KiB 至 64 MiB 的整数。
@@ -64,7 +68,7 @@ export class LogcatView implements vscode.WebviewViewProvider {
   // 设备选择保留原生 select；右侧 log-content 容纳搜索与日志，左侧工具栏不随搜索栏移动。
   // 前提为宿主提供真实 visible；生命周期事件输出 visibility.visible，隐藏释放采集，旧视图事件不得操作新视图。
   // 回归：npm test 中 logcat-visibility.test.js 模拟隐藏/销毁/替换；既有样式和选择同步测试分别断言结构与错误。
-  // 下拉共享样式覆盖设备、格式、历史和补全；npm test dropdown 接线、LOGCAT_BROWSER=1 dropdown 断言主题/键盘/窄屏。
+  // 搜索与计数同组，28px等高且相邻6px；LOGCAT_BROWSER=1 的 format and build controls 断言深浅主题/窄屏。设备后仅挂载共享运行模式与启停；node --test tests/build-panel-ui.test.js 验证精简结构及桥接，LOGCAT_BROWSER=1 的 format and build controls 断言标签完整、顺序和窄屏可达。
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     const media = vscode.Uri.file(path.join(this.extPath, 'media'));
@@ -76,11 +80,15 @@ export class LogcatView implements vscode.WebviewViewProvider {
     w.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
 <link rel="stylesheet" href="${w.asWebviewUri(vscode.Uri.joinPath(codicons, 'codicon.css'))}">
 <link rel="stylesheet" href="${u('logcat', 'main.css')}"><link rel="stylesheet" href="${u('dropdowns.css')}"></head><body>
-<div id="header"><div class="device-select"><select id="dev" title="Device" aria-label="Device"><button type="button"><selectedcontent></selectedcontent></button></select></div><select id="fmt" title="Format"><button type="button"><selectedcontent></selectedcontent></button><option value="standard">Standard</option><option value="compact">Compact</option></select>
-<div id="filterbox"><button class="ib" id="hist-btn" title="Filter history"></button><div id="editor"><div id="hl"></div><input id="q" spellcheck="false" placeholder="Filter, e.g. tag:foo level:warn -message:bar"></div><button class="ib" id="fav" title="Favorite"></button></div>
-<span id="count"></span></div>
+<div id="header"><div class="device-select"><select id="dev" title="Device" aria-label="Device"><button type="button"><selectedcontent></selectedcontent></button></select></div>
+<div id="logcat-build" role="group" aria-label="Android run configuration">
+<select id="build-run-mode" title="Run or debug mode" aria-label="Run or debug mode"><button type="button"><selectedcontent></selectedcontent></button><option value="run">Application</option></select><button class="ib" id="build-run" title="Build, install and run" aria-label="Run app"><i id="build-run-icon" class="codicon codicon-play"></i></button>
+</div>
+<select id="fmt" title="Format"><button type="button"><selectedcontent></selectedcontent></button><option value="standard">Standard</option><option value="compact">Compact</option></select>
+<div id="filter-controls"><div id="filterbox"><button class="ib" id="hist-btn" title="Filter history"></button><div id="editor"><div id="hl"></div><input id="q" spellcheck="false" placeholder="Filter, e.g. tag:foo level:warn -message:bar"></div><button class="ib" id="fav" title="Favorite"></button></div>
+<span id="count"></span></div></div>
 <div id="main"><div id="side"></div><div id="log-content"><div id="sc" tabindex="0" aria-label="Log messages"><div id="win"><div id="row-viewport" contenteditable="plaintext-only" role="textbox" aria-label="Log messages editor" aria-multiline="true" spellcheck="false"><div id="row-window"></div></div></div><div id="spacer"></div><div id="empty"></div><div id="status"></div></div></div></div>
-<script src="${u('logcat', 'filter.js')}"></script><script src="${u('logcat', 'buffer.js')}"></script><script src="${u('logcat', 'main.js')}"></script></body></html>`;
+<script src="${u('build-panel.js')}"></script><script src="${u('logcat', 'filter.js')}"></script><script src="${u('logcat', 'buffer.js')}"></script><script src="${u('logcat', 'main.js')}"></script></body></html>`;
     w.onDidReceiveMessage((m) => {
       if (this.view !== view) { return; }
       return this.onMessage(m).catch((error) => vscode.window.showErrorMessage(String(error)));
@@ -121,10 +129,11 @@ export class LogcatView implements vscode.WebviewViewProvider {
   private post(m: any) { this.view?.webview.postMessage(m); }
 
   // 分派输入消息，选择交给同步入口并将错误交还宿主；ready 保存项目包并补发存活项目 PID 的 STARTED，再输出当前 init.visible。
-  // 前提为消息属于当前视图；扫描期间销毁则不初始化新视图，隐藏则初始化为 false 且不采集。
+  // 构建动作携当前设备交唯一控制器；node --test tests/build-panel-ui.test.js 断言选择、运行、停止及异常传播。前提为消息属于当前视图；扫描期间销毁不初始化新视图。
   // 展开消息查询最新设备，不改变轮询调度；npm test 的 device-selection-sync.test.js 覆盖展开/选择/错误，logcat-visibility.test.js 覆盖隐藏/销毁。
   private async onMessage(m: any) {
     switch (m.type) {
+      case 'buildPanel': return this.buildAction?.(m, this.serial || undefined);
       case 'ready': {
         const view = this.view;
         const mine = await this.mine();

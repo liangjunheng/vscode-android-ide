@@ -69,7 +69,7 @@ async function fixture() {
   }
   const css = await fs.readFile(path.join(root, 'media/logcat/main.css'), 'utf8') + await fs.readFile(path.join(root, 'media/dropdowns.css'), 'utf8')
     + (await fs.readFile(path.join(root, 'media/codicons/codicon.css'), 'utf8')).replace(/url\([^)]*\)/g, 'url(data:font/ttf;base64,' + (await fs.readFile(path.join(root, 'media/codicons/codicon.ttf'))).toString('base64') + ')');
-  const scripts = await Promise.all(['filter.js', 'buffer.js', 'main.js'].map(name => fs.readFile(path.join(root, 'media/logcat', name), 'utf8')));
+  const scripts = [await fs.readFile(path.join(root, 'media/build-panel.js'), 'utf8'), ...await Promise.all(['filter.js', 'buffer.js', 'main.js'].map(name => fs.readFile(path.join(root, 'media/logcat', name), 'utf8')))];
   return { html, icons, css, scripts };
 }
 
@@ -133,7 +133,9 @@ async function browser(t, data, signal) {
     const style=document.createElement('style');style.textContent=${JSON.stringify(data.css)};document.head.append(style);
     document.body.classList.add('vscode-dark');
     document.body.style.cssText='--vscode-font-family:Arial;--vscode-font-size:13px;--vscode-editor-font-family:Consolas;--vscode-editor-font-size:14px;--vscode-editor-font-weight:400;--vscode-editor-background:#1e1e1e;--vscode-foreground:#ddd;--vscode-input-foreground:#ddd;--vscode-input-background:#333;--vscode-toolbar-activeBackground:#555;--vscode-icon-foreground:#ddd';
-    let state;window.__hostMessages=[];
+    let state;window.__hostMessages=[];window.__pageErrors=[];
+    window.addEventListener('error',event=>window.__pageErrors.push(event.error?.stack || event.message));
+    window.addEventListener('unhandledrejection',event=>window.__pageErrors.push(String(event.reason)));
     window.acquireVsCodeApi=()=>({getState:()=>state,setState:value=>{state=structuredClone(value)},postMessage:message=>window.__hostMessages.push(message)});
   })()`);
   for (const script of data.scripts) await evaluate(script);
@@ -239,7 +241,7 @@ test('Device Tools run mode browser matches device picker and icon-only actions'
   const iconsCSS=(await fs.readFile(path.join(root,'media/codicons/codicon.css'),'utf8')).replace(/url\([^)]*\)/g,'url(data:font/ttf;base64,'+(await fs.readFile(path.join(root,'media/codicons/codicon.ttf'))).toString('base64')+')');
   const css=iconsCSS+source.slice(source.indexOf('<style>')+7,source.indexOf('</style>'))+await fs.readFile(path.join(root,'media/build-panel.css'),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
   await page.evaluate('document.querySelectorAll("style").forEach(style=>style.remove());document.body.innerHTML='+JSON.stringify(markup)+';document.head.appendChild(Object.assign(document.createElement("style"),{textContent:'+JSON.stringify(css)+'}));window.send=message=>window.__hostMessages.push(message)');
-  await page.evaluate(await fs.readFile(path.join(root,'media/build-panel.js'),'utf8'));
+  await page.evaluate((await fs.readFile(path.join(root,'media/build-panel.js'),'utf8'))+';initBuildPanel(send);');
   const state={type:'buildState',projects:[{id:'root',label:'Project'}],project:'root',targets:[{id:':app:Debug',label:'app | Debug'}],target:':app:Debug',runMode:'run',runModes:[{id:'run',label:'app',action:'run'},...Array.from({length:6},(_,index)=>({id:'debug-'+index,label:'Android debug configuration '+index,action:'debug'}))],busy:false,running:false,status:'Ready'};
   await page.post(state);await page.post({type:'devices',serial:'phone'});
   await page.evaluate('document.getElementById("dev").appendChild(Object.assign(document.createElement("option"),{value:"phone",textContent:"Android device"}));document.getElementById("dev").value="phone"');
@@ -268,6 +270,71 @@ test('Device Tools run mode browser matches device picker and icon-only actions'
     await page.post({...state,runMode:'debug-'+index,running:false,status:'Stopped'});assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-alt');
   }
   await page.post(state);assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-play');
+});
+
+// LOGCAT_BROWSER=1 node --test --test-name-pattern="format and build controls" tests/logcat-browser.test.js：生产模板在深浅主题和窄屏验证选择框缩宽1/3、运行按钮26px、完整格式标签、同排18px间距及选择启停。
+test('Logcat format and build controls stay readable and share host state', { skip: !enabled, timeout: 60000 }, async t => {
+  const controller = new AbortController(), deadline = setTimeout(() => controller.abort(new Error('Build controls browser deadline')), 45000);
+  t.after(() => clearTimeout(deadline));
+  const page = await browser(t, await fixture(), controller.signal);
+  const state = { type: 'buildState', projects: [{ id: 'root', label: 'Gradle root' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | Debug' }, { id: ':app:Release', label: 'app | Release' }], target: ':app:Debug', runMode: 'run', runModes: [{ id: 'run', label: 'app | Debug', action: 'run' }, { id: 'debug-0', label: 'Android: Native debug', action: 'debug' }], busy: false, running: false, status: 'Ready' };
+  await page.post(state);
+  await page.post({ type: 'devices', list: [{ serial: 'phone', model: 'T951K API 35 long device name', state: 'device' }], serial: 'phone' });
+  assert.equal(await page.evaluate('window.__hostMessages.filter(m=>m.type==="buildPanel"&&m.action==="sync").length'), 1);
+  for (const theme of ['dark', 'light']) for (const width of [240, 283, 800, 1440]) {
+    await page.viewport(width);
+    await page.evaluate('document.body.className=' + JSON.stringify('vscode-' + theme));
+    for (const format of ['standard', 'compact']) {
+      await page.evaluate('(()=>{const fmt=document.getElementById("fmt");fmt.value=' + JSON.stringify(format) + ';fmt.dispatchEvent(new Event("change"))})()');
+      await page.frames();
+      const label = await page.evaluate('(()=>{const s=document.getElementById("fmt"),l=s.querySelector("selectedcontent"),r=s.getBoundingClientRect(),b=l.getBoundingClientRect();return {text:l.textContent,scroll:l.scrollWidth,client:l.clientWidth,left:r.left,right:r.right,top:r.top,bottom:r.bottom,label:b.width}})()');
+      assert.equal(label.text, format === 'standard' ? 'Standard' : 'Compact');
+      assert.ok(label.label > 0 && label.scroll <= label.client + 1, JSON.stringify(label));
+      assert.ok(label.left >= 0 && label.right <= width && label.bottom <= 720, JSON.stringify(label));
+    }
+    const layout = await page.evaluate('(()=>{const ids=["dev","logcat-build","build-run-mode","build-run","fmt","filterbox"],rects=ids.map(id=>{const r=document.getElementById(id).getBoundingClientRect();return {id,left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width}});return {rects,overflow:document.documentElement.scrollWidth>innerWidth}})()');
+    assert.equal(layout.overflow, false, JSON.stringify(layout));
+    for (const r of layout.rects) assert.ok(r.width > 0 && r.left >= 0 && r.right <= width + 1 && r.bottom <= 720, JSON.stringify(r));
+    const [device, group, mode, run, format, filter] = layout.rects;
+    assert.equal(format.bottom - format.top, 28);
+    assert.equal(filter.bottom - filter.top, 28);
+    const count = await page.evaluate('(()=>{const r=document.getElementById("count").getBoundingClientRect();return {left:r.left,top:r.top,bottom:r.bottom,align:getComputedStyle(document.getElementById("count")).textAlign}})()');
+    assert.ok(Math.abs(count.left - filter.right - 6) < 1, JSON.stringify({filter,count}));
+    assert.ok(count.top >= filter.top && count.bottom <= filter.bottom, JSON.stringify({filter,count}));
+    assert.equal(count.align, 'start');
+    assert.equal(run.width, 26);
+    if (width >= 800) {
+      assert.ok(Math.abs(device.width / 220 - 2 / 3) < .005, JSON.stringify(layout));
+      assert.ok(Math.abs(mode.width / 218 - 2 / 3) < .005, JSON.stringify(layout));
+    }
+    assert.ok(group.top >= device.bottom || group.left >= device.right, JSON.stringify(layout));
+    assert.ok(group.right - run.right >= 12, JSON.stringify(layout));
+    if (Math.abs(format.top - run.top) < 4) assert.ok(format.left - run.right >= 18, JSON.stringify(layout));
+    for (const id of ['build-run-mode']) {
+      await page.evaluate('document.getElementById(' + JSON.stringify(id) + ').focus()');
+      await page.key('ArrowDown'); await page.key('ArrowDown'); await page.key('Enter');
+      assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'), 'runMode');
+      await page.post(state);
+    }
+    if (width === 800) await page.screenshot('logcat-build-' + theme);
+  }
+  await page.post({ ...state, runMode: 'debug-0' });
+  assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'), 'codicon codicon-debug-alt');
+  await page.click('build-run'); assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'), 'run');
+  for (const phase of [{ busy: true }, { running: true }]) {
+    await page.post({ ...state, runMode: 'debug-0', ...phase });
+    assert.equal(await page.evaluate('document.getElementById("build-run-mode").disabled'), true);
+    await page.click('build-run'); assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'), 'stop');
+  }
+  await page.post({ ...state, error: 'Gradle failed', status: 'Failed' });
+  for (const id of ['build-project', 'build-target', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-status']) assert.equal(await page.evaluate('document.getElementById('+JSON.stringify(id)+')===null'), true, id);
+  await page.post({ ...state, status: 'Stopped' });
+  assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'), 'codicon codicon-play');
+  await page.post({ type: 'devices', list: [], serial: '' });
+  assert.equal(await page.evaluate('document.getElementById("build-run").disabled'), true);
+  await page.post({ type: 'buildState', projects: [], targets: [], busy: false });
+  assert.equal(await page.evaluate('document.getElementById("build-run").disabled'), true);
+  assert.deepEqual(await page.evaluate('window.__pageErrors'), []);
 });
 
 // 构造真实 batch 记录；同毫秒元数据复现独立首行与 msg 内换行边界。
@@ -899,7 +966,7 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
     assert.equal(arrowStyles[0].style.fontFamily,'codicon');
     assert.equal(arrowStyles[0].padding,arrowStyles[1].padding);
     assert.equal(arrowStyles[0].padding,'8px');
-    assert.ok(Math.abs(arrowStyles[0].center-arrowStyles[1].center)<1,JSON.stringify(arrowStyles));
+    for (const id of ['dev', 'fmt']) assert.equal(await page.evaluate('(()=>{const s=document.getElementById('+JSON.stringify(id)+'),b=s.querySelector("button").getBoundingClientRect(),r=s.getBoundingClientRect();return Math.abs(b.y+b.height/2-r.y-r.height/2)<1})()'), true);
     assert.equal(arrowStyles[0].overlay,0);
     const labelBounds=await page.evaluate("(()=>['dev','fmt'].map(id=>{const s=document.getElementById(id),label=s.querySelector('selectedcontent'),r=s.getBoundingClientRect(),a=getComputedStyle(s,'::picker-icon'),c=getComputedStyle(s),l=label.getBoundingClientRect();return {id,left:l.left,right:l.right,width:l.width,arrowLeft:r.right-parseFloat(c.borderRightWidth)-parseFloat(c.paddingRight)-parseFloat(a.width),clip:getComputedStyle(label).overflow,textOverflow:getComputedStyle(label).textOverflow,text:label.textContent,selected:s.selectedOptions[0].textContent,scroll:label.scrollWidth,client:label.clientWidth}}))()");
     for(const label of labelBounds){assert.ok(label.width>0,JSON.stringify(label));assert.ok(label.right+7<=label.arrowLeft,JSON.stringify(label));assert.equal(label.clip,'hidden');assert.equal(label.textOverflow,'ellipsis');assert.equal(label.text,label.selected);}
@@ -934,7 +1001,7 @@ test('dropdown browser themes native choices and bounded menus', {skip:!enabled,
     const style=await fs.readFile(path.join(root,'media',file),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
     await page.viewport(240);
     await page.evaluate('(function(css,id,className){document.getElementById("dropdown-companion-style")?.remove();document.getElementById("dropdown-companion")?.remove();const style=document.createElement("style");style.id="dropdown-companion-style";style.textContent=css;document.head.append(style);const host=document.createElement("div");host.id="dropdown-companion";host.style.cssText="position:fixed;left:8px;bottom:20px;width:200px;z-index:100";const select=document.createElement("select");select.id=id;select.className=className;select.setAttribute("aria-label","Dropdown verification");select.style.width="200px";for(const [value,label,disabled] of [["first","First item",false],["disabled","Unavailable",true],["next","Next item with a long descriptive label",false]]){const option=document.createElement("option");option.value=value;option.textContent=label;option.disabled=disabled;select.append(option)}host.append(select);document.body.append(host);select.focus()})('+JSON.stringify(style)+','+JSON.stringify(id)+','+JSON.stringify(className)+')');
-    const expression='document.getElementById('+JSON.stringify(id)+')';
+    const expression='document.querySelector("#dropdown-companion select")';
     assert.equal(await page.evaluate('getComputedStyle('+expression+').appearance'),'base-select',file);
     await page.key('ArrowDown');assert.equal(await page.evaluate(expression+".matches(':open')"),true);
     const box=await page.evaluate('(()=>{const s='+expression+',p=getComputedStyle(s,"::picker(select)"),r=s.options[0].getBoundingClientRect();return {x:r.x,right:r.right,bottom:r.bottom,radius:p.borderRadius,bg:p.backgroundColor,selectedBg:getComputedStyle(s.options[0]).backgroundColor}})()');

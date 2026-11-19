@@ -12,8 +12,8 @@ function fixture() {
   const vscode = {
     Uri: { file: p => p, joinPath: (...p) => p.join('/') },
     debug: { registerDebugAdapterDescriptorFactory: () => ({ dispose() {} }) },
-    workspace: { getConfiguration: () => ({ get: (key, fallback) => key === 'nativeMirror' ? false : fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) },
-    commands: { registerCommand: (id, fn) => { f.handlers[id] = fn; }, executeCommand: async (id, arg) => { f.commands.push([id, arg]); return f.handlers[id]?.(arg); } },
+    workspace: { findFiles: async () => [], onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }), getConfiguration: () => ({ get: (key, fallback) => key === 'nativeMirror' ? false : fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) },
+    commands: { registerCommand: (id, fn) => { f.handlers[id] = fn; }, executeCommand: async (id, arg) => { if (id !== 'setContext') f.commands.push([id, arg]); return f.handlers[id]?.(arg); } },
     window: { registerWebviewViewProvider: (id, view) => { f.views[id] = view; }, showErrorMessage: e => f.errors.push(e) },
   };
   let timerId = 0;

@@ -8,21 +8,21 @@ const js = fs.readFileSync(path.join(__dirname, '../media/build-panel.js'), 'utf
 const css = fs.readFileSync(path.join(__dirname, '../media/build-panel.css'), 'utf8');
 
 // 执行面板完整脚本并记录真实 DOM 状态与宿主消息；npm test 回归涵盖按钮、状态、选择及空列表。
-function fixture(initialVisible = true) {
+function fixture(initialVisible = true, logcat = false) {
   const nodes = {}, sent = [];
   let receive;
   const get = id => nodes[id] ||= (() => {
     const button = { children: [], querySelector: () => null };
     return { value: '', children: [], textContent: '', disabled: false, hidden: false, title: '', classList: { toggle() {} }, setAttribute(k, v) { this[k] = v; }, querySelector: selector => selector === 'button' ? button : null, replaceChildren(...items) { this.children = items; }, appendChild(o) { this.children.push(o); } };
   })();
-  vm.runInNewContext(js, { document: { body: { dataset: { mirrorVisible: String(initialVisible) }, classList: { toggle() {} } }, getElementById: get, createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
+  vm.runInNewContext(js + ';initBuildPanel(send);', { document: { body: { dataset: { mirrorVisible: String(initialVisible) }, classList: { toggle() {} } }, getElementById: id => logcat && ['build-mirror', 'build-explorer', 'build-processes', 'build-logcat', 'device-explorer', 'build-project', 'build-target', 'build-project-loading', 'build-target-loading', 'build-status', 'build-root-count', 'build-progress', 'build-build', 'build-install', 'build-refresh', 'build-output'].includes(id) ? null : get(id), createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
   return { get, sent, receive: data => receive({ data }) };
 }
 
 // npm test：实际脚本验证无项目/设备、busy和错误按钮状态；已移除工具不再绑定，构建和Logcat消息保持。
 test('build panel UI renders safe options and routes all commands', () => {
   const f = fixture(), get = f.get;
-  assert.equal(f.sent[0].action, 'refresh');
+  assert.equal(f.sent[0].action, 'sync');
   assert.equal(f.sent[1].type, 'getMirrorVisibility');
   assert.equal(get('build-run').disabled, true);
   assert.equal(get('build-project-loading').hidden, true);
@@ -103,6 +103,60 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-run').disabled, true);
 });
 
+// npm test：Logcat 仅有模式和启停，删除控件必须不存在；严格断言共享状态回显、禁用、失败恢复和动作消息。
+test('Logcat build panel shares controls without Device Tools-only nodes', () => {
+  const f = fixture(true, true), get = f.get;
+  assert.deepEqual(f.sent.map(m => m.action), ['sync']);
+  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Root>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | Debug' }], target: ':app:Debug', runMode: 'debug-0', runModes: [{ id: 'run', label: 'app | Debug', action: 'run' }, { id: 'debug-0', label: 'Native', action: 'debug' }], busy: false, running: false, status: 'Ready' };
+  f.receive(state);
+  assert.equal(get('build-run-mode').value, 'debug-0');
+  assert.equal(get('build-run').disabled, true);
+  f.receive({ type: 'devices', serial: 'phone' });
+  assert.equal(get('build-run').disabled, false);
+  assert.equal(get('build-run-icon').className, 'codicon codicon-debug-alt');
+  for (const [id, action] of [['build-run-mode', 'runMode']]) {
+    get(id).onchange(); assert.equal(f.sent.at(-1).action, action); assert.equal(f.sent.at(-1).value, get(id).value);
+  }
+  get('build-run').onclick(); assert.equal(f.sent.at(-1).action, 'run');
+  for (const phase of [{ busy: true }, { running: true }]) {
+    f.receive({ ...state, ...phase });
+    assert.equal(get('build-run-mode').disabled, true);
+    assert.equal(get('build-run-icon').className, 'codicon codicon-debug-pause');
+    get('build-run').onclick(); assert.equal(f.sent.at(-1).action, 'stop');
+  }
+  f.receive({ ...state, status: 'Stopped', error: 'Gradle failed' });
+  assert.equal(get('build-run-mode').disabled, false);
+  assert.equal(get('build-run-icon').className, 'codicon codicon-debug-alt');
+  f.receive({ type: 'buildState', targets: [], projects: [], busy: false });
+  assert.equal(get('build-run').disabled, true);
+  for (const id of ['build-project', 'build-target', 'build-status', 'build-build', 'build-install', 'build-refresh', 'build-output']) assert.equal(get(id).onclick, undefined);
+});
+
+// npm test：真实Logcat桥接带当前设备，异步错误交宿主；重建视图仍由脚本主动sync。
+test('Logcat build bridge forwards current serial and exposes failures', async () => {
+  const module = { exports: {} }, calls = [], errors = [];
+  const vscode = { Uri: { file: p => p, joinPath: (...p) => p.join('/') }, window: { showErrorMessage: e => errors.push(e) } };
+  const source = fs.readFileSync(path.join(__dirname, '../src/logcat.ts'), 'utf8');
+  const deps = { vscode, './sdk': {}, './deviceExplorerProcesses': {}, './logcatParser': {} };
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id) });
+  const provider = new module.exports.LogcatView('', undefined, async (message, serial) => { calls.push([message.action, serial]); if (message.action === 'run') throw new Error('build failed'); });
+  provider.serial = 'phone';
+  for (let repeat = 0; repeat < 2; repeat++) {
+    let receive;
+    const messages = [], webview = { cspSource: 'test:', asWebviewUri: p => p, postMessage: m => messages.push(m), onDidReceiveMessage: fn => { receive = fn; } };
+    provider.resolveWebviewView({ webview, onDidDispose() {}, onDidChangeVisibility() {} });
+    for (const action of ['sync', 'project', 'target', 'runMode', 'stop']) { await receive({ type: 'buildPanel', action }); assert.deepEqual(calls.at(-1), [action, 'phone']); }
+    await receive({ type: 'buildPanel', action: 'run' }); assert.match(errors.at(-1), /build failed/);
+    provider.publishBuildState({ type: 'buildState', runMode: 'debug-0', running: true });
+    assert.equal(messages.at(-1).running, true);
+    for (const id of ['build-run-mode', 'build-run']) assert.ok(webview.html.includes('id="' + id + '"'));
+    for (const id of ['build-project', 'build-target', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-status', 'build-root-count', 'build-progress']) assert.equal(webview.html.includes('id="' + id + '"'), false, id);
+    assert.ok(webview.html.indexOf('id="dev"') < webview.html.indexOf('id="logcat-build"'));
+    assert.ok(webview.html.indexOf('id="logcat-build"') < webview.html.indexOf('id="fmt"'));
+    assert.ok(webview.html.indexOf('build-panel.js') < webview.html.indexOf("logcat/main.js"));
+  }
+});
+
 // npm test：真实模板断言构建栏仅七项且以Logcat结尾；保留设备视图、配对及构建宿主接线。
 test('build panel bridge routes selected serial and publishes snapshots', async () => {
   const module = { exports: {} }, calls = [];
@@ -157,7 +211,7 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
 // npm test：实际activate断言已移除命令不再注册，同时保留构建动作、状态、控制器和调试工厂。
 test('build panel integration owns controller and connects both directions', async () => {
   const calls = [], registrations = [], commandNames = [], module = { exports: {} }, subscriptions = [];
-  let running, build;
+  let running, build, logcat;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
   // 模拟只读当前Gradle包名，断言Native工厂只在需要时按workspace调用。
   class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
@@ -165,7 +219,9 @@ test('build panel integration owns controller and connects both directions', asy
   const extensionContext = { extensionPath: 'extension-root', subscriptions };
   const factoryContexts = [], packageResolvers = [];
   const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; }, onDidTerminateDebugSession: () => ({ dispose() {} }) } };
-  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class {} }, './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: (context, packageResolver) => { factoryContexts.push(context); packageResolvers.push(packageResolver); return debugFactory; } }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger: context => { jvmRegistrations.push(context); } } };
+  Object.assign(vscode.workspace, { findFiles: async () => [], onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) });
+  vscode.commands.executeCommand = async () => {};
+  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class { constructor(ext, selection, action) { logcat = this; this.action = action; } publishBuildState(message) { this.message = message; } } }, './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: (context, packageResolver) => { factoryContexts.push(context); packageResolvers.push(packageResolver); return debugFactory; } }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger: context => { jvmRegistrations.push(context); } } };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   module.exports.activate(extensionContext);
@@ -185,8 +241,15 @@ test('build panel integration owns controller and connects both directions', asy
   assert.equal(packageResolvers[0](undefined), undefined);
   await running.action({ action: 'build' }, 'phone');
   assert.deepEqual(calls.at(-1), ['build', 'phone']);
-  build.post({ type: 'buildState', status: 'Ready' });
-  assert.equal(calls.at(-1).status, 'Ready');
+  for (const side of [running, logcat]) {
+    for (const [action, value] of [['target', ':app:Release'], ['runMode', 'debug-2'], ['run', 'debug-2'], ['stop', undefined], ['sync', undefined]]) {
+      await side.action({ type: 'buildPanel', action, value }, 'phone');
+      assert.deepEqual(calls.at(-1), [action, 'phone']);
+      build.post({ type: 'buildState', target: ':app:Release', runMode: 'debug-2', busy: action === 'run', running: action === 'run', status: action });
+      assert.equal(calls.at(-1).status, action);
+      assert.equal(logcat.message, calls.at(-1));
+    }
+  }
 });
 // npm test：脚本尚未收到宿主消息时使用页面初始配置，隐藏状态不会在初始化期间错误显示选中。
 test('build panel initial mirror state reflects restored markup before messages', () => {

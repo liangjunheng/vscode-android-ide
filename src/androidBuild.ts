@@ -107,6 +107,7 @@ export class AndroidBuildController implements vscode.Disposable {
   private debugTermination?: vscode.Disposable;
   private runModeId = 'run';
   private outputText = '';
+  private snapshot?: Record<string, any>;
   private readonly output: vscode.OutputChannel;
 
   // 保存状态出口；调试会话监听在启动前建立并在所属会话终止后释放，避免错过立即终止事件。
@@ -139,15 +140,16 @@ export class AndroidBuildController implements vscode.Disposable {
     return { packageName: metadata.applicationId, ...(abiSupported ? { abiSupported } : {}) };
   }
 
-  // 发布项目、目标、运行模式和生命周期快照；npm test build panel 与 android-build 断言默认应用项、六个内置调试项和结束复位。
+  // 发布并保存两侧共用的项目、风味和运行快照；node --test tests/android-build.test.js 的 sync 回归断言晚订阅、忙碌、错误和停止原样回放。
   private state(status: string, error?: string): void {
     const project = this.projects.find(p => p.id === this.projectId);
     const targets = buildTargets(project?.tasks || []);
     const target = targets.find(item => item.id === this.targetId);
     const applicationLabel = target ? (target.module || ':').replace(/^:/, '') + ' | ' + target.variant : project?.label || 'Application';
     const runModes = getAndroidDebugConfigurations().map((config, index) => ({ id: 'debug-' + index, label: config.name, action: 'debug' as const }));
-    this.post({ type: 'buildState', projects: this.projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
-      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy: !!this.operation, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) });
+    this.snapshot = { type: 'buildState', projects: this.projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
+      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy: !!this.operation, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) };
+    this.post(this.snapshot);
   }
 
   // 有界保留日志并更新真实通道；npm test output 回归断言长度和失败诊断。
@@ -384,10 +386,14 @@ export class AndroidBuildController implements vscode.Disposable {
     }
   }
 
-  // 用 operation 所有权拒绝重入，状态始终反馈；npm test reentry/stop/dispose 回归验证取消与失败。
+  // 校验动作并独占执行；sync 只回放快照，首次订阅才发现项目；node --test tests/android-build.test.js 的 sync 回归断言双面板并发初始化不重复构建且错误不丢失。
   async handle(message: any, serial?: string): Promise<void> {
     if (this.disposed) throw new Error('Android build controller is disposed');
-    if (!message || message.type !== 'buildPanel' || !['refresh', 'project', 'target', 'build', 'install', 'run', 'runMode', 'debug', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
+    if (!message || message.type !== 'buildPanel' || !['sync', 'refresh', 'project', 'target', 'build', 'install', 'run', 'runMode', 'debug', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
+    if (message.action === 'sync') {
+      if (this.snapshot) { this.post(this.snapshot); return; }
+      return this.handle({ type: 'buildPanel', action: 'refresh' });
+    }
     if (message.action === 'output') { this.output.show(true); return; }
     if (message.action === 'stop') { return this.stop(); }
     if (this.operation || this.stopping) throw new Error('An Android operation is already running');

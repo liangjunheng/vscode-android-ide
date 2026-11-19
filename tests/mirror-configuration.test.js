@@ -12,6 +12,7 @@ function fixture() {
   const vscode = {
     ConfigurationTarget: { Global: 1, Workspace: 2 },
     workspace: {
+      findFiles: async () => [], onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
       getConfiguration: section => { assert.equal(section, 'android-ide'); return ({
         get: (key, fallback) => key === 'mirrorVisible' ? f.value : fallback,
         inspect: key => key === 'deviceViewMode' ? { workspaceValue: f.workspaceMode, globalValue: f.globalMode } : { workspaceValue: f.workspaceValue },
@@ -20,7 +21,7 @@ function fixture() {
       onDidChangeConfiguration: fn => { f.listener = fn; return listener; },
     },
     debug: { registerDebugAdapterDescriptorFactory() {} },
-    commands: { registerCommand() {} }, window: { registerWebviewViewProvider() {}, showErrorMessage: error => f.errors.push(error) },
+    commands: { registerCommand() {}, async executeCommand() {} }, window: { registerWebviewViewProvider() {}, showErrorMessage: error => f.errors.push(error) },
   };
   class Running {
     constructor(ext, action, preference) { this.preference = preference; f.instances.push(this); }

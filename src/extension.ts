@@ -10,7 +10,7 @@ import { initializeRuntimeContext, resetRuntimeContext } from './runtimeContext'
 import { registerJvmDebugger } from './android-debugger/jvm-debugger/adapter';
 
 // 注册共享设备区域及配置监听，以延迟只读闭包将 Build 当前选择提供给 Explorer；输入扩展上下文，订阅交其释放，无返回值。
-// 回归：node --test tests/build-panel-ui.test.js 断言仅注册现存命令、android-tools工厂及上下文；mirror-configuration.test.js覆盖配置接线。
+// 构建状态广播两侧，动作共用一个控制器；node --test tests/build-panel-ui.test.js 断言双向选择/启停接线，tests/device-selection-sync.test.js 断言设备同步；mirror-configuration.test.js覆盖配置接线。
 export function activate(ctx: vscode.ExtensionContext) {
   // 初始化唯一运行时上下文，集中管理当前平台和扩展内置依赖。
   initializeRuntimeContext(ctx.extensionPath);
@@ -42,9 +42,9 @@ export function activate(ctx: vscode.ExtensionContext) {
   const explorer = new DeviceExplorerController(message => running.publishBuildState(message), () => build.currentApplicationId(), (packageName, workspaceRoot, signal) => build.resolveCurrentDebugProject(packageName, workspaceRoot, signal));
   const nativeMirror = vscode.workspace.getConfiguration('android-ide').get<boolean>('nativeMirror', false);
   const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer, nativeMirror);
-  const build = new AndroidBuildController(message => running.publishBuildState(message));
+  const build = new AndroidBuildController(message => { running.publishBuildState(message); logcat.publishBuildState(message); });
   registerJvmDebugger(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath)?.packageName : undefined);
-  const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined));
+  const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined), (message, serial) => build.handle(message, serial));
   const refresh = () => running.refresh().catch(error => vscode.window.showErrorMessage(String(error)));
   const androidFactory = createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined);
   ctx.subscriptions.push(

@@ -15,16 +15,24 @@ html,body{height:100%;margin:0;padding:0;overflow:hidden}
 body{display:flex;flex-direction:column;color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size)}
 svg{width:16px;height:16px;display:block}
 
-#header{display:flex;flex-shrink:0;gap:6px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--vscode-panel-border,#444)}
+#header{display:flex;flex-wrap:wrap;flex-shrink:0;gap:6px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--vscode-panel-border,#444)}
+/* 选择框缩至原宽2/3，运行按钮26px及组尾留白不变；LOGCAT_BROWSER=1 的 format and build controls 回归断言宽度比例、窄屏标签及同排18px间距。 */
+#logcat-build{display:flex;flex:0 1 calc((260px - 42px) * 2 / 3 + 42px);gap:4px;align-items:center;min-width:140px;max-width:100%;padding-inline-end:12px}
+#logcat-build select{flex:1;min-width:0;max-width:none;height:28px}
+#logcat-build .ib{width:26px;height:26px}
+#build-run[data-mode="run"] .codicon{color:var(--vscode-testing-iconPassed,#73c991)}
+#fmt{flex:none;height:28px;padding-block:2px}
 select{appearance:none;-webkit-appearance:none;background-color:var(--vscode-dropdown-background,var(--vscode-input-background));color:var(--vscode-dropdown-foreground,var(--vscode-input-foreground));border:1px solid var(--vscode-dropdown-border,var(--vscode-input-border,#555));padding:5px 30px 5px 9px;border-radius:6px;max-width:220px;min-height:28px;font:inherit;line-height:1.2;cursor:pointer;transition:border-color .12s ease,background-color .12s ease,box-shadow .12s ease}
-.device-select{position:relative;flex:0 1 220px;min-width:80px}
+.device-select{position:relative;flex:0 1 calc(220px * 2 / 3);min-width:80px}
 .device-select #dev{display:block;width:100%;max-width:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.device-select #dev:focus-visible,select:focus-visible{outline:0;border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px var(--vscode-focusBorder)}select:hover{border-color:var(--vscode-focusBorder)}select option{background:var(--vscode-dropdown-background,var(--vscode-editorWidget-background));color:var(--vscode-dropdown-foreground,var(--vscode-foreground))}
 /* 设备选择器与Format共用select箭头，旧内核也不叠加独立图标；dropdown浏览器回归验证长名称和深浅主题。 */
-#filterbox{flex:1;min-width:120px;display:flex;align-items:center;position:relative;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;height:24px}
+/* 搜索和计数同组换行，固定计数槽避免位数变化挤动布局；format and build controls 浏览器回归断言6px邻接及28px等高。 */
+#filter-controls{display:flex;flex:1;min-width:min(240px,100%);gap:6px;align-items:center}
+#filterbox{flex:1;min-width:0;display:flex;align-items:center;position:relative;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;height:28px}
 #filterbox:focus-within{border-color:var(--vscode-focusBorder)}
 #filterbox.error{border-color:var(--vscode-inputValidation-errorBorder,#f14c4c)}
 #editor{position:relative;flex:1;height:100%;font:inherit}
-#hl,#q{position:absolute;inset:0;padding:0 4px;font:inherit;line-height:22px;white-space:pre;overflow:hidden;letter-spacing:0}
+#hl,#q{position:absolute;inset:0;padding:0 4px;font:inherit;line-height:26px;white-space:pre;overflow:hidden;letter-spacing:0}
 #hl{color:transparent;pointer-events:none}
 #hl .kv{background:var(--kv-bg);border-radius:3px;box-shadow:0 0 0 1px var(--kv-bg)}
 body:not(.vscode-light) #hl .kv{color:transparent}
@@ -35,7 +43,7 @@ body:not(.vscode-light) #hl .kv{color:transparent}
 .ib.on{background:var(--vscode-toolbar-activeBackground,var(--vscode-toolbar-hoverBackground))}
 .ib .codicon{font-size:16px}
 #fav.active svg path,#fav.active svg{color:#ffaf0f}
-#count{flex:0 0 14ch;min-width:14ch;max-width:14ch;overflow:hidden;text-overflow:ellipsis;opacity:.6;text-align:end;white-space:nowrap;font-variant-numeric:tabular-nums}
+#count{flex:0 0 14ch;min-width:14ch;max-width:14ch;overflow:hidden;text-overflow:ellipsis;opacity:.6;text-align:start;white-space:nowrap;font-variant-numeric:tabular-nums}
 
 #main{flex:1;min-height:0;display:flex}
 #log-content{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}

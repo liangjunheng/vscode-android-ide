@@ -313,7 +313,7 @@
     sync();
   })();
 
-  let raf = 0, hostVisible = true;
+  let raf = 0, hostVisible = false;
   // 宿主和页面都可见时才绘制；输入可选宿主状态，输出隐藏任务取消或单次恢复绘制。
   // 不改变接收与缓存上限；回归：tests/logcat-browser.test.js 隐藏DOM零变化、搜索取消和恢复断言。
   function syncVisibility(value = hostVisible) {
@@ -327,7 +327,7 @@
   }
   document.addEventListener('visibilitychange', () => syncVisibility());
   // 合并可见时同帧布局；无输入，输出单次绘制，隐藏期间不排队，恢复时显示当前状态。
-  // 回归：tests/logcat-browser.test.js 的追加、缩放和连续帧稳定性断言。
+  // 宿主init建立工具栏后才允许首绘；LOGCAT_BROWSER=1 的 format and build controls 验证初始化零异常，原追加/缩放断言覆盖稳定性。
   function render() { if (hostVisible && !document.hidden && !raf) { raf = requestAnimationFrame(() => { raf = 0; draw(); }); } }
 
   // 以缓存的实际行高构建前缀坐标；输入为当前 rows，输出完整缓存范围的 offsets。
@@ -867,4 +867,5 @@
   });
 
   vs.postMessage({ type: 'ready' });
+  initBuildPanel(message => vs.postMessage(message));
 })();

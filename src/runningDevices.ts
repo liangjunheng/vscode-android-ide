@@ -574,7 +574,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
 // 输入资源和模式，在设备选择框后输出投屏/Explorer/Processes图标组，不生成Wi-Fi按钮；build-panel-ui与device-view-mode回归验证同排顺序、移除绑定与四态恢复。
 // 输入资源和 mirrorVisible 配置，输出含初始 mirror-hidden/data-mirror-visible 的页面；npm test build panel initial mirror state 与 bridge 回归验证初始状态和资源传递。
 // 共享下拉资源随页面生成；npm test 的 dropdown 接线断言及 LOGCAT_BROWSER=1 dropdown 回归验证图标、主题和原生选择。
-// 构建动作栏以Show Logcat结尾；build-panel-ui回归严格断言七个按钮及已移除入口不再渲染。
+// 构建动作栏初始化共享控件并以Show Logcat结尾；node --test tests/build-panel-ui.test.js 与 LOGCAT_BROWSER=1 run mode 验证接线和界面。
 function html(webview: vscode.Webview, codicons: vscode.Uri, icons: Record<string, string>, art: { dark: string; light: string; panel: string; style: string; mirrorVisible: boolean; deviceViewMode: DeviceViewMode; processesScript: string; processesStyle: string; explorerScript: string; explorerStyle: string; dropdownStyle: string }) {
   return /* html */ `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource};">
@@ -830,5 +830,5 @@ addEventListener('message',({data:m})=>{
  else if(m.type==='compose')compose(m);
  else if(m.type==='error'){msg.textContent=m.text;if(frame.dataset.state!=='live')setPresentation('error',m.text)};});
 send({type:'ready'});
-</script><script src="${art.panel}"></script><script src="${art.processesScript}"></script><script src="${art.explorerScript}"></script></body></html>`;
+</script><script src="${art.panel}"></script><script>initBuildPanel(send);</script><script src="${art.processesScript}"></script><script src="${art.explorerScript}"></script></body></html>`;
 }

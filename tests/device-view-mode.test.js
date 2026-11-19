@@ -55,7 +55,7 @@ test('device view mode restores preference rejects invalid input and propagates 
 test('grouped view toggles route three states without resizing controls', () => {
   const nodes = {}, sent = []; let receive;
   const get = id => nodes[id] ||= { value: '', children: [], classList: { toggle() {} }, setAttribute(k,v) { this[k] = v; }, replaceChildren() { this.children = []; }, appendChild(v) { this.children.push(v); } };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../media/build-panel.js'), 'utf8'), { document: { body: { dataset: { deviceViewMode: 'explorer' }, classList: { toggle() {} } }, getElementById: get, createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (t, fn) => { receive = m => fn({ data: m }); } });
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../media/build-panel.js'), 'utf8') + ';initBuildPanel(send);', { document: { body: { dataset: { deviceViewMode: 'explorer' }, classList: { toggle() {} } }, getElementById: get, createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (t, fn) => { receive = m => fn({ data: m }); } });
   assert.equal(get('build-explorer')['aria-pressed'], 'true'); assert.equal(get('build-mirror')['aria-pressed'], 'false'); assert.equal(get('device-explorer').hidden, false);
   get('build-explorer').onclick(); assert.equal(sent.at(-1).mode, 'hidden');
   receive({ type: 'deviceViewMode', mode: 'hidden' }); assert.equal(get('device-explorer').hidden, true);

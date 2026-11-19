@@ -43,7 +43,10 @@ body #build-project option,body #build-target option{background:var(--popup-bg);
   body #header #dev,body #header #fmt{display:flex;align-items:center;gap:8px;padding-inline-end:8px}
   #header select>button,body #tabs select>button{display:flex;align-items:center;flex:1;min-width:0;width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:start;overflow:hidden;box-shadow:none;gap:6px}
   body #tabs select>button:hover,body #tabs select>button:active{background:transparent}
+  /* 格式标签参与固有尺寸计算；LOGCAT_BROWSER=1 format 回归断言两种文字均完整显示。 */
   body #header #fmt{flex-shrink:0}
+  body #header #fmt>button{width:auto;flex:0 0 auto}
+  body #header #fmt selectedcontent{flex:none}
   #header selectedcontent,body #tabs selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   body #tabs select>button .build-loading{flex:0 0 16px;margin-inline-start:0}
   #header select::picker-icon{position:static;flex:0 0 16px;margin-inline-start:0;pointer-events:none}
