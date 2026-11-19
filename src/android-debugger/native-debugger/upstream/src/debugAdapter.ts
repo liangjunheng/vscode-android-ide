@@ -102,6 +102,8 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             if (lldbConfig.preRunCommands !== undefined && (!Array.isArray(lldbConfig.preRunCommands) || lldbConfig.preRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native preRunCommands must be a string array');
             lldbConfig.preRunCommands = [...(lldbConfig.preRunCommands ?? []), ...nativeLibraryCommands(config.androidNativeLibraries)];
         }
+        if (lldbConfig.postRunCommands !== undefined && (!Array.isArray(lldbConfig.postRunCommands) || lldbConfig.postRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native postRunCommands must be a string array');
+        lldbConfig.postRunCommands = [...(lldbConfig.postRunCommands ?? []), 'image list -o -f'];
         Object.assign(lldbConfig, { type: 'lldb', request: 'attach', pid: this.host.processId({ ...config, pid, processId: pid }), androidTarget: config.target.udid, androidPackageName: config.packageName, androidProjectRoot: config.androidProjectRoot });
         return lldbConfig;
     }

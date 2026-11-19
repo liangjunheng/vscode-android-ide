@@ -151,6 +151,7 @@ test('built-in Native real DAP attach loads project-built libraries and owns one
   assert.deepEqual(options.symbolSearchPaths, ['external/unverified']);
   assert.deepEqual(Array.from(config.symbolSearchPaths), []);
   assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.user true', ...[app, engine].map(filename => 'target modules add -- ' + JSON.stringify(filename))]);
+  assert.deepEqual(Array.from(config.postRunCommands), ['image list -o -f']);
   assert.deepEqual(options.preRunCommands, ['settings set target.user true']); assert.equal(config.androidNativeLibraries, undefined);
   assert.equal(f.inputCalls, 0); assert.equal(f.dialogCalls, 0); assert.equal(f.notices.length, 0); assert.equal(f.symbolUpdates.length, 0);
   assert.equal(f.projectLibraryCalls.length, 1); assert.deepEqual(f.projectLibraryCalls[0], { projectRoot: root, abi: 'arm64-v8a' });

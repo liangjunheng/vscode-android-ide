@@ -167,15 +167,21 @@ test('discovers only CMake/ndkBuild project outputs with real DWARF and exact AB
   await writeSo(path.join(fixture.app, 'build', 'outputs', 'apk', 'debug', 'libpackaged.so'), { });
   await writeSo(path.join(fixture.app, '.test-artifacts', 'libignored.so'), { });
 
-  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(good64)]);
-  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project)), [await fsp.realpath(good32), await fsp.realpath(good64), await fsp.realpath(goodBe), await fsp.realpath(wrongAbi)]);
+  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(good64), await fsp.realpath(imported), await fsp.realpath(sourceOutside)]);
+  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project)), [await fsp.realpath(good32), await fsp.realpath(good64), await fsp.realpath(goodBe), await fsp.realpath(imported), await fsp.realpath(sourceOutside), await fsp.realpath(wrongAbi)]);
 });
 
 test('reads ndkBuild android_gradle_build libraries and never follows output symlinks', async t => {
   const fixture = await createFixture(t);
   const nativeRoot = path.join(fixture.app, 'build', 'intermediates', 'ndkBuild', 'debug', 'arm64-v8a');
+  const cmakeRoot = path.join(fixture.app, 'build', 'intermediates', 'cmake', 'debug', 'obj', 'arm64-v8a');
+  const cxxRoot = path.join(fixture.app, 'module', 'build', 'intermediates', 'cxx', 'Debug', 'hash', 'obj', 'arm64-v8a');
+  const hiddenCxxRoot = path.join(fixture.app, 'module', '.cxx', 'Debug', 'hash', 'arm64-v8a');
   const output = path.join(nativeRoot, 'libndk.so');
-  await writeSo(output, {});
+  const cmakeOutput = path.join(cmakeRoot, 'libcmake.so');
+  const cxxOutput = path.join(cxxRoot, 'libcxx.so');
+  const hiddenCxxOutput = path.join(hiddenCxxRoot, 'libhidden-cxx.so');
+  await writeSo(output, {}); await writeSo(cmakeOutput, {}); await writeSo(cxxOutput, {}); await writeSo(hiddenCxxOutput, {});
   await writeJson(path.join(nativeRoot, 'android_gradle_build.json'), { libraries: [{ files: [{ src: output }] }], runtimeFiles: [{ src: path.join(nativeRoot, 'runtime.so') }] });
   const external = path.join(fixture.project, 'external.so');
   await writeSo(external, {});
@@ -186,7 +192,7 @@ test('reads ndkBuild android_gradle_build libraries and never follows output sym
   } catch (error) {
     symlink = undefined;
   }
-  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(output)]);
+  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(cmakeOutput), await fsp.realpath(output), await fsp.realpath(hiddenCxxOutput), await fsp.realpath(cxxOutput)]);
   if (symlink) assert.equal((await discoverProjectLibraries(fixture.project)).includes(await fsp.realpath(symlink)), false);
 });
 
@@ -205,16 +211,17 @@ test('uses only the newest CMake index and returns normal missing builds as an e
   const now = Date.now() / 1000;
   await fsp.utimes(path.join(fixture.reply, 'index-old.json'), now - 20, now - 20);
   await fsp.utimes(path.join(fixture.reply, 'index-new.json'), now + 20, now + 20);
-  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(newOutput)]);
+  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(newOutput), await fsp.realpath(oldOutput)]);
   const empty = await fsp.mkdtemp(path.join(os.tmpdir(), 'project-libraries-empty-'));
   t.after(() => fsp.rm(empty, { recursive: true, force: true }));
   assert.deepEqual(Array.from(await discoverProjectLibraries(empty, 'arm64-v8a')), []);
 });
 
-test('propagates malformed metadata while malformed ELF is safely ineligible', async t => {
+test('ignores malformed build metadata and returns only valid ELF DWARF libraries', async t => {
   const fixture = await createFixture(t);
   await fsp.mkdir(fixture.reply, { recursive: true });
   await fsp.writeFile(path.join(fixture.reply, 'index-bad.json'), '{not-json');
   await fsp.utimes(path.join(fixture.reply, 'index-bad.json'), Date.now() / 1000 + 30, Date.now() / 1000 + 30);
-  await assert.rejects(discoverProjectLibraries(fixture.project), /Invalid JSON/);
+  const output = path.join(fixture.buildRoot, 'libvalid.so'); await writeSo(output, {});
+  assert.deepEqual(Array.from(await discoverProjectLibraries(fixture.project, 'arm64-v8a')), [await fsp.realpath(output)]);
 });
