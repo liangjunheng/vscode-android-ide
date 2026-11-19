@@ -77,6 +77,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             "androidTarget": config.target.udid,
             "androidAbi": config.native?.abi,
             "androidPackageName": config.packageName,
+            "sourceLanguages": ["c", "cpp"],
             "androidNativeToolchain": (config as Record<string, unknown>).androidNativeToolchain ?? nativeToolchainOverrides(config.native),
         };
         let excludeProperties = ["abi", "abiSupported", "abiMap", "sdkRoot", "ndkRoot"];

@@ -139,7 +139,7 @@ test('Native prompts for a missing NDK and retries the current session', async t
 test('Native launch.json toolchain overrides reach LLDB server without leaking into CodeLLDB child', async t => {
   const f = await fixture(t); const overrides = { sdkRoot: 'launch-sdk', ndkRoot: 'launch-ndk' }; const adapter = await f.parent({ native: { ...overrides, abiSupported: ['arm64-v8a'] } }, true);
   assert.equal((await request(f, adapter, 'attach')).success, true);
-  assert.equal(f.children[0].configuration.sdkRoot, undefined); assert.equal(f.children[0].configuration.ndkRoot, undefined); assert.equal(f.children[0].configuration.androidNativeToolchain, undefined);
+  assert.equal(f.children[0].configuration.sourceLanguages?.[0], 'c'); assert.equal(f.children[0].configuration.sourceLanguages?.[1], 'cpp'); assert.equal(f.children[0].configuration.sdkRoot, undefined); assert.equal(f.children[0].configuration.ndkRoot, undefined); assert.equal(f.children[0].configuration.androidNativeToolchain, undefined);
 });
 
 test('original Native provider resolves select and cancellation before descriptor creation', async t => {
