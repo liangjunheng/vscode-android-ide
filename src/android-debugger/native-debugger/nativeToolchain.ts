@@ -79,7 +79,7 @@ function findNdk(sdk: string): string | undefined {
  * 回归：Node>=22 执行 node --test tests/native-toolchain.test.js，断言 .cxx/Gradle 输出目录自动发现和显式路径优先。 */
 export function findNativeSymbolSearchPaths(projectRoot?: string, native?: unknown): string[] {
   const values = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : {};
-  const configured = Array.isArray(values.symbolSearchPaths) ? values.symbolSearchPaths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map(value => path.resolve(value)) : [];
+  const configured = Array.isArray(values.symbolSearchPaths) ? values.symbolSearchPaths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map(value => path.resolve(projectRoot ?? process.cwd(), value)) : [];
   if (configured.length) return [...new Set(configured)];
   const local = readProjectLocalConfig(projectRoot);
   const localPaths = local.debugger?.symbolSearchPaths ?? [];

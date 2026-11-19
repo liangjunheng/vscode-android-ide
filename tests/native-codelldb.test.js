@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..');
 
 /** 加载真实父adapter、原两阶段provider和真实DAP库，只替换设备/VSCode边界；npm test发现本文件。 */
 async function fixture(t) {
-  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, input: undefined, inputCalls: 0, toolchainFailure: undefined, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
+  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, input: undefined, inputCalls: 0, autoSymbols: [], toolchainFailure: undefined, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
   const disposable = set => listener => { set.add(listener); return { dispose: () => set.delete(listener) }; };
   const vscode = {
     Uri: { file: fsPath => ({ fsPath }) },
@@ -57,7 +57,7 @@ async function fixture(t) {
   };
   const targetPicker = { activate() {}, setCurrentTarget() {}, resetCurrentTarget() {}, async pickTarget() { return f.selected; }, async getLastOrPickTarget() { return f.selected; }, async getTargetFromUDID(udid) { return { udid }; } };
   const mocks = { vscode, android, targetCommand, targetPicker,
-    nativeToolchain: { findNativeSymbolSearchPaths: () => [], resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
+    nativeToolchain: { findNativeSymbolSearchPaths: () => f.autoSymbols, resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
     nativeTarget: { resolveLauncherActivity: async (adb, serial, pkg) => { f.calls.push(['activity', adb, serial, pkg]); return 'MainActivity'; } },
   };
   const result = await build({ entryPoints: [path.join(root, 'src/android-debugger/native-debugger/adapter.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['@vscode/debugadapter'], plugins: [{ name: 'native-boundaries', setup(builder) {
@@ -128,10 +128,23 @@ test('built-in Native real DAP attach resolves original remote commands and owns
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.cleaned.length, 1); assert.equal(f.starts.size, 0); assert.equal(f.ends.size, f.baseEnds);
 });
 
+test('Native auto symbols fill a missing native config without prompting', async t => {
+  const f = await fixture(t); f.autoSymbols = ['auto-symbols']; const folder = { uri: { fsPath: root } };
+  const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, { type: 'android-tools', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app' });
+  assert.equal(f.inputCalls, 0); assert.equal(resolved.native.symbolSearchPaths[0], 'auto-symbols');
+});
+
+test('Native symbol prompt cancellation is not repeated in the second phase', async t => {
+  const f = await fixture(t); f.input = undefined; const folder = { uri: { fsPath: root } }; const config = { type: 'android-tools', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {} };
+  const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, config);
+  await f.providers.get('android-tools').resolveDebugConfigurationWithSubstitutedVariables(folder, resolved);
+  assert.equal(f.inputCalls, 1);
+});
+
 test('Native prompts for symbol paths and writes only the current session config', async t => {
   const f = await fixture(t); f.input = 'symbols-one, symbols-two'; const folder = { uri: { fsPath: root } };
   const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, { type: 'android-tools', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {} });
-  assert.equal(f.inputCalls, 1); assert.match(f.inputPrompt, /symbol directories/); assert.equal(resolved.native.symbolSearchPaths[0], 'symbols-one'); assert.equal(resolved.native.symbolSearchPaths[1], 'symbols-two');
+  assert.equal(f.inputCalls, 1); assert.match(f.inputPrompt, /symbol directories/); assert.equal(resolved.native.symbolSearchPaths[0], path.resolve(root, 'symbols-one')); assert.equal(resolved.native.symbolSearchPaths[1], path.resolve(root, 'symbols-two'));
 });
 
 test('Native prompt cancellation leaves symbol paths unset and continues with warning', async t => {

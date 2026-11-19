@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getAndroidDebugConfigurations } from '../index';
 import * as android from './upstream/src/android';
@@ -16,17 +17,18 @@ export type NativePackageResolver = (folder: vscode.WorkspaceFolder | undefined)
 
 /** 校验 Native 启动前置条件；缺失/异常路径、ABI或符号目录可让用户输入并只修正本次会话，失败不创建设备/LLDB资源。
  * 回归：Node>=22 执行 node --test tests/native-codelldb.test.js，断言手动 NDK/符号目录输入、取消与错误提示。 */
-export async function validateNativeDebugConfiguration(config: vscode.DebugConfiguration, folder?: vscode.WorkspaceFolder, strictPaths = false, corrected = false): Promise<void> {
+export async function validateNativeDebugConfiguration(config: vscode.DebugConfiguration, folder?: vscode.WorkspaceFolder, strictPaths = false, corrected = false, allowPrompt = true): Promise<void> {
   try {
-    const native = config.native;
+    const native = config.native && typeof config.native === 'object' && !Array.isArray(config.native) ? { ...config.native } : {};
+    config.native = native;
     const overrides = nativeToolchainOverrides(native);
     resolveNativeToolchain(config.androidProjectRoot || folder?.uri.fsPath, overrides);
     validateNativeAbis(native, config.androidAbiSupported);
     const nativeConfig = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : undefined;
     const automaticSymbols = findNativeSymbolSearchPaths(config.androidProjectRoot || folder?.uri.fsPath, native);
     if (automaticSymbols.length && nativeConfig) nativeConfig.symbolSearchPaths = automaticSymbols;
-    if ((!Array.isArray(nativeConfig?.symbolSearchPaths) || nativeConfig.symbolSearchPaths.length === 0) && typeof vscode.window?.showInputBox === 'function') {
-      await promptNativeCorrection(config, 'symbolSearchPaths');
+    if (allowPrompt && (!Array.isArray(nativeConfig?.symbolSearchPaths) || nativeConfig.symbolSearchPaths.length === 0) && typeof vscode.window?.showInputBox === 'function') {
+      await promptNativeCorrection(config, 'symbolSearchPaths', folder);
     }
     if (config.packageName !== undefined && (typeof config.packageName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName))) throw new Error('A valid package name is required.');
     if (config.launchActivity !== undefined && (typeof config.launchActivity !== 'string' || !config.launchActivity.trim())) throw new Error('Invalid Native launchActivity: expected a non-empty activity name');
@@ -40,7 +42,7 @@ export async function validateNativeDebugConfiguration(config: vscode.DebugConfi
     }
   } catch (error) {
     const field = nativeCorrectionField(error);
-    if (!corrected && field && await promptNativeCorrection(config, field)) return validateNativeDebugConfiguration(config, folder, strictPaths, true);
+    if (allowPrompt && !corrected && field && await promptNativeCorrection(config, field, folder)) return validateNativeDebugConfiguration(config, folder, strictPaths, true, allowPrompt);
     const detail = error instanceof Error ? error.message : String(error);
     const action = await vscode.window.showErrorMessage('Android Native configuration is invalid: ' + detail + '. Correct launch.json and start again.', 'Open launch.json');
     if (action === 'Open launch.json' && typeof vscode.commands?.executeCommand === 'function') await vscode.commands.executeCommand('workbench.action.debug.configure');
@@ -61,7 +63,7 @@ function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupp
 
 /** 弹出字段输入并写回当前会话配置副本；支持逗号分隔 symbolSearchPaths，取消返回 false，不写 settings 或 launch.json。
  * 回归：Node>=22 执行 node --test tests/native-codelldb.test.js，断言输入值只进入当前配置副本。 */
-async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | 'symbolSearchPaths'): Promise<boolean> {
+async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | 'symbolSearchPaths', folder?: vscode.WorkspaceFolder): Promise<boolean> {
   if (typeof vscode.window?.showInputBox !== 'function') return false;
   const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};
   const current = native[field];
@@ -72,7 +74,7 @@ async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 
   });
   if (!value?.trim()) return false;
   if (field === 'abiSupported') native.abiSupported = value.split(',').map(item => item.trim()).filter(Boolean);
-  else if (field === 'symbolSearchPaths') native.symbolSearchPaths = value.split(',').map(item => item.trim()).filter(Boolean);
+  else if (field === 'symbolSearchPaths') native.symbolSearchPaths = value.split(',').map(item => item.trim()).filter(Boolean).map(item => path.resolve(folder?.uri.fsPath ?? config.androidProjectRoot ?? process.cwd(), item));
   else if (field === 'abi') native.abi = value.trim();
   else { native[field] = value.trim(); if (field === 'apkPath') config.apkPath = value.trim(); }
   config.native = native;
@@ -186,7 +188,7 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
 
   /** 变量替换后沿用原包名/ABI和resume默认值，规范化进程身份；回归同文件launch/attach解析断言。 */
   async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
-    await validateNativeDebugConfiguration(config, folder, true);
+    await validateNativeDebugConfiguration(config, folder, true, false, false);
     const result = await this.delegate.resolveDebugConfigurationWithSubstitutedVariables(folder, config, token!);
     if (result?.request === 'attach') { result.pid = processId(result as AndroidNativeDebugConfiguration); result.processId = result.pid; }
     return result;

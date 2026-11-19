@@ -55,7 +55,7 @@ test('Native symbol discovery finds Gradle outputs and honors explicit paths', t
   const f = fixture(t); const symbols = path.join(f.root, '.cxx', 'Debug', 'hash', 'obj', 'arm64-v8a'); const gradleSymbols = path.join(f.root, 'build', 'intermediates', 'cxx', 'Debug', 'hash', 'obj', 'arm64-v8a');
   fs.mkdirSync(symbols, { recursive: true }); fs.mkdirSync(gradleSymbols, { recursive: true }); fs.writeFileSync(path.join(symbols, 'libapp.so'), 'symbols'); fs.writeFileSync(path.join(gradleSymbols, 'libother.so'), 'symbols');
   const found = f.api.findNativeSymbolSearchPaths(f.root); assert.ok(found.includes(symbols)); assert.ok(found.includes(gradleSymbols));
-  const explicit = path.join(f.root, 'manual-symbols'); fs.mkdirSync(explicit); const explicitFound = f.api.findNativeSymbolSearchPaths(f.root, { symbolSearchPaths: [explicit] }); assert.equal(explicitFound.length, 1); assert.equal(explicitFound[0], explicit);
+  const explicit = path.join(f.root, 'manual-symbols'); fs.mkdirSync(explicit); const explicitFound = f.api.findNativeSymbolSearchPaths(f.root, { symbolSearchPaths: ['manual-symbols'] }); assert.equal(explicitFound.length, 1); assert.equal(explicitFound[0], explicit);
 });
 
 test('Native discovery keeps upstream SDK ndk and ndk-bundle layout with PATH ADB fallback', t => {

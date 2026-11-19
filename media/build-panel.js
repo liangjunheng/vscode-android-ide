@@ -2,18 +2,19 @@
   const get = (id) => document.getElementById(id);
   const project = get('build-project'), target = get('build-target');
   const status = get('build-status'), run = get('build-run');
-  let state = { busy: false, targets: [] }, serial = '';
+  let state = { busy: false, deviceLoading: true, targets: [] }, serial = '';
   let viewMode = document.body.dataset.deviceViewMode || (document.body.dataset.mirrorVisible === 'false' ? 'hidden' : 'mirror');
 
   // 输入宿主选项与选择值，以文本节点更新下拉；npm test 的 build panel UI 回归验证转义、空列表和选择。
   function options(select, items, value, empty) {
-    select.replaceChildren();
+    const button = select.querySelector('button');
+    select.replaceChildren(button);
     if (!items.length) { const option = document.createElement('option'); option.value = ''; option.textContent = empty; select.appendChild(option); }
     for (const item of items) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.label; select.appendChild(option); }
     select.value = value || '';
   }
 
-  // 根据任务/设备控制构建按钮，日志入口始终可用；build-panel-ui回归覆盖busy/空态及已移除工具不再绑定。
+  // 分别根据Gradle和设备状态控制对应加载图标；build-panel-ui回归覆盖初始化、同步完成和设备数据完成。
   function render() {
     project.disabled = state.busy;
     target.disabled = state.busy || !state.targets.length;
@@ -25,6 +26,9 @@
     get('build-run-label').textContent = stoppable ? 'Stop' : 'Run';
     for (const action of ['build', 'install', 'debug']) get('build-' + action).disabled = state.busy || !state.target || (action !== 'build' && !serial);
     get('build-logcat').disabled = false;
+    get('build-project-loading').hidden = !state.busy;
+    get('build-target-loading').hidden = !state.busy;
+    get('build-device-loading').hidden = !state.deviceLoading;
     const mirrorVisible = viewMode === 'mirror';
     get('build-mirror').setAttribute('aria-pressed', String(mirrorVisible));
     get('build-explorer').setAttribute('aria-pressed', String(viewMode === 'explorer'));
@@ -61,13 +65,14 @@
   get('build-processes').onclick = () => send({ type: 'setDeviceViewMode', mode: viewMode === 'processes' ? 'hidden' : 'processes' });
   addEventListener('message', ({ data: message }) => {
     if (message.type === 'buildState') {
-      state = message;
+      state = { ...message, deviceLoading: message.deviceLoading ?? state.deviceLoading };
       options(project, message.projects || [], message.project, 'No Gradle project');
       options(target, message.targets || [], message.target, 'No Android variants');
       render();
     } else if (message.type === 'deviceViewMode') { viewMode = message.mode; render();
     } else if (message.type === 'mirrorVisibility') { viewMode = message.mode || (message.visible ? 'mirror' : 'hidden'); render();
-    } else if (message.type === 'devices') { serial = message.serial || ''; render(); }
+    } else if (message.type === 'devices') { serial = message.serial || ''; state.deviceLoading = false; render(); }
+    else if (message.type === 'deviceLoading') { state.deviceLoading = message.loading; render(); }
   });
   render();
   action('refresh');
