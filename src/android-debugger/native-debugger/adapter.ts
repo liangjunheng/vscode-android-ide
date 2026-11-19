@@ -94,7 +94,7 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
   constructor(private readonly selectedPackage: NativePackageResolver = () => undefined) {}
 
   /** 返回独立内置Native配置供Run and Debug显示名称，不探测工具链；native-codelldb.test.js直接调用initial/dynamic入口断言名称、复制隔离和零设备调用。 */
-  provideDebugConfigurations(): vscode.DebugConfiguration[] { return getAndroidDebugConfigurations(); }
+  provideDebugConfigurations(_folder?: vscode.WorkspaceFolder, _token?: vscode.CancellationToken): vscode.DebugConfiguration[] { return getAndroidDebugConfigurations(); }
 
   /** 建立原设备选择与命令变量上下文，拒绝不可信或非Native模式；回归同文件provider选择/取消用例。 */
   async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
@@ -163,12 +163,12 @@ export function registerNativeProviders(context: vscode.ExtensionContext, select
   const lldb = new NativeLldbConfigurationProvider();
   const androidProvider = new NativeAndroidConfigurationProvider(selectedPackage);
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('android-tools', androidProvider),
-    vscode.debug.registerDebugConfigurationProvider('android-tools', { provideDebugConfigurations: () => androidProvider.provideDebugConfigurations() }, vscode.DebugConfigurationProviderTriggerKind.Dynamic), vscode.debug.registerDebugConfigurationProvider('lldb', lldb), lldb,
+    vscode.debug.registerDebugConfigurationProvider('android-tools', androidProvider, vscode.DebugConfigurationProviderTriggerKind.Dynamic), vscode.debug.registerDebugConfigurationProvider('lldb', lldb), lldb,
     vscode.debug.onDidTerminateDebugSession(session => { if (session.type === 'lldb') void lldb.release(session.configuration.androidLldbServerSocket).catch(reportCleanup); }),
-    vscode.commands.registerCommand('android-debug.pickAndroidProcess', targetCommand.pickAndroidProcess),
-    vscode.commands.registerCommand('android-debug.getBestAbi', targetCommand.getBestAbi),
-    vscode.commands.registerCommand('android-debug.getBestMappedAbi', targetCommand.getBestMappedAbi),
-    vscode.commands.registerCommand('android-debug.resumeWaitingProcess', targetCommand.resumeWaitingProcess));
+    vscode.commands.registerCommand('android-tools.pickAndroidProcess', targetCommand.pickAndroidProcess),
+    vscode.commands.registerCommand('android-tools.getBestAbi', targetCommand.getBestAbi),
+    vscode.commands.registerCommand('android-tools.getBestMappedAbi', targetCommand.getBestMappedAbi),
+    vscode.commands.registerCommand('android-tools.resumeWaitingProcess', targetCommand.resumeWaitingProcess));
   registrations.set(context, lldb);
   return lldb;
 }

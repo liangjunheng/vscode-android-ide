@@ -89,13 +89,13 @@ function gate() { return Promise.withResolvers(); }
 test('Native factory registers only Native providers once without probing the NDK', async t => {
   const f = await fixture(t); f.api.registerNativeProviders(f.context);
   assert.deepEqual([...f.providers.keys()], ['android-tools', 'lldb']); assert.equal(f.factory.nativeOnly, true);
-  assert.deepEqual([...f.commands.keys()], ['android-debug.pickAndroidProcess', 'android-debug.getBestAbi', 'android-debug.getBestMappedAbi', 'android-debug.resumeWaitingProcess']);
+  assert.deepEqual([...f.commands.keys()], ['android-tools.pickAndroidProcess', 'android-tools.getBestAbi', 'android-tools.getBestMappedAbi', 'android-tools.resumeWaitingProcess']);
   assert.equal(f.calls.length, 0); assert.equal(f.servers.length, 0);
   assert.equal(f.dynamicType,'android-tools');
-  assert.equal(f.dynamicProvider.resolveDebugConfiguration,undefined);
+  assert.equal(f.dynamicProvider, f.providers.get('android-tools'));
   const initial=f.providers.get('android-tools').provideDebugConfigurations();
   const dynamic=f.dynamicProvider.provideDebugConfigurations();
-  assert.equal(initial.length,1); assert.equal(dynamic.length,1); assert.equal(dynamic[0].name,'[内置] Android Native');
+  assert.equal(initial.length,1); assert.equal(dynamic.length,1); assert.equal(dynamic[0].name,'[内置] Android Native'); assert.equal(dynamic[0].target, 'select');
   assert.equal(dynamic[0].type,'android-tools'); assert.equal(dynamic[0].request,'launch');
   initial[0].native.abi='x86'; assert.equal(dynamic[0].native.abi,undefined);
   assert.equal(f.calls.length,0); assert.equal(f.servers.length,0);

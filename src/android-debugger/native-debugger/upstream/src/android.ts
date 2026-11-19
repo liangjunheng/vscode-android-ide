@@ -164,16 +164,7 @@ export async function startLldbServer(device: Device, packageName: string, abi: 
         }
         await stopPromise;
     };
-    try {
-        await subprocess.start();
-    } catch (startError) {
-        try {
-            await stop();
-        } catch (stopError) {
-            throw new AggregateError([startError, stopError], "Failed to start and stop lldb-server");
-        }
-        throw startError;
-    }
+    subprocess.start();
 
     subprocess.on('output', (stdout, stderr) => {
         if (stdout.trim()) { logger.log(`lldb-server out ${stdout.trim()}`); }

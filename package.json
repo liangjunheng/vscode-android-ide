@@ -168,7 +168,7 @@
         "icon": "$(device-mobile)"
       },
       {
-        "command": "android-debug.resumeWaitingProcess",
+        "command": "android-tools.resumeWaitingProcess",
         "title": "Resume process waiting for debugger",
         "category": "Android Debug"
       }
@@ -201,9 +201,9 @@
           "cpp"
         ],
         "variables": {
-          "pickAndroidProcess": "android-debug.pickAndroidProcess",
-          "abi": "android-debug.getBestAbi",
-          "mappedAbi": "android-debug.getBestMappedAbi"
+          "pickAndroidProcess": "android-tools.pickAndroidProcess",
+          "abi": "android-tools.getBestAbi",
+          "mappedAbi": "android-tools.getBestMappedAbi"
         },
         "configurationAttributes": {
           "attach": {
@@ -473,9 +473,9 @@
       {
         "type": "lldb",
         "variables": {
-          "pickAndroidProcess": "android-debug.pickAndroidProcess",
-          "abi": "android-debug.getBestAbi",
-          "mappedAbi": "android-debug.getBestMappedAbi"
+          "pickAndroidProcess": "android-tools.pickAndroidProcess",
+          "abi": "android-tools.getBestAbi",
+          "mappedAbi": "android-tools.getBestMappedAbi"
         },
         "configurationAttributes": {
           "attach": {

@@ -43,7 +43,8 @@ test('runtime sources retain strict toolchain and cleanup contracts', () => {
   const paths = fs.readFileSync(path.join(root, 'src/android-debugger/native-debugger/upstream/src/androidPaths.ts'), 'utf8');
   const target = fs.readFileSync(path.join(root, 'src/android-debugger/native-debugger/upstream/src/targetCommand.ts'), 'utf8');
   assert.match(android, /resolveNativeToolchain/); assert.match(android, /executable:\s*\{path: toolchain\.adb/);
-  assert.doesNotMatch(android, /catch \{\s*\}/); assert.match(android, /await subprocess\.start\(\)/);
+  const lldb = android.slice(android.indexOf('// LLDB server'), android.indexOf('// Simpleperf'));
+  assert.doesNotMatch(android, /catch \{\s*\}/); assert.match(lldb, /subprocess\.start\(\);/); assert.doesNotMatch(lldb, /await subprocess\.start\(\)/);
   assert.match(paths, /export async function activate/); assert.doesNotMatch(paths, /await updatePaths/);
   assert.match(target, /throw error;/); assert.match(target, /async function lldbServerCleanup/);
 });
@@ -83,13 +84,12 @@ test('Android runtime uses project toolchains and preserves ABI selection', asyn
   assert.equal(await loaded.api.getBestAbi({ androidProjectRoot: 'project-one' }, ['arm64-v8a']), 'arm64-v8a');
 });
 
-test('LLDB deployment is ordered, strict, and awaits stop on start failure', async () => {
+test('LLDB deployment follows upstream nonblocking startup and awaits stop', async () => {
   const loaded = await loadAndroidRuntime(); const device = { androidProjectRoot: 'project-one', udid: 'serial' };
   const result = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
   assert.deepEqual(loaded.state.calls.slice(1, 4).map(x => x[0]), ['push', 'shell', 'shell']); assert.equal(loaded.state.calls[3][1].includes('chmod 700'), true); assert.equal(result.socket, '/com.example.app/platform-fixedsocket.sock');
   await result.stop(); await result.stop(); assert.equal(loaded.state.stopCalls, 1); assert.equal(loaded.state.stopResolved, true);
   loaded.state.failCopy = true; await assert.rejects(() => loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a'), /copy failed/); loaded.state.failCopy = false;
-  loaded.state.failStart = true; await assert.rejects(() => loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a'), /start failed/); assert.equal(loaded.state.stopCalls, 2); assert.equal(loaded.state.stopResolved, true);
 });
 
 

@@ -12,7 +12,7 @@ export interface AndroidDebugTarget {
 // 提供唯一 Native 内置配置，每次返回独立选项，外部配置不受影响。
 // 回归：Node>=22，node --test tests/android-debugger-configurations.test.js；断言模式及配置隔离。
 export function getAndroidDebugConfigurations(): vscode.DebugConfiguration[] {
-  return [{ type: 'android-tools', request: 'launch', name: '[内置] Android Native', androidMode: 'native', mode: 'native', native: {} }];
+  return [{ type: 'android-tools', request: 'launch', name: '[内置] Android Native', androidMode: 'native', mode: 'native', target: 'select', native: {} }];
 }
 
 // 读取当前目录有效 launch/attach 配置并按身份去重；只筛选结构，不修改用户选项。
