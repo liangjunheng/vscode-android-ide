@@ -77,12 +77,8 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             "androidTarget": config.target.udid,
             "androidAbi": config.native?.abi,
             "androidPackageName": config.packageName,
-            "platform": "remote-android",
-            "androidProjectRoot": config.androidProjectRoot,
-            "androidAbiSupported": config.native?.abiSupported,
-            "androidAbiMap": config.native?.abiMap,
         };
-        let excludeProperties = ["abi", "abiSupported", "abiMap", "type", "request", "name", "pid", "processId", "platform", "androidTarget", "androidAbi", "androidPackageName", "androidLldbServerSocket", "androidProjectRoot"];
+        let excludeProperties = ["abi", "abiSupported", "abiMap"];
         if (config.native) for (let key in config.native) if (!excludeProperties.includes(key)) lldbConfig[key] = structuredClone(config.native[key]);
         return lldbConfig;
     }
@@ -95,6 +91,13 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         let lldbConfig = this.prepareNativeDebugConfiguration(config, pid);
         lldbConfig = await this.host.prepareNative(lldbConfig, this.session.workspaceFolder);
         this.socket = lldbConfig.androidLldbServerSocket;
+        this.checkOpen();
+        // CodeLLDB是android-tools的运行时依赖；父会话启动子会话前等待其provider完成激活，避免VS Code返回false而不产生child。
+        if (typeof vscode.extensions?.getExtension === 'function') {
+            const codeLldb = vscode.extensions.getExtension('vadimcn.vscode-lldb');
+            if (!codeLldb) throw new Error('CodeLLDB extension is not installed or enabled');
+            if (!codeLldb.isActive) await codeLldb.activate();
+        }
         this.checkOpen();
         let lldbSuccess = await vscode.debug.startDebugging(this.session.workspaceFolder, lldbConfig, {parentSession: this.session});
         if (!lldbSuccess) throw new Error('CodeLLDB rejected the native child configuration');
@@ -142,10 +145,10 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             this.consoleLog('Launching the app activity ' + config.packageName + '/' + config.launchActivity);
             await android.launchApp(target, config.packageName, config.launchActivity);
             this.checkOpen();
-            // Launch通过主进程精确名称匹配PID；不查询所有PID的包归属，避免设备端package查询瞬时失败误报get-pid。
+            // 沿用原项目Launch逻辑：取启动后JDWP列表的最后一个进程，避免设备返回的进程名与包名不一致时误报get-pid。
             let processList = await android.getProcessList(target, false);
-            let process = processList.find(item => item.name === config.packageName) || processList.find(item => item.packages.includes(config.packageName));
-            if (!process?.pid) throw new Error('Could not get pid for the launched app');
+            let process = processList.length ? processList[processList.length - 1] : undefined;
+            if (!process?.pid) throw new Error("Could not get pid for the app. Please ensure that the app is launched correctly.");
             await this.attachToProcess(process.pid, response);
             await this.resumeProcess(process.pid);
         });

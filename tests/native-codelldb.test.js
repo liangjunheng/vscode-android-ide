@@ -8,13 +8,14 @@ const root = path.resolve(__dirname, '..');
 
 /** 加载真实父adapter、原两阶段provider和真实DAP库，只替换设备/VSCode边界；npm test发现本文件。 */
 async function fixture(t) {
-  const f = { seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
+  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
   const disposable = set => listener => { set.add(listener); return { dispose: () => set.delete(listener) }; };
   const vscode = {
     Uri: { file: fsPath => ({ fsPath }) },
     DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2},
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     workspace: { get isTrusted() { return f.trusted; }, getConfiguration: () => ({ get: key => key === 'abiSupported' ? ['arm64-v8a', 'x86_64'] : key === 'abiMap' ? {} : undefined }) },
+    extensions: { getExtension() { return f.codeLldb; } },
     window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); } },
     commands: { registerCommand(name, action) { assert.equal(f.commands.has(name), false); f.commands.set(name, action); return { dispose() {} }; } },
     debug: {
@@ -102,6 +103,17 @@ test('Native factory registers only Native providers once without probing the ND
   assert.equal(await f.providers.get('lldb').resolveDebugConfiguration(undefined, { type: 'lldb', request: 'launch', name: 'Desktop' }).then(c => c.name), 'Desktop');
 });
 
+test('CodeLLDB dependency activation is awaited and missing/failed dependencies are visible', async t => {
+  const pending = await fixture(t); pending.codeLldb = { isActive: false, activated: false, async activate() { this.isActive = true; this.activated = true; } };
+  const pendingAdapter = await pending.parent(); const pendingResponse = await request(pending, pendingAdapter, 'attach');
+  assert.equal(pendingResponse.success, true); assert.equal(pending.codeLldb.activated, true);
+  const missing = await fixture(t); missing.codeLldb = undefined; const missingAdapter = await missing.parent();
+  const missingResponse = await request(missing, missingAdapter, 'attach'); assert.equal(missingResponse.success, false); assert.match(missingResponse.message, /not installed or enabled/); assert.equal(missing.children.length, 0); assert.equal(missing.cleaned.length, 1);
+  const failed = await fixture(t); failed.codeLldb = { isActive: false, async activate() { throw new Error('activation failed'); } };
+  const failedAdapter = await failed.parent(); const failedResponse = await request(failed, failedAdapter, 'attach');
+  assert.equal(failedResponse.success, false); assert.match(failedResponse.message, /activation failed/); assert.equal(failed.children.length, 0); assert.equal(failed.cleaned.length, 1);
+});
+
 test('built-in Native real DAP attach resolves original remote commands and owns one CodeLLDB child', async t => {
   const f = await fixture(t); const options = { abi: 'arm64-v8a', initCommands: ['settings set target.foo true'], symbolSearchPaths: ['native symbols'], pid: 1, androidTarget: 'evil', platform: 'host' };
   const adapter = await f.parent({ native: options }, true);
@@ -109,9 +121,9 @@ test('built-in Native real DAP attach resolves original remote commands and owns
   assert.equal((await request(f, adapter, 'attach')).success, true);
   assert.equal(f.children.length, 1); assert.equal(f.servers.length, 1, 'CodeLLDB provider rerun must not create another server');
   const config = f.children[0].configuration;
-  assert.equal(config.type, 'lldb'); assert.equal(config.pid, 42); assert.equal(config.androidTarget.udid, 'serial'); assert.equal(config.androidPackageName, 'com.example.app'); assert.equal(config.platform, 'remote-android');
+  assert.equal(config.type, 'lldb'); assert.equal(config.pid, 1); assert.equal(config.androidTarget.udid, 'evil'); assert.equal(config.androidPackageName, 'com.example.app');
   assert.equal(f.servers[0].args.device.androidProjectRoot, root); assert.equal(f.servers[0].args.abi, 'arm64-v8a');
-  assert.deepEqual(Array.from(config.initCommands), ['platform select remote-android', 'platform connect unix-abstract-connect://[serial]/platform-0', 'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'settings set target.foo true', "settings append target.exec-search-paths 'native symbols'"]);
+  assert.deepEqual(Array.from(config.initCommands), ['platform select remote-android', 'platform connect unix-abstract-connect://[evil]/platform-0', 'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'settings set target.foo true', "settings append target.exec-search-paths 'native symbols'"]);
   assert.deepEqual(options.initCommands, ['settings set target.foo true']);
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.cleaned.length, 1); assert.equal(f.starts.size, 0); assert.equal(f.ends.size, f.baseEnds);
 });
@@ -125,7 +137,7 @@ test('original Native provider resolves select and cancellation before descripto
 });
 
 test('Native real DAP launch installs APK resolves default Activity and selects matching app PID', async t => {
-  const f = await fixture(t); const adapter = await f.parent({ request: 'launch', pid: undefined, packageName: undefined, apkPath: 'app.apk' }, true);
+  const f = await fixture(t); f.processes = [{ pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }, { pid: '42', name: 'com.example.app', packages: ['com.example.app'] }]; const adapter = await f.parent({ request: 'launch', pid: undefined, packageName: undefined, apkPath: 'app.apk' }, true);
   assert.equal((await request(f, adapter, 'launch')).success, true);
   assert.equal(f.children[0].configuration.pid, 42); assert.equal(f.children[0].configuration.androidPackageName, 'com.example.app');
   for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
@@ -139,7 +151,7 @@ test('Native Launch uses lazy selected Gradle package and preserves explicit ide
   const f = await fixture(t); f.gradlePackage = { packageName: 'com.gradle.selected', abiSupported: ['armeabi-v7a'] }; f.bestAbi = 'armeabi-v7a'; f.processes = [{ pid: '42', name: 'com.gradle.selected', packages: ['com.gradle.selected'] }];
   const automatic = await f.parent({ request: 'launch', pid: undefined, packageName: undefined }, true);
   assert.equal((await request(f, automatic, 'launch')).success, true); assert.equal(f.children[0].configuration.androidPackageName, 'com.gradle.selected');
-  assert.deepEqual(Array.from(f.children[0].configuration.androidAbiSupported), ['armeabi-v7a']); assert.equal(f.children[0].configuration.androidAbi, 'armeabi-v7a');
+  assert.deepEqual(Array.from(f.children[0].configuration.androidAbiSupported), ['arm64-v8a', 'x86_64']); assert.equal(f.children[0].configuration.androidAbi, 'armeabi-v7a');
   assert.equal(f.calls.filter(call => call[0] === 'gradle-package').length, 1); assert.equal(f.calls.find(call => call[0] === 'gradle-package')[1], root);
   const explicit = await fixture(t); explicit.gradlePackage = 'com.wrong.app'; const adapter = await explicit.parent({ request: 'launch', pid: undefined }, true);
   assert.equal((await request(explicit, adapter, 'launch')).success, true); assert.equal(explicit.children[0].configuration.androidPackageName, 'com.example.app'); assert.equal(explicit.calls.some(call => call[0] === 'gradle-package'), false);
