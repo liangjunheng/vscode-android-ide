@@ -104,6 +104,9 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         let lldbSuccess = await vscode.debug.startDebugging(this.session.workspaceFolder, lldbConfig, {parentSession: this.session});
         if (!lldbSuccess) throw new Error('CodeLLDB rejected the native child configuration');
         if (!Object.keys(this.childSessions).length) throw new Error('CodeLLDB did not report a native child session');
+        if (!Array.isArray(config.native?.symbolSearchPaths) || config.native.symbolSearchPaths.length === 0) {
+            void vscode.window.showWarningMessage('Android Native debugger attached without symbolSearchPaths. C/C++ source breakpoints may not bind; configure native.symbolSearchPaths with unstripped .so directories.');
+        }
         this.checkOpen();
         response.success = lldbSuccess;
         this.consoleLog('Attached to process ' + pid);

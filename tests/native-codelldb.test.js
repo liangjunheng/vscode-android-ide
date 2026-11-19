@@ -16,7 +16,7 @@ async function fixture(t) {
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     workspace: { get isTrusted() { return f.trusted; }, getConfiguration: () => ({ get: key => key === 'abiSupported' ? ['arm64-v8a', 'x86_64'] : key === 'abiMap' ? {} : undefined }) },
     extensions: { getExtension() { return f.codeLldb; } },
-    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showInputBox: async () => f.input }, commands: { executeCommand: async () => undefined },
+    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showWarningMessage: async message => { f.notices.push(message); }, showInputBox: async () => f.input }, commands: { executeCommand: async () => undefined },
     commands: { registerCommand(name, action) { assert.equal(f.commands.has(name), false); f.commands.set(name, action); return { dispose() {} }; } },
     debug: {
       registerDebugAdapterDescriptorFactory() { throw new Error('Descriptor belongs to extension activation'); },
@@ -139,6 +139,7 @@ test('Native prompts for a missing NDK and retries the current session', async t
 test('Native launch.json toolchain overrides reach LLDB server without leaking into CodeLLDB child', async t => {
   const f = await fixture(t); const overrides = { sdkRoot: 'launch-sdk', ndkRoot: 'launch-ndk' }; const adapter = await f.parent({ native: { ...overrides, abiSupported: ['arm64-v8a'] } }, true);
   assert.equal((await request(f, adapter, 'attach')).success, true);
+  assert.equal(f.notices.some(message => /symbolSearchPaths/.test(message)), true);
   assert.equal(f.children[0].configuration.sourceLanguages?.[0], 'c'); assert.equal(f.children[0].configuration.sourceLanguages?.[1], 'cpp'); assert.equal(f.children[0].configuration.sdkRoot, undefined); assert.equal(f.children[0].configuration.ndkRoot, undefined); assert.equal(f.children[0].configuration.androidNativeToolchain, undefined);
 });
 
