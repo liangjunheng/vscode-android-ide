@@ -176,7 +176,7 @@ test('original Native provider resolves select and cancellation before descripto
   f.trusted = false; await assert.rejects(f.providers.get('android-tools').resolveDebugConfiguration(undefined, { type: 'android-tools' }), /not trusted/);
 });
 
-test('Native real DAP launch installs APK resolves default Activity and selects matching app PID', async t => {
+test('Native real DAP launch installs APK resolves default Activity and selects the last JDWP process PID', async t => {
   const apkDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-codelldb-apk-')); const apkPath = path.join(apkDir, 'app.apk'); fs.writeFileSync(apkPath, 'fixture'); t.after(() => fs.rmSync(apkDir, { recursive: true, force: true }));
   const f = await fixture(t); f.processes = [{ pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }, { pid: '42', name: 'com.example.app', packages: ['com.example.app'] }]; const adapter = await f.parent({ request: 'launch', pid: undefined, packageName: undefined, apkPath }, true);
   assert.equal((await request(f, adapter, 'launch')).success, true);
