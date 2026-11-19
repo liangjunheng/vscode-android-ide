@@ -14,7 +14,7 @@ import { nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } 
 export interface NativeProjectMetadata { packageName?: string; abiSupported?: string[]; }
 export type NativePackageResolver = (folder: vscode.WorkspaceFolder | undefined) => string | NativeProjectMetadata | undefined;
 
-/** 校验 Native 启动前置条件；缺失/异常路径或 ABI 先让用户输入并只修正本次会话，失败不创建设备/LLDB资源。 */
+/** 校验 Native 启动前置条件；缺失/异常路径、ABI或符号目录可让用户输入并只修正本次会话，失败不创建设备/LLDB资源。 */
 export async function validateNativeDebugConfiguration(config: vscode.DebugConfiguration, folder?: vscode.WorkspaceFolder, strictPaths = false, corrected = false): Promise<void> {
   try {
     const native = config.native;
@@ -56,7 +56,7 @@ function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupp
   return undefined;
 }
 
-/** 弹出字段输入并写回当前会话配置副本；取消返回 false，不写 settings 或 launch.json。 */
+/** 弹出字段输入并写回当前会话配置副本；支持逗号分隔 symbolSearchPaths，取消返回 false，不写 settings 或 launch.json。 */
 async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | 'symbolSearchPaths'): Promise<boolean> {
   if (typeof vscode.window?.showInputBox !== 'function') return false;
   const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};

@@ -69,7 +69,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     /** 保留原DAP控制台输出；native-codelldb.test.js经真实DAP事件通道执行。 */
     private consoleLog(message: string) { this.sendEvent(new debugadapter.OutputEvent(message + '\n', 'console')); }
 
-    /** 保留原Native配置构造，增加宿主身份字段保护和副本隔离；native-codelldb.test.js断言不可覆盖设备/PID。 */
+    /** 保留原Native配置构造，声明C/C++源语言并增加宿主身份字段保护和副本隔离；native-codelldb.test.js断言child字段隔离和断点语言。 */
     private prepareNativeDebugConfiguration(config: vscode.DebugConfiguration, pid: string) {
         let lldbConfig: vscode.DebugConfiguration = {
             "type": "lldb", "name": "Native", "request": "attach",
@@ -85,7 +85,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         return lldbConfig;
     }
 
-    /** 保留原先启动Native子会话的顺序与API，宿主提前持有server以便失败回滚；native-codelldb.test.js覆盖拒绝/异常。 */
+    /** 保留原先启动Native子会话的顺序与API，缺少符号目录时提示断点风险，宿主提前持有server以便失败回滚；native-codelldb.test.js覆盖提示和异常。 */
     private async attachToProcess(pid: string, response: DebugProtocol.Response) {
         this.checkOpen();
         let config = this.config;
