@@ -50,7 +50,7 @@ test('machine specific paths are absent from VSCode settings', () => {
   const schema = require('../schemas/android-ide.local.schema.json');
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(Object.keys(schema.properties).sort(), ['debugger', 'downloadDirectory', 'sdkPath']);
-  assert.deepEqual(Object.keys(schema.properties.debugger.properties).sort(), ['adbPath', 'lldbDapPath', 'ndkPath']);
+  assert.deepEqual(Object.keys(schema.properties.debugger.properties).sort(), ['adbPath', 'lldbDapPath', 'ndkPath', 'symbolSearchPaths']);
   for (const document of ['README.md', 'CONTRIBUTING.md']) {
     const text = fs.readFileSync(path.join(__dirname, '..', document), 'utf8');
     assert.equal(text.includes('android-ide.sdkPath'), false, document);

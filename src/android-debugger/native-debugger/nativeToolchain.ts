@@ -40,8 +40,8 @@ export function resolveNativeToolchain(projectRoot?: string, overrides?: NativeT
   return { adb, sdkRoot: sdk, ndkRoot: path.resolve(ndk) };
 }
 
-/** 复用上游 SDK ndk、ndk-bundle 及逆字典序版本发现，不下载 NDK；native-toolchain.test.js 覆盖两个布局和缺失。 */
-/** 读取标准 Android local.properties，返回 sdk.dir/ndk.dir；缺失或格式无关项不影响其他工具链来源。 */
+/** 读取标准 Android local.properties，返回 sdk.dir/ndk.dir；缺失或格式无关项不影响其他工具链来源。
+ * 回归：Node>=22 执行 node --test tests/native-toolchain.test.js，断言相对路径解析和 SDK/NDK 选择。 */
 function readGradleLocalProperties(projectRoot?: string): { sdkRoot?: string; ndkRoot?: string } {
   if (!projectRoot) return {};
   const filename = path.join(projectRoot, 'local.properties');
@@ -61,6 +61,7 @@ function readGradleLocalProperties(projectRoot?: string): { sdkRoot?: string; nd
   return { sdkRoot: resolve(values['sdk.dir']), ndkRoot: resolve(values['ndk.dir']) };
 }
 
+/** 复用上游 SDK ndk、ndk-bundle 及逆字典序版本发现，不下载 NDK；native-toolchain.test.js 覆盖两个布局和缺失。 */
 function findNdk(sdk: string): string | undefined {
   if (!sdk) return undefined;
   for (const root of [path.join(sdk, 'ndk'), path.join(sdk, 'ndk-bundle')]) {
@@ -74,10 +75,11 @@ function findNdk(sdk: string): string | undefined {
   return undefined;
 }
 
-/** 自动发现本地 Native 调试符号目录；优先本地配置，再扫描 Gradle/NDK 常见输出目录，返回目录而非具体 .so 文件。 */
+/** 自动发现本地 Native 调试符号目录；优先 launch/native 本地配置，再扫描 Gradle/NDK 常见输出目录，返回目录而非具体 .so 文件。
+ * 回归：Node>=22 执行 node --test tests/native-toolchain.test.js，断言 .cxx/Gradle 输出目录自动发现和显式路径优先。 */
 export function findNativeSymbolSearchPaths(projectRoot?: string, native?: unknown): string[] {
   const values = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : {};
-  const configured = Array.isArray(values.symbolSearchPaths) ? values.symbolSearchPaths.filter((value): value is string => typeof value === 'string' && value.trim()).map(value => path.resolve(value)) : [];
+  const configured = Array.isArray(values.symbolSearchPaths) ? values.symbolSearchPaths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map(value => path.resolve(value)) : [];
   if (configured.length) return [...new Set(configured)];
   const local = readProjectLocalConfig(projectRoot);
   const localPaths = local.debugger?.symbolSearchPaths ?? [];
