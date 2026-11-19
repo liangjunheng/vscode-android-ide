@@ -4,7 +4,7 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 
 import * as android from './android';
 import { Device } from './commonTypes';
-import { resolveNativeToolchain } from '../../nativeToolchain';
+import { nativeToolchainOverrides, resolveNativeToolchain } from '../../nativeToolchain';
 import { resolveLauncherActivity } from '../../nativeTarget';
 
 /** 原工厂的宿主适配接口：仅提供配置准备/释放，不提供调试引擎；native-codelldb.test.js通过真实工厂验证。 */
@@ -77,8 +77,9 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             "androidTarget": config.target.udid,
             "androidAbi": config.native?.abi,
             "androidPackageName": config.packageName,
+            "androidNativeToolchain": (config as Record<string, unknown>).androidNativeToolchain ?? nativeToolchainOverrides(config.native),
         };
-        let excludeProperties = ["abi", "abiSupported", "abiMap"];
+        let excludeProperties = ["abi", "abiSupported", "abiMap", "sdkRoot", "ndkRoot"];
         if (config.native) for (let key in config.native) if (!excludeProperties.includes(key)) lldbConfig[key] = structuredClone(config.native[key]);
         return lldbConfig;
     }
@@ -136,10 +137,10 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
                 this.consoleLog('Installing ' + config.apkPath);
                 await android.installApp(target, config.apkPath);
                 this.checkOpen();
-                config.packageName ||= await android.getPackageNameFromApk(config.apkPath, config.androidProjectRoot);
+                config.packageName ||= await android.getPackageNameFromApk(config.apkPath, config.androidProjectRoot, nativeToolchainOverrides(config.native));
             }
             if (!config.packageName || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName)) throw new Error('A valid package name is required.');
-            const toolchain = resolveNativeToolchain(config.androidProjectRoot);
+            const toolchain = resolveNativeToolchain(config.androidProjectRoot, nativeToolchainOverrides(config.native));
             config.launchActivity ||= await resolveLauncherActivity(toolchain.adb, target.udid, config.packageName);
             this.checkOpen();
             this.consoleLog('Launching the app activity ' + config.packageName + '/' + config.launchActivity);

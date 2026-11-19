@@ -5,6 +5,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
+// npm test：扩展必须在VS Code初始化阶段激活，避免设备视图和命令等启动能力等待启动完成事件。
+test('extension activates during VS Code initialization', () => {
+  assert.ok(require('../package.json').activationEvents.includes('*'));
+  assert.equal(require('../package.json').activationEvents.includes('onStartupFinished'), false);
+});
+
 // 编译输入与rootDir同属src；Node>=22运行node --test tests/configuration-prefix.test.js，通过本机TypeScript CLI的showConfig JSON断言全部扩展源码仍受strict检查，第三方参考源码不被误收。
 test('compiler typecheck covers every extension source and excludes external material',()=>{
   const root=path.resolve(__dirname,'..'),source=path.join(root,'src'),compiler=path.join(path.dirname(require.resolve('typescript/package.json')),'bin','tsc');
@@ -24,7 +30,7 @@ test('android-ide configuration schema replaces command and view identities', ()
     'android-ide.deviceViewMode', 'android-ide.embeddedEmulator', 'android-ide.explorer.packageFilter',
     'android-ide.fixSoftwareRendering', 'android-ide.logcat.maxBytes', 'android-ide.mirrorIntervalMs', 'android-ide.mirrorVisible',
   ].sort());
-  const declaredSettings = new Set(['android-debug.sdkRoot', 'android-debug.ndkRoot', 'android-debug.abiSupported', 'android-debug.abiMap']);
+  const declaredSettings = new Set();
   for (const key of Object.keys(properties).filter(key => key.startsWith('android-debug.'))) assert.equal(declaredSettings.has(key), true, key);
   assert.deepEqual([...declaredSettings].sort(), Object.keys(properties).filter(key => key.startsWith('android-debug.')).sort());
   assert.ok(p.contributes.commands.some(c => c.command === 'android-ide.refresh'));

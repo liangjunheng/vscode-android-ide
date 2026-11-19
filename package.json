@@ -55,7 +55,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished",
+    "*",
     "onDebugResolve:android-tools",
     "onDebugDynamicConfigurations:android-tools",
     "onDebugResolve:lldb"
@@ -254,6 +254,14 @@
                 "description": "Configuration for native debugger.",
                 "type": "object",
                 "properties": {
+                  "sdkRoot": {
+                    "description": "Optional Android SDK root for this Native debug session.",
+                    "type": "string"
+                  },
+                  "ndkRoot": {
+                    "description": "Optional Android NDK root for this Native debug session.",
+                    "type": "string"
+                  },
                   "abiSupported": {
                     "description": "List of ABIs supported by the app",
                     "type": "array",
@@ -372,6 +380,14 @@
                 "description": "Configuration for native debugger.",
                 "type": "object",
                 "properties": {
+                  "sdkRoot": {
+                    "description": "Optional Android SDK root for this Native debug session.",
+                    "type": "string"
+                  },
+                  "ndkRoot": {
+                    "description": "Optional Android NDK root for this Native debug session.",
+                    "type": "string"
+                  },
                   "abiSupported": {
                     "description": "List of ABIs supported by the app",
                     "type": "array",
@@ -610,54 +626,6 @@
           "type": "boolean",
           "default": true,
           "description": "Before launching an AVD that has hw.gpu.enabled=no (the avdmanager default, very slow), switch it to host GPU rendering by editing its config.ini."
-        },
-        "android-debug.sdkRoot": {
-          "type": "string",
-          "description": "sdk root"
-        },
-        "android-debug.ndkRoot": {
-          "type": "string",
-          "description": "ndk root"
-        },
-        "android-debug.abiSupported": {
-          "description": "List of ABIs supported by the app",
-          "type": "array",
-          "items": {
-            "enum": [
-              "armeabi",
-              "armeabi-v7a",
-              "arm64-v8a",
-              "x86",
-              "x86_64"
-            ]
-          },
-          "default": [
-            "armeabi-v7a",
-            "arm64-v8a",
-            "x86",
-            "x86_64"
-          ]
-        },
-        "android-debug.abiMap": {
-          "description": "Map android ABI to custom strings, use with ${command:mappedAbi}.",
-          "type": "object",
-          "properties": {
-            "armeabi": {
-              "type": "string"
-            },
-            "armeabi-v7a": {
-              "type": "string"
-            },
-            "arm64-v8a": {
-              "type": "string"
-            },
-            "x86": {
-              "type": "string"
-            },
-            "x86_64": {
-              "type": "string"
-            }
-          }
         }
       }
     },

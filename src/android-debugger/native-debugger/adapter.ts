@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { getAndroidDebugConfigurations } from '../index';
 import * as android from './upstream/src/android';
@@ -7,10 +8,67 @@ import { AndroidDebugConfigurationProvider, LLDBDebugConfigurationProvider } fro
 import type { AndroidNativeDebugConfiguration, AndroidNativeDebugAdapterFactory } from './contracts';
 
 import { DebugAdapterDescriptorFactory } from './upstream/src/debugAdapter';
+import { nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } from './nativeToolchain';
 
 /** 当前选中Gradle项目在对应工作区的只读包名来源；未知返回undefined，真实错误传播。 */
 export interface NativeProjectMetadata { packageName?: string; abiSupported?: string[]; }
 export type NativePackageResolver = (folder: vscode.WorkspaceFolder | undefined) => string | NativeProjectMetadata | undefined;
+
+/** 校验 Native 启动前置条件；缺失/异常路径或 ABI 先让用户输入并只修正本次会话，失败不创建设备/LLDB资源。 */
+export async function validateNativeDebugConfiguration(config: vscode.DebugConfiguration, folder?: vscode.WorkspaceFolder, strictPaths = false, corrected = false): Promise<void> {
+  try {
+    const native = config.native;
+    const overrides = nativeToolchainOverrides(native);
+    resolveNativeToolchain(config.androidProjectRoot || folder?.uri.fsPath, overrides);
+    validateNativeAbis(native, config.androidAbiSupported);
+    if (config.packageName !== undefined && (typeof config.packageName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName))) throw new Error('A valid package name is required.');
+    if (config.launchActivity !== undefined && (typeof config.launchActivity !== 'string' || !config.launchActivity.trim())) throw new Error('Invalid Native launchActivity: expected a non-empty activity name');
+    if (config.apkPath !== undefined) {
+      if (typeof config.apkPath !== 'string' || !config.apkPath.trim()) throw new Error('Invalid Native apkPath: expected a file path');
+      if (strictPaths && !config.apkPath.includes('$' + '{')) {
+        let stat: fs.Stats;
+        try { stat = fs.statSync(config.apkPath); } catch (error) { throw new Error('Invalid Native APK path: ' + config.apkPath, { cause: error }); }
+        if (!stat.isFile()) throw new Error('Invalid Native APK path: ' + config.apkPath);
+      }
+    }
+  } catch (error) {
+    const field = nativeCorrectionField(error);
+    if (!corrected && field && await promptNativeCorrection(config, field)) return validateNativeDebugConfiguration(config, folder, strictPaths, true);
+    const detail = error instanceof Error ? error.message : String(error);
+    const action = await vscode.window.showErrorMessage('Android Native configuration is invalid: ' + detail + '. Correct launch.json and start again.', 'Open launch.json');
+    if (action === 'Open launch.json' && typeof vscode.commands?.executeCommand === 'function') await vscode.commands.executeCommand('workbench.action.debug.configure');
+    throw error;
+  }
+}
+
+/** 将校验错误映射到可交互修正的 launch.json 字段；不可修正错误返回 undefined。 */
+function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/SDK root/i.test(message)) return 'sdkRoot';
+  if (/NDK root|Android NDK/i.test(message)) return 'ndkRoot';
+  if (/abiSupported/i.test(message)) return 'abiSupported';
+  if (/Invalid Native ABI/i.test(message)) return 'abi';
+  if (/APK path|apkPath/i.test(message)) return 'apkPath';
+  return undefined;
+}
+
+/** 弹出字段输入并写回当前会话配置副本；取消返回 false，不写 settings 或 launch.json。 */
+async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath'): Promise<boolean> {
+  if (typeof vscode.window?.showInputBox !== 'function') return false;
+  const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};
+  const current = native[field];
+  const value = await vscode.window.showInputBox({
+    prompt: field === 'abiSupported' ? 'Enter supported Android ABIs separated by commas' : 'Enter Android Native ' + field,
+    value: Array.isArray(current) ? current.join(',') : typeof current === 'string' ? current : '',
+    ignoreFocusOut: true,
+  });
+  if (!value?.trim()) return false;
+  if (field === 'abiSupported') native.abiSupported = value.split(',').map(item => item.trim()).filter(Boolean);
+  else if (field === 'abi') native.abi = value.trim();
+  else { native[field] = value.trim(); if (field === 'apkPath') config.apkPath = value.trim(); }
+  config.native = native;
+  return true;
+}
 
 const registrations = new WeakMap<vscode.ExtensionContext, NativeLldbConfigurationProvider>();
 
@@ -94,23 +152,32 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
   constructor(private readonly selectedPackage: NativePackageResolver = () => undefined) {}
 
   /** 返回独立内置Native配置供Run and Debug显示名称，不探测工具链；native-codelldb.test.js直接调用initial/dynamic入口断言名称、复制隔离和零设备调用。 */
-  provideDebugConfigurations(_folder?: vscode.WorkspaceFolder, _token?: vscode.CancellationToken): vscode.DebugConfiguration[] { return getAndroidDebugConfigurations(); }
+  provideDebugConfigurations(_folder?: vscode.WorkspaceFolder, _token?: vscode.CancellationToken): vscode.DebugConfiguration[] { return getAndroidDebugConfigurations().filter(config => config.type === 'android-tools'); }
 
   /** 建立原设备选择与命令变量上下文，拒绝不可信或非Native模式；回归同文件provider选择/取消用例。 */
   async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
     if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
     if ((config.androidMode ?? config.mode ?? 'native') !== 'native') throw new Error('Only Android Native debugging is available');
+    await validateNativeDebugConfiguration(config, folder);
     const selected = !config.packageName && config.request === 'launch' && !config.apkPath ? this.selectedPackage(folder) : undefined;
     const metadata: NativeProjectMetadata | undefined = typeof selected === 'string' ? { packageName: selected } : selected;
     const packageName = config.packageName || metadata?.packageName;
     const native = { ...config.native };
     const supported = native.abiSupported ?? config.androidAbiSupported ?? metadata?.abiSupported;
     if (supported !== undefined) native.abiSupported = supported;
-    return this.delegate.resolveDebugConfiguration(folder, { ...config, ...(packageName ? { packageName } : {}), mode: 'native', androidMode: 'native', native, target: config.serial || config.target || 'select', androidProjectRoot: config.androidProjectRoot || folder?.uri.fsPath }, token!);
+    validateNativeAbis(native, config.androidAbiSupported);
+    const resolved = await this.delegate.resolveDebugConfiguration(folder, { ...config, ...(packageName ? { packageName } : {}), mode: 'native', androidMode: 'native', native, target: config.serial || config.target || 'select', androidProjectRoot: config.androidProjectRoot || folder?.uri.fsPath }, token!);
+    const toolchain = nativeToolchainOverrides(native);
+    if (resolved) {
+      (resolved as Record<string, unknown>).androidNativeToolchain = toolchain;
+      if (resolved.target && typeof resolved.target === 'object') (resolved.target as Record<string, unknown>).androidNativeToolchain = toolchain;
+    }
+    return resolved;
   }
 
   /** 变量替换后沿用原包名/ABI和resume默认值，规范化进程身份；回归同文件launch/attach解析断言。 */
   async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
+    await validateNativeDebugConfiguration(config, folder, true);
     const result = await this.delegate.resolveDebugConfigurationWithSubstitutedVariables(folder, config, token!);
     if (result?.request === 'attach') { result.pid = processId(result as AndroidNativeDebugConfiguration); result.processId = result.pid; }
     return result;
@@ -135,8 +202,8 @@ export function createAndroidDebugAdapterFactory(context: vscode.ExtensionContex
       if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
       if ((config.androidMode ?? config.mode ?? 'native') !== 'native') throw new Error('Only Android Native debugging is available');
       const serial = targetSerial(config as AndroidNativeDebugConfiguration);
-      const selected = typeof config.target === 'object' ? config.target : await android.getDeviceFromUDID(serial, config.androidProjectRoot);
-      const target = { ...selected, udid: serial, androidProjectRoot: config.androidProjectRoot };
+      const selected = typeof config.target === 'object' ? config.target : await android.getDeviceFromUDID(serial, config.androidProjectRoot, nativeToolchainOverrides(config.native));
+      const target = { ...selected, udid: serial, androidProjectRoot: config.androidProjectRoot, androidNativeToolchain: (selected as Record<string, unknown>).androidNativeToolchain ?? nativeToolchainOverrides(config.native) };
       const result: vscode.DebugConfiguration = { ...config, target, native: { ...config.native } };
       if (result.request === 'attach') {
         result.pid = processId(result as AndroidNativeDebugConfiguration);
@@ -150,6 +217,7 @@ export function createAndroidDebugAdapterFactory(context: vscode.ExtensionContex
       if (!resolved) throw new Error('Android Native target selection was cancelled');
       const ready = await lldb.resolveDebugConfigurationWithSubstitutedVariables(folder, resolved);
       if (!ready) throw new Error('Android Native server configuration was rejected');
+      delete ready.androidNativeToolchain;
       return ready;
     },
   });

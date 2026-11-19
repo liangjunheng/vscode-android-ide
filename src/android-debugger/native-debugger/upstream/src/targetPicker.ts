@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { logger } from './logger';
 import { Device, VerboseDevice } from './commonTypes';
 import * as android from './android';
+import type { NativeToolchainOverrides } from '../../nativeToolchain';
 
 let context: vscode.ExtensionContext;
 
@@ -25,8 +26,8 @@ var currentTarget: Device|undefined;
 
 
 /** 转换设备并保留项目根；Node>=22执行node --test tests/native-picker.test.js，通过pickTarget断言目标/工具链root。 */
-async function createTargetFromDevice(device: VerboseDevice, projectRoot?: string): Promise<Target> {
-    const targetDevice = projectRoot ? {...device, androidProjectRoot: projectRoot} : device;
+async function createTargetFromDevice(device: VerboseDevice, projectRoot?: string, overrides?: NativeToolchainOverrides): Promise<Target> {
+    const targetDevice = {...device, ...(projectRoot ? {androidProjectRoot: projectRoot} : {}), ...(overrides ? {androidNativeToolchain: overrides} : {})};
     let deviceAdb = await android.getDeviceAdb(targetDevice);
 
     let type : TargetType = device.udid.startsWith("emulator-") ? "Emulator" : "Device";
@@ -35,7 +36,7 @@ async function createTargetFromDevice(device: VerboseDevice, projectRoot?: strin
     let avdName = undefined;
     if (type === "Emulator") {
         avdName = await deviceAdb.sendTelnetCommand("avd name");
-        name = await android.getAvdDisplayName(avdName) || device.udid;
+        name = await android.getAvdDisplayName(avdName, projectRoot, overrides) || device.udid;
     }
     else {
         name = await deviceAdb.getModel();
@@ -50,15 +51,15 @@ async function createTargetFromDevice(device: VerboseDevice, projectRoot?: strin
 }
 
 /** 枚举在线/虚拟设备并沿用排序；native-picker.test.js通过pickTarget断言顺序、离线过滤、root及ADB失败。 */
-async function getTargetPickerItems(projectRoot?: string): Promise<TargetQuickPickItem[]> {
-    let adb = await android.getAdb(projectRoot);
+async function getTargetPickerItems(projectRoot?: string, overrides?: NativeToolchainOverrides): Promise<TargetQuickPickItem[]> {
+    let adb = await android.getAdb(projectRoot, overrides);
 
-    let avdList = await android.getAvdList();
+    let avdList = await android.getAvdList(projectRoot, overrides);
 
     let targets = await Promise.all(
         (await adb.getConnectedDevices({verbose: true}) as VerboseDevice[])
             .filter((device) => device.state === "device")
-            .map(device => createTargetFromDevice(device, projectRoot))
+            .map(device => createTargetFromDevice(device, projectRoot, overrides))
     );
 
     targets = targets.sort((a, b) => {
@@ -108,10 +109,10 @@ async function getTargetPickerItems(projectRoot?: string): Promise<TargetQuickPi
     targetPickerItems.push(
         ...
         await Promise.all(avdList.map(async (avdName): Promise<TargetQuickPickItem> => ({
-            label: `$(vm-running) ${await android.getAvdDisplayName(avdName)}`,
+            label: `$(vm-running) ${await android.getAvdDisplayName(avdName, projectRoot, overrides)}`,
             detail: "Emulator · Stopped",
             getTarget: async () => {
-                return await android.launchAVD(avdName);
+                return await android.launchAVD(avdName, projectRoot, overrides);
             }
         })))
     );
@@ -120,7 +121,7 @@ async function getTargetPickerItems(projectRoot?: string): Promise<TargetQuickPi
 }
 
 /** 返回用户目标或取消undefined；native-picker.test.js断言真实pickTarget选择、取消、项目根与查询错误。 */
-export async function pickTarget(projectRoot?: string)
+export async function pickTarget(projectRoot?: string, overrides?: NativeToolchainOverrides)
 {
     let quickPickOptions: vscode.QuickPickOptions = {
         title: "Select Android Target",
@@ -128,7 +129,7 @@ export async function pickTarget(projectRoot?: string)
         matchOnDetail: true,
     };
 
-    let target = await (await vscode.window.showQuickPick(getTargetPickerItems(projectRoot), quickPickOptions))?.getTarget();
+    let target = await (await vscode.window.showQuickPick(getTargetPickerItems(projectRoot, overrides), quickPickOptions))?.getTarget();
 
     logger.log("Picked target", target);
 
@@ -139,17 +140,17 @@ export async function pickTarget(projectRoot?: string)
 
 // Get the last picked target if still available or pick target.
 /** 返回仍在线的上次目标或重新选择；native-picker.test.js的current and last target用例断言在线/离线及取消。 */
-export async function getLastOrPickTarget(projectRoot?: string) {
+export async function getLastOrPickTarget(projectRoot?: string, overrides?: NativeToolchainOverrides) {
     if (lastPickedTarget && await android.isDeviceConnected(lastPickedTarget.udid)) {
-        return projectRoot ? {...lastPickedTarget, androidProjectRoot: projectRoot} : lastPickedTarget;
+        return {...lastPickedTarget, ...(projectRoot ? {androidProjectRoot: projectRoot} : {}), ...(overrides ? {androidNativeToolchain: overrides} : {})};
     }
 
-    return await pickTarget(projectRoot);
+    return await pickTarget(projectRoot, overrides);
 }
 
 /** 依序列号查询设备并透传项目根；Node>=22执行node --test tests/native-picker.test.js，explicit serial wrapper直接调用本函数，断言准确参数、返回设备和原始错误传播。 */
-export async function getTargetFromUDID(udid: string, projectRoot?: string) {
-    return await android.getDeviceFromUDID(udid, projectRoot);
+export async function getTargetFromUDID(udid: string, projectRoot?: string, overrides?: NativeToolchainOverrides) {
+    return await android.getDeviceFromUDID(udid, projectRoot, overrides);
 }
 
 // Current target is only available when a new debug session is being started

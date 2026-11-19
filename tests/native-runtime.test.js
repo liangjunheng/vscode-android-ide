@@ -152,7 +152,7 @@ test('androidPaths activation is lazy and require roots delegate shared toolchai
     if (id === '../../nativeToolchain') return { resolveNativeToolchain(root) { state.calls++; if (state.shouldFail) throw new Error('toolchain failed'); return { sdkRoot: 'sdk-' + (root || 'default'), ndkRoot: 'ndk-' + (root || 'default') }; } };
     return require(id);
   }, console, process, globalThis };
-  vm.runInNewContext(code, context); const api = module.exports; const contextObj = { subscriptions: [] }; await api.activate(contextObj); assert.equal(state.calls, 0); assert.equal(contextObj.subscriptions.length, 1); assert.equal(api.requireSdkRoot('p'), 'sdk-p'); assert.equal(api.requireNdkRoot('p'), 'ndk-p'); state.shouldFail = true; assert.throws(() => api.requireNdkRoot('bad'), /toolchain failed/);
+  vm.runInNewContext(code, context); const api = module.exports; const contextObj = { subscriptions: [] }; await api.activate(contextObj); assert.equal(state.calls, 0); assert.equal(contextObj.subscriptions.length, 0); assert.equal(api.requireSdkRoot('p'), 'sdk-p'); assert.equal(api.requireNdkRoot('p'), 'ndk-p'); state.shouldFail = true; assert.throws(() => api.requireNdkRoot('bad'), /toolchain failed/);
 });
 
 

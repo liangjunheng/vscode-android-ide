@@ -12,6 +12,7 @@ import * as utils from './utils';
 import * as androidPaths from './androidPaths';
 
 import { resolveNativeToolchain, findLldbServer } from '../../nativeToolchain';
+import type { NativeToolchainOverrides } from '../../nativeToolchain';
 import { JDWP } from './jdwp';
 
 const adbByToolchain = new Map<string, ADB>();
@@ -30,8 +31,8 @@ export async function handlePathsUpdated() {
  * executable.path 使用实际解析出的 adb，避免跨项目复用错误的全局实例。
  */
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
-export async function getAdb(projectRoot?: string): Promise<ADB> {
-    const toolchain = resolveNativeToolchain(projectRoot);
+export async function getAdb(projectRoot?: string, overrides?: NativeToolchainOverrides): Promise<ADB> {
+    const toolchain = resolveNativeToolchain(projectRoot, overrides);
     const cacheKey = JSON.stringify([projectRoot ?? "", toolchain.adb, toolchain.sdkRoot, toolchain.ndkRoot]);
     let instance = adbByToolchain.get(cacheKey);
     if (!instance) {
@@ -51,8 +52,9 @@ export async function getAdb(projectRoot?: string): Promise<ADB> {
  */
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
 export async function getDeviceAdb(device: Device): Promise<ADB> {
-    const projectRoot = (device as Device & {androidProjectRoot?: string}).androidProjectRoot;
-    let deviceAdb = (await getAdb(projectRoot)).clone();
+    const nativeDevice = device as Device & {androidProjectRoot?: string, androidNativeToolchain?: NativeToolchainOverrides};
+    const projectRoot = nativeDevice.androidProjectRoot;
+    let deviceAdb = (await getAdb(projectRoot, nativeDevice.androidNativeToolchain)).clone();
     deviceAdb.setDevice(device);
 
     return deviceAdb;
@@ -61,8 +63,8 @@ export async function getDeviceAdb(device: Device): Promise<ADB> {
 // Connected device information
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
 /** 按精确serial返回设备或不存在错误，项目根选择ADB；native-runtime.test.js的explicit device查询断言匹配、缺失、root及查询错误。 */
-export async function getDeviceFromUDID(udid: string, projectRoot?: string): Promise<VerboseDevice> {
-    let adb = await getAdb(projectRoot);
+export async function getDeviceFromUDID(udid: string, projectRoot?: string, overrides?: NativeToolchainOverrides): Promise<VerboseDevice> {
+    let adb = await getAdb(projectRoot, overrides);
 
     let devices = await adb.getConnectedDevices({verbose: true}) as VerboseDevice[];
 
@@ -128,8 +130,8 @@ export async function getBestAbi(device: Device, abiSupportedList: string[]) {
  * 仅缺失候选会继续查找，ABI/IO 等其他错误直接传播。
  */
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
-async function getLldbServer(abi: string, projectRoot?: string): Promise<string> {
-    const toolchain = resolveNativeToolchain(projectRoot);
+async function getLldbServer(abi: string, projectRoot?: string, overrides?: NativeToolchainOverrides): Promise<string> {
+    const toolchain = resolveNativeToolchain(projectRoot, overrides);
     return findLldbServer(toolchain.ndkRoot, abi);
 }
 
@@ -141,8 +143,9 @@ export async function startLldbServer(device: Device, packageName: string, abi: 
     }
 
     let deviceAdb = await getDeviceAdb(device);
-    const projectRoot = (device as Device & {androidProjectRoot?: string}).androidProjectRoot;
-    let lldbServerLocalPath = await getLldbServer(abi, projectRoot);
+    const nativeDevice = device as Device & {androidProjectRoot?: string, androidNativeToolchain?: NativeToolchainOverrides};
+    const projectRoot = nativeDevice.androidProjectRoot;
+    let lldbServerLocalPath = await getLldbServer(abi, projectRoot, nativeDevice.androidNativeToolchain);
 
     logger.log(`Using lldb-server at ${lldbServerLocalPath}`);
 
@@ -315,12 +318,12 @@ async function getPackagesForProcess(deviceAdb: ADB, pid: string) {
 
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
 /** 以可选项目根解析APK包名，无路径/缺元数据返回空串，ADB失败传播；native-runtime.test.js的APK metadata查询断言真实结果与边界。 */
-export async function getPackageNameFromApk(apkPath: string, projectRoot?: string) {
+export async function getPackageNameFromApk(apkPath: string, projectRoot?: string, overrides?: NativeToolchainOverrides) {
     if (!apkPath) {
         return "";
     }
 
-    let adb = await getAdb(projectRoot);
+    let adb = await getAdb(projectRoot, overrides);
 
     let appInfo = await adb.getApkInfo(apkPath);
 
@@ -371,8 +374,8 @@ export async function resumeJavaDebugger(device: Device, pid: string): Promise<(
 // AVD helpers
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
 /** 读取AVD显示名称或沿用原缺失回退；native-runtime.test.js的AVD display name用例断言真实配置解析。 */
-export async function getAvdDisplayName(avdName: string) {
-    const adb = await getAdb();
+export async function getAvdDisplayName(avdName: string, projectRoot?: string, overrides?: NativeToolchainOverrides) {
+    const adb = await getAdb(projectRoot, overrides);
     let displayName: string|undefined = undefined;
 
     try {
@@ -393,8 +396,8 @@ export async function getAvdDisplayName(avdName: string) {
 }
 
 /** 通过原emulator命令读取AVD列表，保留缺失工具空集语义；native-runtime.test.js的application and AVD用例断言原命令与列表解析。 */
-export async function getAvdList() {
-    let adb = await getAdb();
+export async function getAvdList(projectRoot?: string, overrides?: NativeToolchainOverrides) {
+    let adb = await getAdb(projectRoot, overrides);
 
     try {
         let emulatorPath = await adb.getBinaryFromSdkRoot("emulator");
@@ -418,11 +421,11 @@ export async function getAvdList() {
 }
 
 /** 调用原Appium启动AVD并返回其设备，缺失ID抛错；native-runtime.test.js的application and AVD用例断言启动及设备解析。 */
-export async function launchAVD(avdName: string) {
-    let adb = (await getAdb()).clone();
+export async function launchAVD(avdName: string, projectRoot?: string, overrides?: NativeToolchainOverrides) {
+    let adb = (await getAdb(projectRoot, overrides)).clone();
     await adb.launchAVD(avdName);
     if (adb.curDeviceId) {
-        return getDeviceFromUDID(adb.curDeviceId);
+        return getDeviceFromUDID(adb.curDeviceId, projectRoot, overrides);
     }
     throw new Error("Could not launch Android Virtual Device");
 }

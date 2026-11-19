@@ -4,20 +4,21 @@ import { Device } from './commonTypes';
 import * as targetCommand from './targetCommand';
 import * as targetPicker from './targetPicker';
 import * as android from './android';
+import { nativeToolchainOverrides } from '../../nativeToolchain';
 
 /** 保留原设备选择算法，并让已解析Device及显式serial携带项目根；native-codelldb.test.js覆盖select/serial/取消与root归属。 */
-async function getTarget(androidTarget: string|Device, projectRoot?: string): Promise<Device|undefined> {
-    if (typeof androidTarget === "object") return { ...androidTarget, ...(projectRoot ? { androidProjectRoot: projectRoot } : {}) };
+async function getTarget(androidTarget: string|Device, projectRoot?: string, overrides?: ReturnType<typeof nativeToolchainOverrides>): Promise<Device|undefined> {
+    if (typeof androidTarget === "object") return { ...androidTarget, ...(projectRoot ? { androidProjectRoot: projectRoot } : {}), ...(overrides ? { androidNativeToolchain: overrides } : {}) };
     if (androidTarget === "select") {
-        const target = await targetPicker.pickTarget(projectRoot);
+        const target = await targetPicker.pickTarget(projectRoot, overrides);
         return target ? Object.assign({}, target, projectRoot ? { androidProjectRoot: projectRoot } : {}) : undefined;
     }
     else if (androidTarget === "last-selected") {
-        const target = await targetPicker.getLastOrPickTarget(projectRoot);
+        const target = await targetPicker.getLastOrPickTarget(projectRoot, overrides);
         return target ? Object.assign({}, target, projectRoot ? { androidProjectRoot: projectRoot } : {}) : undefined;
     }
     else if (typeof androidTarget === "string") {
-        const target = await targetPicker.getTargetFromUDID(androidTarget, projectRoot);
+        const target = await targetPicker.getTargetFromUDID(androidTarget, projectRoot, overrides);
         return target ? Object.assign({}, target, projectRoot ? { androidProjectRoot: projectRoot } : {}) : undefined;
     }
 
@@ -34,14 +35,11 @@ export class LLDBDebugConfigurationProvider implements vscode.DebugConfiguration
 
         if (dbgConfig.request !== "attach") { return null; }
 
-        let target: Device|undefined = await getTarget(dbgConfig.androidTarget, dbgConfig.androidProjectRoot ?? folder?.uri.fsPath);
+        let target: Device|undefined = await getTarget(dbgConfig.androidTarget, dbgConfig.androidProjectRoot ?? folder?.uri.fsPath, nativeToolchainOverrides(dbgConfig.androidNativeToolchain));
         if (!target) { return null; }
 
         dbgConfig.androidTarget = target;
 
-        let config = vscode.workspace.getConfiguration("android-debug");
-        dbgConfig.androidAbiSupported = dbgConfig.androidAbiSupported ?? config.get("abiSupported");
-        dbgConfig.androidAbiMap = dbgConfig.androidAbiMap ?? config.get("abiMap");
 
         targetPicker.setCurrentTarget(target);
         targetCommand.setAbiResolutionInfo(dbgConfig.androidAbi, dbgConfig.androidAbiSupported, dbgConfig.androidAbiMap);
@@ -165,16 +163,13 @@ export class AndroidDebugConfigurationProvider implements vscode.DebugConfigurat
 
         if (dbgConfig.request !== "attach" && dbgConfig.request !== "launch") { return null; }
 
-        let target: Device|undefined = await getTarget(dbgConfig.target ?? "select", dbgConfig.androidProjectRoot ?? folder?.uri.fsPath);
+        let target: Device|undefined = await getTarget(dbgConfig.target ?? "select", dbgConfig.androidProjectRoot ?? folder?.uri.fsPath, nativeToolchainOverrides(dbgConfig.native));
         if (!target) { return null; }
 
         dbgConfig.target = target;
 
         dbgConfig.native = dbgConfig.native ?? {};
 
-        let config = vscode.workspace.getConfiguration("android-debug");
-        dbgConfig.native.abiSupported = dbgConfig.native.abiSupported ?? config.get("abiSupported");
-        dbgConfig.native.abiMap = dbgConfig.native.abiMap ?? config.get("abiMap");
 
         targetPicker.setCurrentTarget(target);
         targetCommand.setAbiResolutionInfo(dbgConfig.native?.abi, dbgConfig.native.abiSupported, dbgConfig.native.abiMap);
@@ -241,9 +236,6 @@ export class AndroidProfileConfigurationProvider implements vscode.DebugConfigur
 
         dbgConfig.native = dbgConfig.native ?? {};
 
-        let config = vscode.workspace.getConfiguration("android-debug");
-        dbgConfig.native.abiSupported = dbgConfig.native.abiSupported ?? config.get("abiSupported");
-        dbgConfig.native.abiMap = dbgConfig.native.abiMap ?? config.get("abiMap");
 
         targetPicker.setCurrentTarget(target);
         targetCommand.setAbiResolutionInfo(dbgConfig.native.abi, dbgConfig.native.abiSupported, dbgConfig.native.abiMap);

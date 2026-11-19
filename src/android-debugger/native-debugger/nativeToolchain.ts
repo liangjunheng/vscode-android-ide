@@ -1,11 +1,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as vscode from 'vscode';
 import { adbPath, sdkRoot } from '../../sdk';
 import { readProjectLocalConfig } from '../../projectLocalConfig';
 import { getRuntimeContext } from '../../runtimeContext';
 
 export type AndroidAbi = 'armeabi' | 'armeabi-v7a' | 'arm64-v8a' | 'x86' | 'x86_64';
+export const androidAbis: readonly AndroidAbi[] = ['armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'];
+/** launch.json native 字段允许覆盖共享工具链；覆盖值只用于本次 Native 会话。 */
+export interface NativeToolchainOverrides { sdkRoot?: string; ndkRoot?: string; }
 /** Native 使用与主工具共享的 ADB/SDK 路径，以及已安装 NDK；不包含自研调试后端。 */
 export interface NativeToolchain { adb: string; sdkRoot: string; ndkRoot: string; }
 
@@ -18,16 +20,16 @@ function directory(candidate: string): boolean {
 /** 检查 NDK 的原上游 LLVM 标记；native-toolchain.test.js 验证显式坏路径不能伪成功。 */
 function validNdk(candidate: string): boolean { return directory(candidate) && directory(path.join(candidate, 'toolchains', 'llvm')); }
 
-/** 解析本机 JSON、原 android-debug 设置和共享 runtime；显式坏路径报错，PATH ADB 保留主工具契约。
- * 回归：Node>=22，node --test tests/native-toolchain.test.js；断言优先级、无 SDK 的显式 NDK、原设置和 PATH。
+/** 解析 launch.json 覆盖、项目本地配置、Android local.properties 与共享 runtime；显式坏路径报错。
+ * 回归：Node>=22，node --test tests/native-toolchain.test.js；断言 launch 覆盖、项目配置、local.properties、无 SDK 的显式 NDK 和 PATH。
  */
-export function resolveNativeToolchain(projectRoot?: string): NativeToolchain {
+export function resolveNativeToolchain(projectRoot?: string, overrides?: NativeToolchainOverrides): NativeToolchain {
   const local = readProjectLocalConfig(projectRoot);
-  const config = vscode.workspace.getConfiguration('android-debug', projectRoot ? vscode.Uri.file(projectRoot) : undefined);
+  const gradle = readGradleLocalProperties(projectRoot);
   const runtime = getRuntimeContext()?.dependencies;
-  const sdk = local.sdkPath || config.get<string>('sdkRoot') || sdkRoot(projectRoot);
+  const sdk = overrides?.sdkRoot ?? (local.sdkPath || gradle.sdkRoot || sdkRoot(projectRoot));
   if (sdk && !directory(sdk)) throw new Error('Invalid Android SDK root: ' + sdk);
-  const explicitNdk = local.debugger?.ndkPath || config.get<string>('ndkRoot');
+  const explicitNdk = overrides?.ndkRoot ?? (local.debugger?.ndkPath || gradle.ndkRoot);
   const ndk = explicitNdk || runtime?.ndkRoot || process.env.ANDROID_NDK_ROOT || findNdk(sdk);
   if (!ndk || !validNdk(ndk)) throw new Error('Cannot determine valid Android NDK root' + (ndk ? ': ' + ndk : ''));
   const selectedSdkAdb = sdk ? path.join(sdk, 'platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb') : undefined;
@@ -39,6 +41,26 @@ export function resolveNativeToolchain(projectRoot?: string): NativeToolchain {
 }
 
 /** 复用上游 SDK ndk、ndk-bundle 及逆字典序版本发现，不下载 NDK；native-toolchain.test.js 覆盖两个布局和缺失。 */
+/** 读取标准 Android local.properties，返回 sdk.dir/ndk.dir；缺失或格式无关项不影响其他工具链来源。 */
+function readGradleLocalProperties(projectRoot?: string): { sdkRoot?: string; ndkRoot?: string } {
+  if (!projectRoot) return {};
+  const filename = path.join(projectRoot, 'local.properties');
+  let content: string;
+  try { content = fs.readFileSync(filename, 'utf8'); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw error;
+  }
+  const values: Record<string, string> = {};
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    const match = /^([^:=\s]+)\s*[:=]\s*(.*)$/.exec(line);
+    if (match) values[match[1]] = match[2].replace(/\\([\\: =])/g, '$1');
+  }
+  const resolve = (value: string | undefined): string | undefined => value?.trim() ? path.resolve(projectRoot, value.trim()) : undefined;
+  return { sdkRoot: resolve(values['sdk.dir']), ndkRoot: resolve(values['ndk.dir']) };
+}
+
 function findNdk(sdk: string): string | undefined {
   if (!sdk) return undefined;
   for (const root of [path.join(sdk, 'ndk'), path.join(sdk, 'ndk-bundle')]) {
@@ -50,6 +72,30 @@ function findNdk(sdk: string): string | undefined {
     }
   }
   return undefined;
+}
+
+/** 解析 launch.json 的 native 工具链覆盖，拒绝空路径和错误类型。 */
+export function nativeToolchainOverrides(native: unknown): NativeToolchainOverrides {
+  if (native === undefined) return {};
+  if (!native || typeof native !== 'object' || Array.isArray(native)) throw new Error('Invalid Native configuration: native must be an object');
+  const values = native as Record<string, unknown>;
+  const result: NativeToolchainOverrides = {};
+  for (const key of ['sdkRoot', 'ndkRoot'] as const) {
+    if (values[key] !== undefined) {
+      if (typeof values[key] !== 'string' || !values[key].trim()) throw new Error('Invalid Native ' + key + ': expected a non-empty path');
+      result[key] = values[key];
+    }
+  }
+  return result;
+}
+
+/** 校验 launch.json 的 Native ABI 设置，防止非法值进入设备查询和 LLDB。 */
+export function validateNativeAbis(native: unknown, androidAbiSupported?: unknown): void {
+  const values = native && typeof native === 'object' && !Array.isArray(native) ? native as Record<string, unknown> : {};
+  const supported = values.abiSupported ?? androidAbiSupported;
+  if (supported !== undefined && (!Array.isArray(supported) || supported.length === 0 || supported.some(value => typeof value !== 'string' || !androidAbis.includes(value as AndroidAbi)))) throw new Error('Invalid Native abiSupported: expected a non-empty list of Android ABIs');
+  const selected = values.abi;
+  if (selected !== undefined && (typeof selected !== 'string' || (selected !== 'select' && !androidAbis.includes(selected as AndroidAbi)))) throw new Error('Invalid Native ABI: ' + String(selected));
 }
 
 /** 使用上游 Android ABI 到 LLVM 目录映射；native-toolchain.test.js 断言全部 ABI 和未知 ABI 拒绝。 */

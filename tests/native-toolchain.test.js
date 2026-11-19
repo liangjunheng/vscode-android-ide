@@ -31,7 +31,7 @@ function ndk(root, name) { const result = path.join(root, name); fs.mkdirSync(pa
 /** 构造普通可执行文件占位，不执行伪二进制；路径验证只关心文件归属与类型。 */
 function file(filename, content = '') { fs.mkdirSync(path.dirname(filename), { recursive: true }); fs.writeFileSync(filename, content); return filename; }
 
-test('Native toolchain honors project local then original settings then runtime and environment', t => {
+test('Native toolchain honors project local then runtime and environment', t => {
   const f = fixture(t), localNdk = ndk(f.root, 'local'), configured = ndk(f.root, 'configured'), bundled = ndk(f.root, 'runtime'), env = ndk(f.root, 'environment');
   const localAdb = file(path.join(f.root, 'local-adb')), runtimeAdb = file(path.join(f.root, 'runtime-adb'));
   f.state.local = { sdkPath: f.root, debugger: { ndkPath: localNdk, adbPath: localAdb } };
@@ -39,10 +39,16 @@ test('Native toolchain honors project local then original settings then runtime 
   f.state.settings = { ndkRoot: configured, sdkRoot: configuredSdk };
   f.state.runtime = { dependencies: { ndkRoot: bundled, adb: runtimeAdb } }; f.state.env.ANDROID_NDK_ROOT = env;
   let result = f.api.resolveNativeToolchain(f.root);
-  assert.equal(result.ndkRoot, localNdk); assert.equal(result.adb, localAdb); assert.equal(result.sdkRoot, f.root); assert.equal(f.state.uri.fsPath, f.root);
-  f.state.local = {}; result = f.api.resolveNativeToolchain(); assert.equal(result.ndkRoot, configured); assert.equal(result.adb, runtimeAdb); assert.equal(result.sdkRoot, configuredSdk);
-  f.state.settings = {}; result = f.api.resolveNativeToolchain(); assert.equal(result.ndkRoot, bundled);
+  assert.equal(result.ndkRoot, localNdk); assert.equal(result.adb, localAdb); assert.equal(result.sdkRoot, f.root);
+  f.state.local = {}; result = f.api.resolveNativeToolchain(); assert.equal(result.ndkRoot, bundled); assert.equal(result.adb, runtimeAdb); assert.equal(result.sdkRoot, '');
   f.state.runtime = undefined; result = f.api.resolveNativeToolchain(); assert.equal(result.ndkRoot, env); assert.equal(result.adb, 'adb'); assert.equal(result.sdkRoot, '');
+});
+
+test('Native toolchain reads Android local.properties for SDK and NDK before runtime fallback', t => {
+  const f = fixture(t); const sdk = path.join(f.root, 'android-sdk'); const ndkRoot = ndk(f.root, 'android-ndk');
+  fs.mkdirSync(sdk); fs.writeFileSync(path.join(f.root, 'local.properties'), 'sdk.dir=android-sdk\nndk.dir=android-ndk\n');
+  const result = f.api.resolveNativeToolchain(f.root);
+  assert.equal(result.sdkRoot, sdk); assert.equal(result.ndkRoot, ndkRoot);
 });
 
 test('Native discovery keeps upstream SDK ndk and ndk-bundle layout with PATH ADB fallback', t => {
@@ -59,11 +65,23 @@ test('Native discovery keeps upstream SDK ndk and ndk-bundle layout with PATH AD
 
 test('Native explicit invalid paths and permission errors fail instead of silently falling back', t => {
   const f = fixture(t); const valid = ndk(f.root, 'valid'); f.state.env.ANDROID_NDK_ROOT = valid;
-  f.state.settings.ndkRoot = path.join(f.root, 'missing'); assert.throws(() => f.api.resolveNativeToolchain(), /valid Android NDK/);
-  f.state.settings = { sdkRoot: path.join(f.root, 'missing') }; assert.throws(() => f.api.resolveNativeToolchain(), /SDK root/);
-  f.state.settings = { sdkRoot: 'forbidden' }; assert.throws(() => f.api.resolveNativeToolchain(), /permission denied/);
+  assert.throws(() => f.api.resolveNativeToolchain(undefined, { ndkRoot: path.join(f.root, 'missing') }), /valid Android NDK/);
+  assert.throws(() => f.api.resolveNativeToolchain(undefined, { sdkRoot: path.join(f.root, 'missing') }), /SDK root/);
+  assert.throws(() => f.api.resolveNativeToolchain(undefined, { sdkRoot: 'forbidden' }), /permission denied/);
   f.state.settings = {}; f.state.local = { debugger: { adbPath: path.join(f.root, 'missing-adb') } }; assert.throws(() => f.api.resolveNativeToolchain(), /ENOENT/);
   f.state.local.debugger.adbPath = f.root; assert.throws(() => f.api.resolveNativeToolchain(), /Invalid Android ADB/);
+});
+
+test('Native launch overrides take precedence and ABI fields are validated before runtime use', t => {
+  const f = fixture(t); const local = ndk(f.root, 'local'); const configured = ndk(f.root, 'configured'); const override = ndk(f.root, 'override');
+  const localSdk = path.join(f.root, 'local-sdk'); const overrideSdk = path.join(f.root, 'override-sdk'); fs.mkdirSync(localSdk); fs.mkdirSync(overrideSdk);
+  f.state.local = { sdkPath: localSdk, debugger: { ndkPath: local } }; f.state.settings = { sdkRoot: path.join(f.root, 'configured-sdk'), ndkRoot: configured };
+  const resolved = f.api.resolveNativeToolchain(f.root, { sdkRoot: overrideSdk, ndkRoot: override }); assert.equal(resolved.sdkRoot, overrideSdk); assert.equal(resolved.ndkRoot, override);
+  const parsed = f.api.nativeToolchainOverrides({ sdkRoot: overrideSdk, ndkRoot: override }); assert.equal(parsed.sdkRoot, overrideSdk); assert.equal(parsed.ndkRoot, override);
+  assert.throws(() => f.api.nativeToolchainOverrides({ sdkRoot: '' }), /non-empty path/);
+  assert.doesNotThrow(() => f.api.validateNativeAbis({ abiSupported: ['arm64-v8a'], abi: 'select' }));
+  assert.throws(() => f.api.validateNativeAbis({ abiSupported: ['mips'] }), /abiSupported/);
+  assert.throws(() => f.api.validateNativeAbis({ abi: 'mips' }), /Invalid Native ABI/);
 });
 
 test('Native lldb-server matches all upstream ABI host tags and clang layouts in original order', t => {

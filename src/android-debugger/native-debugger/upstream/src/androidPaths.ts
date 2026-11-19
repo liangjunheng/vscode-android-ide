@@ -1,6 +1,3 @@
-import * as vscode from 'vscode';
-
-import * as android from './android';
 import { resolveNativeToolchain } from '../../nativeToolchain';
 
 /**
@@ -22,14 +19,9 @@ export function requireNdkRoot(projectRoot?: string): string {
 }
 
 /**
- * 注册配置变更监听并使按工具链缓存失效；激活本身不探测 SDK/NDK，也不弹错误。
- * 配置变更后的实际解析由下一次运行时调用完成并传播错误。
+ * 保留上游懒激活入口但不再监听已移除的 android-debug settings；工具链按会话配置即时解析。
+ * 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言激活不读取设置且项目路径错误仍传播。
  */
-// 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言懒激活/项目路径透传/错误传播。
-export async function activate(context: vscode.ExtensionContext) {
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (e) => {
-        if (e.affectsConfiguration("android-debug")) {
-            await android.handlePathsUpdated();
-        }
-    }));
+export async function activate(_context: { subscriptions?: unknown[] }) {
+    return;
 }

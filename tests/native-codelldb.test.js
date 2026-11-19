@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..');
 
 /** 加载真实父adapter、原两阶段provider和真实DAP库，只替换设备/VSCode边界；npm test发现本文件。 */
 async function fixture(t) {
-  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
+  const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, input: undefined, toolchainFailure: undefined, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
   const disposable = set => listener => { set.add(listener); return { dispose: () => set.delete(listener) }; };
   const vscode = {
     Uri: { file: fsPath => ({ fsPath }) },
@@ -16,7 +16,7 @@ async function fixture(t) {
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     workspace: { get isTrusted() { return f.trusted; }, getConfiguration: () => ({ get: key => key === 'abiSupported' ? ['arm64-v8a', 'x86_64'] : key === 'abiMap' ? {} : undefined }) },
     extensions: { getExtension() { return f.codeLldb; } },
-    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); } },
+    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showInputBox: async () => f.input }, commands: { executeCommand: async () => undefined },
     commands: { registerCommand(name, action) { assert.equal(f.commands.has(name), false); f.commands.set(name, action); return { dispose() {} }; } },
     debug: {
       registerDebugAdapterDescriptorFactory() { throw new Error('Descriptor belongs to extension activation'); },
@@ -38,7 +38,7 @@ async function fixture(t) {
     },
   };
   const android = {
-    async getDeviceFromUDID(udid, projectRoot) { f.calls.push(['device', udid, projectRoot]); return { udid }; },
+    async getDeviceFromUDID(udid, projectRoot, overrides) { f.calls.push(['device', udid, projectRoot]); return { udid, ...(overrides ? { androidNativeToolchain: overrides } : {}) }; },
     async installApp(device, apk) { f.calls.push(['install', device, apk]); },
     async launchApp(device, pkg, activity) { f.calls.push(['launch', device, pkg, activity]); },
     async getPackageNameFromApk(apk, projectRoot) { f.calls.push(['apk', apk, projectRoot]); return 'com.example.app'; },
@@ -57,7 +57,7 @@ async function fixture(t) {
   };
   const targetPicker = { activate() {}, setCurrentTarget() {}, resetCurrentTarget() {}, async pickTarget() { return f.selected; }, async getLastOrPickTarget() { return f.selected; }, async getTargetFromUDID(udid) { return { udid }; } };
   const mocks = { vscode, android, targetCommand, targetPicker,
-    nativeToolchain: { resolveNativeToolchain: projectRoot => ({ adb: 'adb', ndkRoot: 'ndk', sdkRoot: 'sdk', projectRoot }) },
+    nativeToolchain: { resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
     nativeTarget: { resolveLauncherActivity: async (adb, serial, pkg) => { f.calls.push(['activity', adb, serial, pkg]); return 'MainActivity'; } },
   };
   const result = await build({ entryPoints: [path.join(root, 'src/android-debugger/native-debugger/adapter.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['@vscode/debugadapter'], plugins: [{ name: 'native-boundaries', setup(builder) {
@@ -128,6 +128,20 @@ test('built-in Native real DAP attach resolves original remote commands and owns
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.cleaned.length, 1); assert.equal(f.starts.size, 0); assert.equal(f.ends.size, f.baseEnds);
 });
 
+test('Native prompts for a missing NDK and retries the current session', async t => {
+  const f = await fixture(t); f.toolchainFailure = new Error('Cannot determine valid Android NDK root'); f.input = 'manual-ndk';
+  const folder = { uri: { fsPath: root } };
+  const config = { type: 'android-tools', name: 'Built-in Native', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {} };
+  const resolved = await f.providers.get('android-tools').resolveDebugConfiguration(folder, config);
+  assert.equal(resolved.native.ndkRoot, 'manual-ndk'); assert.equal(f.notices.length, 0);
+});
+
+test('Native launch.json toolchain overrides reach LLDB server without leaking into CodeLLDB child', async t => {
+  const f = await fixture(t); const overrides = { sdkRoot: 'launch-sdk', ndkRoot: 'launch-ndk' }; const adapter = await f.parent({ native: { ...overrides, abiSupported: ['arm64-v8a'] } }, true);
+  assert.equal((await request(f, adapter, 'attach')).success, true);
+  assert.equal(f.children[0].configuration.sdkRoot, undefined); assert.equal(f.children[0].configuration.ndkRoot, undefined); assert.equal(f.children[0].configuration.androidNativeToolchain, undefined);
+});
+
 test('original Native provider resolves select and cancellation before descriptor creation', async t => {
   const f = await fixture(t); const adapter = await f.parent({ target: 'select', pid: '42' }, true);
   assert.equal((await request(f, adapter, 'attach')).success, true); assert.equal(f.children[0].configuration.androidTarget.udid, 'picked');
@@ -137,7 +151,8 @@ test('original Native provider resolves select and cancellation before descripto
 });
 
 test('Native real DAP launch installs APK resolves default Activity and selects matching app PID', async t => {
-  const f = await fixture(t); f.processes = [{ pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }, { pid: '42', name: 'com.example.app', packages: ['com.example.app'] }]; const adapter = await f.parent({ request: 'launch', pid: undefined, packageName: undefined, apkPath: 'app.apk' }, true);
+  const apkDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'native-codelldb-apk-')); const apkPath = path.join(apkDir, 'app.apk'); fs.writeFileSync(apkPath, 'fixture'); t.after(() => fs.rmSync(apkDir, { recursive: true, force: true }));
+  const f = await fixture(t); f.processes = [{ pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }, { pid: '42', name: 'com.example.app', packages: ['com.example.app'] }]; const adapter = await f.parent({ request: 'launch', pid: undefined, packageName: undefined, apkPath }, true);
   assert.equal((await request(f, adapter, 'launch')).success, true);
   assert.equal(f.children[0].configuration.pid, 42); assert.equal(f.children[0].configuration.androidPackageName, 'com.example.app');
   for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
@@ -151,7 +166,7 @@ test('Native Launch uses lazy selected Gradle package and preserves explicit ide
   const f = await fixture(t); f.gradlePackage = { packageName: 'com.gradle.selected', abiSupported: ['armeabi-v7a'] }; f.bestAbi = 'armeabi-v7a'; f.processes = [{ pid: '42', name: 'com.gradle.selected', packages: ['com.gradle.selected'] }];
   const automatic = await f.parent({ request: 'launch', pid: undefined, packageName: undefined }, true);
   assert.equal((await request(f, automatic, 'launch')).success, true); assert.equal(f.children[0].configuration.androidPackageName, 'com.gradle.selected');
-  assert.deepEqual(Array.from(f.children[0].configuration.androidAbiSupported), ['arm64-v8a', 'x86_64']); assert.equal(f.children[0].configuration.androidAbi, 'armeabi-v7a');
+  assert.equal(f.children[0].configuration.androidAbiSupported, undefined); assert.equal(f.children[0].configuration.androidAbi, 'armeabi-v7a');
   assert.equal(f.calls.filter(call => call[0] === 'gradle-package').length, 1); assert.equal(f.calls.find(call => call[0] === 'gradle-package')[1], root);
   const explicit = await fixture(t); explicit.gradlePackage = 'com.wrong.app'; const adapter = await explicit.parent({ request: 'launch', pid: undefined }, true);
   assert.equal((await request(explicit, adapter, 'launch')).success, true); assert.equal(explicit.children[0].configuration.androidPackageName, 'com.example.app'); assert.equal(explicit.calls.some(call => call[0] === 'gradle-package'), false);
