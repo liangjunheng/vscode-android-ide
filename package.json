@@ -45,12 +45,10 @@
     },
     "virtualWorkspaces": false
   },
-  "extensionPack": [
+  "extensionDependencies": [
     "redhat.java",
     "vscjava.vscode-java-debug",
-    "vscjava.vscode-gradle"
-  ],
-  "extensionDependencies": [
+    "vscjava.vscode-gradle",
     "vadimcn.vscode-lldb"
   ],
   "main": "./dist/extension.js",
