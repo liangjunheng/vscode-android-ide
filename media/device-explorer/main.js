@@ -422,7 +422,11 @@ function filesView(previous) {
     else if (m.type === 'explorerReveal') { revealAppDirectory(m); }
     else if (m.type === 'explorerFiles') { if (m.error) setError(m.error); if (!m.error) { updateDirectory(m); if (safeRemote(m.path || '/') === '/') state.loading = false; } render(); }
     else if (m.type === 'explorerProcesses') { if (m.error) setError(m.error); state.processes = m.processes || []; render(); }
-    else if (m.type === 'explorerProgress') { state.busy = !!m.busy; state.message = m.message || ''; if(m.error) { setError(m.error); state.loading = false; } render(); }
+    else if (m.type === 'explorerProgress') {
+      state.busy = !!m.busy; state.message = m.message || '';
+      if (m.error) { if (m.path) state.expanded.delete(safeRemote(m.path)); setError(m.error); state.loading = false; }
+      render();
+    }
     else if (m.type === 'explorerUploadAck') uploadAck(m);
   }
   // 原位更新标题与活动内容，Files原有面板不从root移除，进度独立增删；stable file tree DOM及浏览器anchor回归覆盖展开/异步快照/定位后的稳定位置，原surface回归保持视图互斥。

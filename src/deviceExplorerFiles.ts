@@ -62,9 +62,6 @@ function decodeBase64(count: (data: Buffer) => void): Transform {
 // 设备文件操作由实例固定串号和访问身份，所有命令流/子进程/临时项都有明确所有权。
 // 全部经run的stat/list/create/remove/listPackages/pull/push调用共享其编码/错误/回收回归映射；Node>=22，node --test tests/device-explorer-files.test.js。
 export class DeviceExplorerFiles {
-  // 同一设备访问身份内缓存find能力，后续目录展开跳过重复能力探测；连接/实例重建时自然重新确认。
-  private listingMode?: 'find' | 'stat';
-
   // 不自动root或绕过权限；run-as只接受合法包名，回归验证访问上下文和拒绝注入。
   constructor(readonly serial: string, readonly access: Access = {}) {
     if (!serial || serial.includes('\0')) { throw new Error('Invalid device serial'); }
@@ -115,7 +112,7 @@ export class DeviceExplorerFiles {
     } finally { options.signal?.removeEventListener('abort', abort); }
   }
 
-  // 兼容分支每128路径一次stat，按参数顺序解码纯数字/权限并整批printf，链接后缀标记保留末尾换行；files与真机回归验证完整字段。
+  // 单一目录项协议按参数顺序解码纯数字/权限并保留链接信息；文件回归验证完整字段。
   // Toybox stat -c不解析反斜线转义，不能直接拿它输出NUL：https://github.com/landley/toybox/blob/master/toys/other/stat.c
   private metadata(): string {
     return String.raw`emit_metadata() {
@@ -136,6 +133,7 @@ __ANDROID_STAT_FIELDS__
   }
 
   // 7字段NUL记录严格校验，损坏/半条输出不伪装空目录；回归断言特殊名、权限与毫秒时间。
+  // 单一FileEntry协议解析目录项，不兼容旧列表格式。
   private parse(data: Buffer): ExplorerEntry[] {
     if (!data.length) { return []; }
     const fields = data.toString('utf8').split('\0'); if (fields.pop() !== '' || fields.length % 7 !== 0) { throw new Error('Malformed device metadata'); }
@@ -149,27 +147,6 @@ __ANDROID_STAT_FIELDS__
     return entries;
   }
 
-  // find原生NUL字段不按行拆文件名，目录链接另附路径集合；files回归覆盖特殊名/损坏记录/链接，真机逐字段对比旧实现。
-  private parseListing(data: Buffer): ExplorerEntry[] {
-    const fields = data.toString('utf8').split('\0');
-    if (fields.pop() !== '') { throw new Error('Malformed device listing'); }
-    const entries: ExplorerEntry[] = []; let index = 0;
-    for (; index < fields.length && fields[index] !== ''; index += 5) {
-      if (index + 5 > fields.length) { throw new Error('Malformed device listing'); }
-      const [file, permissions, size, modified, target] = fields.slice(index, index + 5);
-      if (!/^\d+$/.test(size) || !/^-?\d+(?:\.\d+)?$/.test(modified) || !permissions) { throw new Error('Invalid device listing fields'); }
-      const bytes = Number(size), time = Math.floor(Number(modified)) * 1000;
-      if (!Number.isSafeInteger(bytes) || !Number.isSafeInteger(time)) { throw new Error('Device metadata numeric overflow'); }
-      const kind = permissions[0] === 'd' ? 'directory' : permissions[0] === '-' ? 'file' : permissions[0] === 'l' ? 'symlink' : 'other';
-      entries.push({ path: remote(file), name: path.posix.basename(file) || '/', kind, permissions, size: bytes, modified: time, ...(kind === 'symlink' ? { linkTarget: target, directoryLink: false } : {}) });
-    }
-    if (fields[index] !== '') { throw new Error('Missing device listing separator'); }
-    const links = new Map(entries.filter(entry => entry.kind === 'symlink').map(entry => [entry.path, entry]));
-    for (const file of fields.slice(index + 1)) {
-      const link = links.get(file); if (!link) { throw new Error('Unknown directory link in listing'); } link.directoryLink = true;
-    }
-    return entries;
-  }
 
   // 单项stat复用批处理编码但只传一个路径，不接受空响应；files回归验证文件/目录/链接和权限拒绝，真机对比字段等价。
   async stat(value: string, signal?: AbortSignal): Promise<ExplorerEntry> {
@@ -177,18 +154,15 @@ __ANDROID_STAT_FIELDS__
     if (entries.length !== 1 || entries[0].path !== file) { throw new Error('Invalid stat response'); } return entries[0];
   }
 
-  // 每次保留目录存在/权限检查，只缓存find -printf能力选择；支持原生批量读取或128项stat兼容分支，失败不伪装空目录；files/真机回归验证字段、缓存和耗时。
+  // 单目录异步枚举只用shell glob，不递归进入子目录；每项独立stat，权限失败保留可识别条目；回归覆盖权限噪声、缓存和结构化元数据。
   async list(value: string, signal?: AbortSignal): Promise<ExplorerEntry[]> {
     const directory = remote(value), base = quote(directory === '/' ? '' : directory);
     const check = '[ -d ' + quote(directory) + ' ] && [ -r ' + quote(directory) + ' ] && [ -x ' + quote(directory) + ' ] || { printf ' + quote('Permission denied or not a directory: ' + directory) + ' >&2; exit 1; }; ';
-    const batch = this.metadata() + '; set --; for p in ' + base + '/* ' + base + '/.[!.]* ' + base + '/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; set -- "$@" "$p"; if [ "$#" -eq 128 ]; then emit_metadata "$@" || exit; set --; fi; done; if [ "$#" -gt 0 ]; then emit_metadata "$@"; fi';
-    const fast = 'printf ' + quote(String.raw`F\0`) + '; find -H ' + quote(directory) + ' -mindepth 1 -maxdepth 1 -printf ' + quote(String.raw`%p\0%M\0%s\0%T@\0%l\0`) + ' || exit; set --; for p in ' + base + '/* ' + base + '/.[!.]* ' + base + '/..?*; do if [ -L "$p" ] && [ -d "$p" ]; then set -- "$@" "$p"; fi; done; printf ' + quote(String.raw`\0`) + '; if [ "$#" -gt 0 ]; then printf ' + quote(String.raw`%s\0`) + ' "$@"; fi';
-    const listing = this.listingMode === 'find' ? fast : this.listingMode === 'stat' ? 'printf ' + quote(String.raw`B\0`) + '; ' + batch : "if find / -maxdepth 0 -printf '' >/dev/null 2>&1; then " + fast + '; else printf ' + quote(String.raw`B\0`) + '; ' + batch + '; fi';
-    const script = check + listing;
+    const glob = 'printf ' + quote(String.raw`F\0`) + '; for p in ' + base + '/* ' + base + '/.[!.]* ' + base + '/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; kind=other; perm=??????????; size=0; modified=0; target=; link=0; if [ -L "$p" ]; then kind=symlink; perm=lrwxrwxrwx; [ -d "$p" ] && link=1; target=$(readlink -n -- "$p" 2>/dev/null || true); elif [ -d "$p" ]; then kind=directory; perm=drwxr-xr-x; else kind=file; perm=-rw-r--r--; fi; if values=$(stat -c "%A %s %Y" -- "$p" 2>/dev/null); then IFS=" " read -r perm size modified <<__ANDROID_LIST_STAT__\n$values\n__ANDROID_LIST_STAT__\nfi; printf "%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0" "$p" "$kind" "$perm" "$size" "$modified" "$link" "$target"; done';
+    const script = check + glob;
     const data = await this.run(script, { signal });
-    if (data[1] !== 0 || (data[0] !== 70 && data[0] !== 66)) { throw new Error('Invalid device listing format'); }
-    this.listingMode = data[0] === 70 ? 'find' : 'stat';
-    const entries = data[0] === 70 ? this.parseListing(data.subarray(2)) : this.parse(data.subarray(2));
+    if (data[1] !== 0 || data[0] !== 70) { throw new Error('Invalid device directory listing'); }
+    const entries = this.parse(data.subarray(2));
     if (entries.some(entry => path.posix.dirname(entry.path) !== directory)) { throw new Error('Device listing escaped parent directory'); }
     return entries;
   }

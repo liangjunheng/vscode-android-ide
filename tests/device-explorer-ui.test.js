@@ -48,7 +48,7 @@ test('Explorer error toast persists through background updates and closes explic
   receive({ type: 'explorerState', serial: 's', tab: 'files', active: true });
   receive({ type: 'explorerFiles', path: '/', entries: [{ path: '/dir', kind: 'directory' }, { path: '/file', kind: 'file' }] });
   receive({ type: 'explorerFiles', path: '/dir', entries: [] });
-  const fail = () => receive({ type: 'explorerProgress', busy: false, error: '<read failed>\nPermission denied' });
+  const fail = (path) => receive({ type: 'explorerProgress', busy: false, error: '<read failed>\nPermission denied', ...(path ? { path } : {}) });
   const row = path => b.root.querySelectorAll('.file-row').find(row => row.dataset.path === path);
   fail();
   const toast = b.root.querySelector('.explorer-error-toast');
@@ -74,7 +74,7 @@ test('Explorer error toast persists through background updates and closes explic
   click(row('/file')); assert.equal(errorText(b), '<read failed>\nPermission denied');
   assert.deepEqual(Array.from(b.api.state.selected), ['/file']);
   assert.ok(b.root.querySelector('.explorer-error-toast'));
-  fail(); const expandRow = row('/dir'), expand = expandRow.children[0].children[0]; click(expand);
+  fail('/dir'); const expandRow = row('/dir'), expand = expandRow.children[0].children[0]; click(expand);
   assert.equal(errorText(b), '<read failed>\nPermission denied'); assert.equal(b.api.state.expanded.has('/dir'), true);
   assert.equal(row('/dir'), expandRow);
   fail(); const collapse = row('/dir').children[0].children[0]; click(collapse);
@@ -107,6 +107,14 @@ test('Explorer error toast persists through background updates and closes explic
 });
 
 // Node>=22向真实前端投递加载/错误/设备生命周期消息，断言蓝条状态正确、非活动消息无效且列表节点保持不变。
+// list失败带path时只收起对应目录，错误浮层继续保留，下一次成功回包可再次展开。
+test('failed directory loading collapses only the failed directory', () => {
+  const b = boot(); b.api.receive({ type: 'explorerState', serial: 's', tab: 'files', active: true });
+  b.api.receive({ type: 'explorerFiles', path: '/', entries: [{ path: '/ok', name: 'ok', kind: 'directory' }, { path: '/bad', name: 'bad', kind: 'directory' }] });
+  b.api.state.expanded.add('/ok'); b.api.state.expanded.add('/bad'); b.api.receive({ type: 'explorerProgress', busy: false, error: 'Permission denied', path: '/bad' });
+  assert.equal(b.api.state.expanded.has('/bad'), false); assert.equal(b.api.state.expanded.has('/ok'), true); assert.equal(errorText(b), 'Permission denied');
+});
+
 test('Explorer loading indicator follows host activity without replacing the file list', () => {
   const b = boot(), receive = b.api.receive;
   receive({ type: 'explorerState', serial: 's', tab: 'files', active: true, fetching: true });

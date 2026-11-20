@@ -21,9 +21,7 @@ async function fixture(scenarios=[]) {
     child.kill=()=>{child.killed=true;return true;}; const record={args,script:args.at(-1),child,scenario};calls.push(record);
     child.finish=()=>{
       let data=scenario?.data||Buffer.alloc(0);
-      if(!scenario?.rawListing&&record.script.includes('if find / -maxdepth 0'))data=Buffer.concat([Buffer.from('B\0'),data]);
-      else if(!scenario?.rawListing&&record.script.includes('find -H'))data=Buffer.concat([Buffer.from('F\0'),data]);
-      else if(!scenario?.rawListing&&record.script.includes('emit_metadata "$@"'))data=Buffer.concat([Buffer.from('B\0'),data]);
+      if(!scenario?.rawListing&&record.script.includes("printf 'F\\0'"))data=Buffer.concat([Buffer.from('F\0'),data]);
       const encoded=data.toString('base64').match(/.{1,76}/g)?.join('\n')||'';
       const wire=scenario?.wire===undefined?Buffer.from(encoded.replace(/\n/g,'\r\n')):Buffer.from(scenario.wire);
       const chunks=scenario?.wireChunks||[wire];
@@ -47,7 +45,7 @@ async function fixture(scenarios=[]) {
 test('stat and list retain special filenames permissions symlink metadata and empty directories',async()=>{
   const name='/sdcard/测试 "a\'\n.txt';const entries=Buffer.concat([metadata(name),metadata('/sdcard/link','symlink',4,'/data',true)]);
   const f=await fixture([{data:metadata(name)},{data:entries},{data:Buffer.alloc(0)}]);
-  try {const one=await f.files.stat(name);assert.equal(one.path,name);assert.equal(one.modified,1700000000000);assert.equal(one.permissions,'-rw-r--r--');const list=await f.files.list('/sdcard');assert.equal(list.length,2);assert.equal(list[1].linkTarget,'/data');assert.equal(list[1].directoryLink,true);assert.equal((await f.files.list('/empty')).length,0);assert.match(f.calls[0].script,/printf/);assert.ok(f.calls[0].script.includes("'\"'\"'"));assert.match(f.calls[1].script,/if find \/ -maxdepth 0/);assert.equal(f.calls[2].script.includes('if find / -maxdepth 0'),false);}
+  try {const one=await f.files.stat(name);assert.equal(one.path,name);assert.equal(one.modified,1700000000000);assert.equal(one.permissions,'-rw-r--r--');const list=await f.files.list('/sdcard');assert.equal(list.length,2);assert.equal(list[1].linkTarget,'/data');assert.equal(list[1].directoryLink,true);assert.equal((await f.files.list('/empty')).length,0);assert.match(f.calls[0].script,/printf/);assert.ok(f.calls[0].script.includes("'\"'\"'"));assert.match(f.calls[1].script,/printf 'F\\0'/);assert.equal(f.calls[2].script.includes('find -H'),false);}
   finally{await f.close();}
 });
 
@@ -112,11 +110,18 @@ test('abort waits for child close and never starts followup commands',async()=>{
   try{const pending=f.files.stat('/sdcard/a',controller.signal);const observed=pending.then(()=>{settled=true;},e=>{settled=true;return e;});controller.abort();await new Promise(resolve=>setImmediate(resolve));assert.equal(f.calls[0].child.killed,true);assert.equal(settled,false);f.calls[0].child.finish();assert.match(String(await observed),/abort/i);assert.equal(f.calls.length,1);}
   finally{await f.close();}
 });
-// 目录规模增加不增加ADB往返，设备脚本只含一处批量stat并按128项切批，NUL解码仍完整保留500个名称。
+// 目录规模增加不增加ADB往返，设备脚本用当前层glob和批量stat，NUL解码仍完整保留500个名称且不递归find。
+// 当前层glob即使设备stderr报告受限路径，也不把已返回的直接子项伪装成空目录；Node>=22回归断言非递归协议和完整解析。
+test('directory listing ignores unrelated find permission noise', async () => {
+  const f = await fixture([{ data: metadata('/system/bin/sh'), error: "find: '/cache': Permission denied\nfind: '/data_mirror': Permission denied" }]);
+  try { const entries = await f.files.list('/system/bin'); assert.deepEqual(Array.from(entries, entry => entry.path), ['/system/bin/sh']); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].script.includes('find -H'), false); }
+  finally { await f.close(); }
+});
+
 test('directory metadata uses one ADB request and bounded stat batches',async()=>{
   const names=Array.from({length:500},(_,i)=>'/large/file '+i+(i===0?'\nquote\"':'')).map(name=>name.replace('\\n','\n'));
   const f=await fixture([{data:Buffer.concat(names.map(name=>metadata(name)))}]);
-  try{const entries=await f.files.list('/large');assert.equal(entries.length,500);assert.equal(f.calls.length,1);assert.equal((f.calls[0].script.match(/stat -c /g)||[]).length,1);assert.ok(f.calls[0].script.includes('[ "$#" -eq 128 ]'));assert.ok(f.calls[0].script.includes('emit_metadata "$@"'));assert.deepEqual(Array.from(entries,e=>e.path),names);}
+  try{const entries=await f.files.list('/large');assert.equal(entries.length,500);assert.equal(f.calls.length,1);assert.ok((f.calls[0].script.match(/stat -c /g)||[]).length>=1);assert.ok(f.calls[0].script.includes('for p in'));assert.equal(f.calls[0].script.includes('find -H'),false);assert.deepEqual(Array.from(entries,e=>e.path),names);}
   finally{await f.close();}
 });
 // 显式只读真机验证：/system/etc超过128项，前后完整结果逐字段相等且新耗时低于两次旧基线较快值的一半；另断言/system/bin在5秒内完整读完。
@@ -233,18 +238,18 @@ test('opt-in device toolbar transfers preserve independent byte counts hashes an
   }
 });
 
-// 缓存能力后仍保留每次目录权限检查；权限/不存在目录失败不污染缓存，下一次合法目录仍按缓存模式执行。
-test('cached listing mode preserves directory checks and failures',async()=>{
+// 每次目录读取都执行权限检查；不存在目录失败不污染后续合法目录读取，统一协议不含能力探测。
+test('directory listing preserves permission checks and failures',async()=>{
   const f=await fixture([{data:metadata('/ok/file')},{code:1,error:'Permission denied'},{data:metadata('/ok2/file')}]);
-  try{await f.files.list('/ok');await assert.rejects(f.files.list('/missing'),/Permission denied/);await f.files.list('/ok2');assert.equal(f.calls.length,3);assert.ok(f.calls[1].script.includes('[ -d'));assert.ok(f.calls[2].script.includes('[ -d'));assert.equal(f.calls[1].script.includes('if find / -maxdepth 0'),false);}
+  try{await f.files.list('/ok');await assert.rejects(f.files.list('/missing'),/Permission denied/);await f.files.list('/ok2');assert.equal(f.calls.length,3);assert.ok(f.calls[1].script.includes('[ -d'));assert.ok(f.calls[2].script.includes('[ -d'));assert.equal(f.calls[1].script.includes('find -H'),false);}
   finally{await f.close();}
 });
 
-// 原生find协议完整保留任意名称与链接目标，严格检查独立目录链接集合及损坏输出。
-test('native directory metadata preserves NUL fields and rejects malformed records',async()=>{
+// 统一FileEntry协议严格拒绝残缺字段并保留任意文件名、符号链接目标和目录链接标记。
+test('directory entry protocol preserves NUL fields and rejects malformed records',async()=>{
   const name='/dir/a\n\"%name',target='../target\n';
-  const data=Buffer.from(['F',name,'-rw-r--r--','3','1700000000.123456789','', '/dir/link','lrwxrwxrwx','8','1700000000',target,'','/dir/link',''].join('\0'));
-  const f=await fixture([{data,rawListing:true},{data:Buffer.from('F\0\0'),rawListing:true},{data:Buffer.from('F\0/dir/broken\0'),rawListing:true},{data:Buffer.from('X\0'),rawListing:true}]);
-  try{const entries=await f.files.list('/dir');assert.equal(entries.length,2);assert.equal(entries[0].path,name);assert.equal(entries[0].modified,1700000000000);assert.equal(entries[1].linkTarget,target);assert.equal(entries[1].directoryLink,true);assert.equal((await f.files.list('/empty')).length,0);await assert.rejects(f.files.list('/dir'),/Malformed/);await assert.rejects(f.files.list('/dir'),/Invalid device listing format/);}
+  const data=Buffer.from([name,'file','-rw-r--r--','3','1700000000','0','', '/dir/link','symlink','lrwxrwxrwx','8','1700000000','1',target,''].join('\0'));
+  const f=await fixture([{data},{data:Buffer.from('')},{data:Buffer.from('/dir/broken\0file')},{data:Buffer.from('X\0')}]);
+  try{const entries=await f.files.list('/dir');assert.equal(entries.length,2);assert.equal(entries[0].path,name);assert.equal(entries[0].modified,1700000000000);assert.equal(entries[1].linkTarget,target);assert.equal(entries[1].directoryLink,true);assert.equal((await f.files.list('/empty')).length,0);await assert.rejects(f.files.list('/dir'),/Malformed/);await assert.rejects(f.files.list('/dir'),/Malformed/);}
   finally{await f.close();}
 });

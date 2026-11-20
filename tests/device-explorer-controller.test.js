@@ -109,7 +109,7 @@ test('list fallback and unsafe paths remain visible errors', async () => {
     const fallback = f.posts.find(m => m.type === 'explorerFiles' && m.path === '/data');
     assert.deepEqual(Array.from(fallback.entries, e => e.name), ['data', 'local']);
     await f.controller.handle({ type: 'explorer', action: 'list', path: '/broken' });
-    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /adb unavailable/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /adb unavailable/); assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').path, '/broken');
     await f.controller.handle({ type: 'explorer', action: 'copyPath', paths: ['/ok', '/../escape'] });
     assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /Invalid device path/);
   } finally { await f.close(); }

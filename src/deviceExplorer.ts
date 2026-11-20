@@ -140,7 +140,7 @@ export class DeviceExplorerController {
         try { await this.discardUpload(scope, message.transferId); } catch (cleanup) { error = new AggregateError([error, cleanup], 'Upload and temporary cleanup failed'); }
       }
       failure = String(error);
-      this.post({ type: 'explorerProgress', serial: scope.serial, busy: false, message: String(error), error: String(error) });
+      this.post({ type: 'explorerProgress', serial: scope.serial, busy: false, message: String(error), error: String(error), ...(message.action === 'list' ? { path: message.path } : {}) });
     });
     scope.tasks.add(task);
     this.post({ type: 'explorerLoading', serial: scope.serial, fetching: true });
