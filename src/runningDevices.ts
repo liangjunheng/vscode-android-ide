@@ -28,7 +28,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   private inflight = false;
   private videoInFlight = 0;
   private videoAwaitingKey = false;
-  private static readonly videoWindow = 3;
+  private static readonly videoWindow = 6;
   private pendingVideoConfig?: Uint8Array;
   private pendingVideo?: { kind: 'key' | 'delta'; data: Uint8Array };
   private pending?: { w: number; h: number; data: Uint8Array };
@@ -219,8 +219,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
     if (this.nativeMirror) { await this.startNativeScrcpy(connection.serial); return; }
     const mode = this.pickMode(connection.serial);
     if (mode === 'emulator') { await this.startEmulator(connection.serial); }
-    else if (mode === 'scrcpy') { await this.startScrcpy(); }
-    else { this.startScreencap(); }
+    else { await this.startScrcpy(); }
   }
 
   // 启动独立原生scrcpy窗口，视频解码和渲染完全脱离VS Code；失败直接报告，不回退到高延迟Webview链路。
@@ -285,8 +284,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
   }
 
   private pickMode(serial: string): Mode {
-    const order: Mode[] = ['emulator', 'scrcpy', 'screencap'];
-    const usable = (m: Mode) => m === 'screencap' || m === 'scrcpy' || (grpcSupported() && grpcPortFor(serial) !== undefined);
+    const order: Mode[] = ['emulator', 'scrcpy'];
+    const usable = (m: Mode) => m === 'scrcpy' || (grpcSupported() && grpcPortFor(serial) !== undefined);
     const start = this.forced ? order.indexOf(this.forced) : 0;
     return order.slice(start).find(usable)!;
   }
@@ -351,10 +350,7 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
         const bytes = new Uint8Array(data);
         if (kind === 'config') { this.pendingVideoConfig = bytes; }
         else if (kind === 'key') { this.pendingVideo = { kind, data: bytes }; this.videoAwaitingKey = false; }
-        else if (!this.videoAwaitingKey) {
-          if (this.pendingVideo?.kind === 'delta') { this.pendingVideo = undefined; this.videoAwaitingKey = true; }
-          else if (!this.pendingVideo) { this.pendingVideo = { kind, data: bytes }; }
-        }
+        else if (!this.videoAwaitingKey && this.pendingVideo?.kind !== 'key') { this.pendingVideo = { kind, data: bytes }; }
         this.flushVideo();
       },
 
@@ -369,7 +365,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
       await session.start();
     } catch (e: any) {
       if (connection.controller.signal.aborted) { if (e.name !== 'AbortError') { vscode.window.showErrorMessage(String(e)); } return; }
-      this.fallback('screencap', `scrcpy failed (${e.message}); using screenshot mode`);
+      this.stop();
+      this.post({ type: 'error', text: `Scrcpy stream failed: ${e.message}. Refresh to retry.` });
     }
   }
 
@@ -472,8 +469,8 @@ export class RunningDeviceView implements vscode.WebviewViewProvider {
       case 'ack': this.inflight = false; return this.flush();
       case 'rotate': if (this.emu) { this.emu.rotate(m.dir); return; } if (s) { return this.rotate(s, m.dir); } return;
       case 'record': if (s) { return this.toggleRecording(s); } return;
-      case 'noDecoder': return this.fallback('screencap', 'Video decoding unavailable in this VS Code; using screenshot mode');
-      case 'decodeError': return this.fallback('screencap', `Decoder error: ${m.text}; using screenshot mode`);
+      case 'noDecoder': this.stop(); this.post({ type: 'error', text: 'Embedded Scrcpy requires WebCodecs support in this VS Code.' }); return;
+      case 'decodeError': this.stop(); this.post({ type: 'error', text: `Scrcpy H.264 decode failed: ${m.text}. Refresh to retry.` }); return;
       default: if (!s) { return; }
     }
     if (this.emu) { return this.onEmulatorInput(this.emu, m, s); }
@@ -761,7 +758,7 @@ function onVideo(kind,raw){
  if(kind==='config'){onConfig(d);send({type:'videoAck'});return}
  if(!decoder||decoder.state!=='configured'){send({type:'videoAck'});return}
  if(needKey&&kind!=='key'){send({type:'videoAck'});return}
- if(decoder.decodeQueueSize>2&&kind!=='key'){needKey=true;decoder.reset();decoder.configure({codec:codecName||'avc1.640033',optimizeForLatency:true});send({type:'videoAck',awaitKey:true});return}
+ if(decoder.decodeQueueSize>8&&kind!=='key'){needKey=true;send({type:'videoAck',awaitKey:true});return}
  let data=d;
  if(kind==='key'&&configData){data=new Uint8Array(configData.length+d.length);data.set(configData);data.set(d,configData.length)}
  if(kind==='key')needKey=false;

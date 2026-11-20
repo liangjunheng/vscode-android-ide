@@ -128,6 +128,7 @@ test('scrcpy video flow applies latest-frame backpressure', async () => {
   f.packet('delta', [3]);
   assert.deepEqual(f.messages.map(m => [m.type, m.kind]), [['video', 'config'], ['video', 'delta'], ['video', 'delta']]);
   await f.receive({ type: 'videoAck' });
+  assert.deepEqual(f.messages.map(m => [m.type, m.kind]), [['video', 'config'], ['video', 'delta'], ['video', 'delta']]);
   f.packet('key', [4]);
   f.packet('delta', [5]);
   await f.receive({ type: 'videoAck' });
@@ -405,7 +406,7 @@ test('scrcpy decoder drops queued deltas but accepts recovery key frames', () =>
   f.message({ type: 'video', kind: 'config', data: new Uint8Array([0, 0, 0, 1, 0x67, 0x64, 0, 0]) });
   assert.equal(f.decoder().state, 'configured');
   assert.deepEqual(f.decoderState.decoded, []);
-  f.decoderState.queue = 3;
+  f.decoderState.queue = 9;
   f.message({ type: 'video', kind: 'delta', data: new Uint8Array([2]) });
   assert.equal(f.decoderState.decoded.length, 0);
   f.message({ type: 'video', kind: 'key', data: new Uint8Array([1]) });

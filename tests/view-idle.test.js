@@ -169,8 +169,8 @@ function scrcpy(clock,options={}){
   }
   const sdk={adbPath:()=> 'adb',sdkRoot:()=> 'sdk',freePort:async()=>31415,
     runBuffer:async(cmd,args,signal)=>{calls.push(['push',...args]);pushReady.resolve(signal);if(options.push)return options.push(signal);return Buffer.alloc(0);},
-    adb:async(serial,...args)=>{calls.push(args);if(args[0]==='forward'&&args[1]!=='--remove'){forwardReady.resolve();if(options.forward)await options.forward.promise;}if(args[1]==='--remove'&&options.remove)await options.remove.promise;}};
-  const deps={'./sdk':sdk,net:{connect:()=>{const socket=new Socket();sockets.push(socket);socketReady.resolve(socket);return socket;}},child_process:{spawn:()=>{calls.push(['spawn']);const proc=new EventEmitter();proc.stdout=new EventEmitter();proc.stderr=new EventEmitter();proc.exitCode=null;proc.kill=()=>{kills++;proc.exitCode=0;proc.emit('exit');};return proc;}}};
+    adb:async(serial,...args)=>{calls.push(args);if((args[0]==='forward'||args[0]==='reverse')&&args[1]!=='--remove'){forwardReady.resolve();if(options.forward)await options.forward.promise;}if(args[1]==='--remove'&&options.remove)await options.remove.promise;}};
+  const deps={'./sdk':sdk,net:{connect:()=>{const socket=new Socket();sockets.push(socket);socketReady.resolve(socket);queueMicrotask(()=>{socket.emit('connect');if(sockets.length===1)socket.emit('data',Buffer.from([0]));});return socket;},createServer:handler=>{const server=new EventEmitter();server.handler=handler;server.listen=(_port,_host,callback)=>{callback();return server;};server.close=()=>{};return server;}},child_process:{spawn:()=>{calls.push(['spawn']);const proc=new EventEmitter();proc.stdout=new EventEmitter();proc.stderr=new EventEmitter();proc.exitCode=null;proc.kill=()=>{kills++;proc.exitCode=0;proc.emit('exit');};return proc;}}};
   const {ScrcpySession}=load('scrcpy.ts',deps,clock);
   const session=new ScrcpySession('phone','jar',{onPacket(){},onClose(){closes++;}});
   return {session,calls,sockets,socketReady,pushReady,forwardReady,get closes(){return closes;},get kills(){return kills;}};
@@ -260,10 +260,10 @@ test('device selection and disposal immediately close all retained backend sessi
   const clock=new Clock(),f=backend(clock);try{await f.controller.setContext('phone',true,'processes');await f.drain();await f.controller.setContext('phone',true,'files');await f.drain();const old=[...f.controller.scopes.values()];await f.controller.setContext('two',true,'files');await f.drain();assert.ok(old.every(scope=>scope.connection.signal.aborted));assert.equal(f.watchers[0].closed,true);assert.equal(clock.timers.size,0);assert.equal(f.controller.scope.serial,'two');}finally{await f.controller.dispose();assert.equal(clock.timers.size,0);}
 });
 
-// scrcpy失败后回退到截图模式只进入加载态，不把失败诊断重新覆盖到投屏占位。
-test('scrcpy fallback does not replay startup error over screenshot loading state',async()=>{
-  const clock=new Clock(),f=mirror(clock);f.view.restart=async()=>{f.messages.push({type:'mode',mode:'screencap'});};
-  f.view.fallback('screencap','scrcpy failed (handshake closed); using screenshot mode');
-  await Promise.resolve();
-  assert.deepEqual(f.messages,[{type:'mode',mode:'screencap'}]);
+// Scrcpy启动失败只报告错误并停止当前流，不自动切换到截图模式，避免隐藏秒级延迟。
+test('scrcpy startup failure does not fall back to screenshot mode',async()=>{
+  const clock=new Clock(),f=mirror(clock);f.view.startScrcpy=async()=>{throw new Error('handshake closed');};
+  await f.view.restart();
+  assert.equal(f.messages.some(m=>m.type==='mode'&&m.mode==='screencap'),false);
+  assert.equal(f.messages.some(m=>m.type==='error'&&m.text.includes('handshake closed')),true);
 });

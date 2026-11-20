@@ -59,7 +59,7 @@ the extension MIT license does not replace upstream component terms.
 | `media/icons/lc-*.svg` | IntelliJ Platform `expui` icons, Copyright JetBrains s.r.o. and contributors | Apache-2.0 |
 | `media/codicons/` | [@vscode/codicons](https://github.com/microsoft/vscode-codicons), Copyright Microsoft | Icons CC-BY-4.0, code MIT (see `media/codicons/LICENSE*`) |
 | `media/logcat/fonts/` | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | SIL OFL 1.1 (see `media/logcat/fonts/OFL.txt`) |
-| `resources/scrcpy/scrcpy-server.jar` | [scrcpy](https://github.com/Genymobile/scrcpy) 3.3.4, Copyright (C) Genymobile | Apache-2.0 (see `resources/scrcpy/scrcpy-LICENSE.txt`) |
+| `resources/scrcpy/scrcpy-server.jar` | [scrcpy](https://github.com/Genymobile/scrcpy) 3.3.3, Copyright (C) Genymobile | Apache-2.0 (see `resources/scrcpy/scrcpy-LICENSE.txt`) |
 
 Apache-2.0 text: https://www.apache.org/licenses/LICENSE-2.0
 
