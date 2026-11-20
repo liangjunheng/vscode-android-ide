@@ -202,10 +202,10 @@ __ANDROID_STAT_FIELDS__
   // 删除链接本身而非链接目标，根目录拒绝；回归验证符号链接和根保护。
   async remove(value: string, signal?: AbortSignal): Promise<void> { const file = remote(value); if (file === '/') { throw new Error('Cannot delete device root'); } await this.run('rm -rf -- ' + quote(file), { signal }); }
 
-  // 包名输出逐行校验，权限/断开不能替换成空集；回归覆盖真实错误和取消。
+  // 解析包列表，允许单段系统包名且拒绝非法响应；Node>=22运行 npm test，tests/device-explorer-files.test.js 的 package listing 回归，断言完整列表、错误及取消。
   async listPackages(signal?: AbortSignal): Promise<string[]> {
     const text = (await this.run('pm list packages', { signal })).toString('utf8');
-    const lines = text.split(/\r?\n/).filter(Boolean); if (lines.some(line => !/^package:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(line))) { throw new Error('Invalid package manager response'); }
+    const lines = text.split(/\r?\n/).filter(Boolean); if (lines.some(line => !/^package:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(line))) { throw new Error('Invalid package manager response'); }
     return lines.map(line => line.slice(8));
   }
 

@@ -58,6 +58,20 @@ test('permission creation and malformed metadata errors propagate instead of emp
   finally{await f.close();}
 });
 
+// Node>=22模拟包列表响应，核验单段/多段及空列表；非法内容、权限失败和取消必须拒绝，取消不得启动ADB。
+test('package listing accepts single segment system packages and rejects malformed output', async () => {
+  const invalid = ['package:', 'package:com..app', 'package:com.example;id', 'Permission denied', 'package:com.example app'];
+  const f = await fixture([{ data: Buffer.from('package:android\r\npackage:com.example.app\r\npackage:com.mediatek\r\n') }, {}, ...invalid.map(text => ({ data: Buffer.from(text + '\n') })), { code: 1, error: 'Permission denied' }]);
+  try {
+    assert.deepEqual(Array.from(await f.files.listPackages()), ['android', 'com.example.app', 'com.mediatek']);
+    assert.deepEqual(Array.from(await f.files.listPackages()), []);
+    for (const text of invalid) { await assert.rejects(f.files.listPackages(), /Invalid package manager response/, text); }
+    await assert.rejects(f.files.listPackages(), /Permission denied/);
+    const cancelled = new AbortController(); cancelled.abort();
+    const count = f.calls.length; await assert.rejects(f.files.listPackages(cancelled.signal), /abort/i); assert.equal(f.calls.length, count);
+  } finally { await f.close(); }
+});
+
 // run-as与su脚本完整转义，不能将包名/文件名拼成本机命令；所有访问动作使用同一个固定serial。
 test('run-as and su apply verified access identity to remote scripts',async()=>{
   const f=await fixture([{data:metadata('/data/data/com.example.app/a')},{data:metadata('/root/a')}]);

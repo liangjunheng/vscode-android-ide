@@ -51,7 +51,7 @@ test('Explorer toolbar browser clicks upload and application reveal', {skip:!pro
       await page.waitForFunction(()=>window.sent.some(m=>m.action==='uploadEnd')&&window.__deviceExplorer.state.transfer===null);
       assert.equal(await page.evaluate(()=>atob(window.sent.find(m=>m.action==='uploadChunk').data)),'toolbar bytes');
       await page.evaluate(()=>{const send=data=>window.dispatchEvent(new MessageEvent('message',{data})),chain=['/','/data','/data/data','/data/data/com.example.app'];for(let i=0;i<chain.length;i++)send({type:'explorerFiles',path:chain[i],entries:[...(i===0?Array.from({length:80},(_,n)=>({path:'/aaa-'+n,name:'aaa-'+n,kind:'directory'})):[]),...(i+1<chain.length?[{path:chain[i+1],name:chain[i+1].split('/').pop(),kind:'directory'}]:[])]});send({type:'explorerReveal',serial:'phone',path:chain[3]});});
-      const located=page.locator('.file-row[aria-selected="true"]');assert.equal(await located.getAttribute('data-path'),'/data/data/com.example.app');assert.equal(await located.isVisible(),true);assert.equal(await located.evaluate(row=>{const list=row.closest('.file-list'),r=row.getBoundingClientRect(),bounds=list.getBoundingClientRect();return list.scrollTop>0&&Math.abs(r.y-list.querySelector('.file-head').getBoundingClientRect().bottom)<1&&r.bottom<=bounds.bottom;}),true);
+      const located=page.locator('.file-row[aria-selected="true"]');assert.equal(await located.getAttribute('data-path'),'/data/data/com.example.app');assert.equal(await located.isVisible(),true);assert.equal(await located.evaluate(row=>{const list=row.closest('.file-list'),r=row.getBoundingClientRect(),bounds=list.getBoundingClientRect();return list.scrollTop>0&&Math.abs(r.y-list.parentNode.querySelector('.file-head').getBoundingClientRect().bottom - 2)<1&&r.bottom<=bounds.bottom;}),true);
       await page.screenshot({path:path.join(screenshots,'toolbar-'+width+'.png')});
       await page.evaluate(()=>window.dispatchEvent(new MessageEvent('message',{data:{type:'explorerState',serial:'phone',tab:'files',active:false}})));assert.equal(await buttons.evaluateAll(bs=>bs.every(b=>b.disabled)),true);assert.deepEqual(errors,[]);
     }finally{await page.close();}
@@ -131,7 +131,7 @@ test('file tree expansion keeps selected viewport anchor after locate and async 
     for(const busy of [true,false]){await page.evaluate(busy=>deliver({type:'explorerProgress',busy,message:'Loading'}),busy);after=await measure();assert.ok(Math.abs(after.y-before.y)<1,JSON.stringify({before,after,busy}));}
     await row.click();after=await measure();assert.ok(Math.abs(after.y-before.y)<1,JSON.stringify({before,after,step:'collapse'}));await row.click();after=await measure();assert.ok(Math.abs(after.y-before.y)<1,JSON.stringify({before,after,step:'reopen'}));
     await page.evaluate(()=>{document.querySelector('.file-list').scrollLeft=50;deliver({type:'explorerFiles',path:'/target',entries:Array.from({length:70},(_,i)=>({path:'/target/file'+i,name:'file'+i,kind:'file'}))});});after=await measure();assert.equal(after.left,50);assert.equal(after.sameList,true);assert.equal(after.sameRow,true);assert.ok(Math.abs(after.y-before.y)<1);
-    assert.equal(await row.evaluate(r=>Math.abs(r.getBoundingClientRect().y-r.closest('.file-list').querySelector('.file-head').getBoundingClientRect().bottom)<1),true);
+    assert.equal(await row.evaluate(r=>Math.abs(r.getBoundingClientRect().y-r.closest('.file-list').parentNode.querySelector('.file-head').getBoundingClientRect().bottom - 2)<1),true);
   }finally{await browser.close();}
 });
 
@@ -201,9 +201,9 @@ test('Explorer files scroll in aligned columns and process cards never scroll ho
         const prefix = 'file';
         // 读取真实布局矩形而非静态CSS字符串；列宽、视口边界和文字可容纳性均由浏览器计算。
         const inspect = () => page.evaluate(prefix => {
-          const list = document.querySelector('.' + prefix + '-list'), head = list.querySelector('.' + prefix + '-head'), row = list.querySelector('.' + prefix + '-row');
+          const list = document.querySelector('.' + prefix + '-list'), head = list.parentNode.querySelector('.' + prefix + '-head'), row = list.querySelector('.' + prefix + '-row');
           const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, right: r.right, y: r.y, bottom: r.bottom, width: r.width, height: r.height }; };
-          return { list: rect(list), head: rect(head), columns: [...head.children].map(rect), cells: [...row.children].map(rect), readable: [...head.children].every(e => e.scrollWidth <= e.clientWidth && getComputedStyle(e).whiteSpace === 'nowrap'), cellsReadable:[...row.querySelectorAll('.cell')].every(e=>e.scrollHeight<=e.clientHeight&&getComputedStyle(e).whiteSpace==='nowrap'), headCount: list.querySelectorAll('.' + prefix + '-head').length, scrollWidth: list.scrollWidth, clientWidth: list.clientWidth, scrollHeight: list.scrollHeight, clientHeight: list.clientHeight, scrollLeft: list.scrollLeft, scrollTop: list.scrollTop, overflow: document.documentElement.scrollWidth > innerWidth, pageOverflow: document.documentElement.scrollHeight > innerHeight };
+          return { list: rect(list), head: rect(head), columns: [...head.children].map(rect), cells: [...row.children].map(rect), readable: [...head.children].every(e => e.scrollWidth <= e.clientWidth && getComputedStyle(e).whiteSpace === 'nowrap'), cellsReadable:[...row.querySelectorAll('.cell')].every(e=>e.scrollHeight<=e.clientHeight&&getComputedStyle(e).whiteSpace==='nowrap'), headCount: list.parentNode.querySelectorAll('.' + prefix + '-head').length, scrollWidth: list.scrollWidth, clientWidth: list.clientWidth, scrollHeight: list.scrollHeight, clientHeight: list.clientHeight, scrollLeft: list.scrollLeft, scrollTop: list.scrollTop, overflow: document.documentElement.scrollWidth > innerWidth, pageOverflow: document.documentElement.scrollHeight > innerHeight };
         }, prefix);
         let actual = await inspect();
         assert.equal(actual.readable, true, mode + ' header labels fit');assert.equal(actual.cellsReadable,true,mode+' metadata stays within a single centered row');
@@ -228,7 +228,7 @@ test('Explorer files scroll in aligned columns and process cards never scroll ho
         await page.locator('.' + prefix + '-list').evaluate(list => { list.scrollLeft = list.scrollWidth; list.scrollTop = list.scrollHeight; });
         actual = await inspect();
         assert.equal(actual.headCount, 1); assert.ok(actual.scrollTop > 0);
-        assert.ok(Math.abs(actual.head.y - actual.list.y) < 1, 'sticky header stays at scroller top');
+        assert.ok(Math.abs(actual.head.bottom + 2 - actual.list.y) < 1, 'fixed header stays above scroller with progress track');
         assert.ok(actual.columns.at(-1).right <= actual.list.right + 1 && actual.columns.at(-1).x >= actual.list.x, 'last column is reachable');
         for (let i = 0; i < actual.columns.length; i++) assert.ok(Math.abs(actual.columns[i].x - actual.cells[i].x) < 1, 'header follows horizontal scroll');
         if (actual.scrollWidth > actual.clientWidth) assert.ok(actual.scrollLeft > 0); else assert.equal(actual.scrollLeft,0);

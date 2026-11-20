@@ -103,14 +103,15 @@ export class DeviceExplorerController {
     if (!vscode.workspace.isTrusted) { throw new Error('Workspace is not trusted'); }
   }
 
-  // 发布状态和真实能力，不把未实现的备份/原生拖出伪装启用；controller/UI 回归断言空态及能力禁用。
+  // 发布状态、任务集合获取态及真实能力，不伪装未实现能力；npm test 的 Explorer loading/controller/UI回归断言ready重放、空态及禁用。
   private state(): void {
     const retained = this.scopes.get(this.tab);
-    this.post({ type: 'explorerState', serial: this.serial, tab: this.tab, active: !!this.scope, connected: !!retained && !retained.connection.signal.aborted && (this.tab === 'files' ? retained.directories.size > 0 : retained.processes.connected), filter: this.filter, applicationIds: this.applicationIds,
+    this.post({ type: 'explorerState', serial: this.serial, tab: this.tab, active: !!this.scope, fetching: !!this.scope?.tasks.size, connected: !!retained && !retained.connection.signal.aborted && (this.tab === 'files' ? retained.directories.size > 0 : retained.processes.connected), filter: this.filter, applicationIds: this.applicationIds,
       capabilities: ProcessesController.capabilities() });
   }
 
   // 命令归作用域所有；设置入口使用 android-ide.explorer，输入宿主消息，无返回值。controller 回归核验新命名空间和动作归属、失败及取消；locateApp的writer互斥/取消证据见定位共享回归映射。
+  // 获取状态直接取当前任务集合，ready重放且并发全部结束才隐藏；npm test 中 Explorer loading 回归断言失败、并发和取消生命周期。
   async handle(message: any): Promise<void> {
     if (!message || message.type !== 'explorer' || typeof message.action !== 'string') { throw new Error('Invalid Device Explorer message'); }
     if (message.action === 'ready') {
@@ -142,8 +143,12 @@ export class DeviceExplorerController {
       this.post({ type: 'explorerProgress', serial: scope.serial, busy: false, message: String(error), error: String(error) });
     });
     scope.tasks.add(task);
+    this.post({ type: 'explorerLoading', serial: scope.serial, fetching: true });
     if (mutation) { scope.writer = task; }
-    try { await task; } finally { scope.tasks.delete(task); if (scope.writer === task) { scope.writer = undefined; } }
+    try { await task; } finally {
+      scope.tasks.delete(task); if (scope.writer === task) { scope.writer = undefined; }
+      if (this.scope === scope && !scope.controller.signal.aborted) { this.post({ type: 'explorerLoading', serial: scope.serial, fetching: scope.tasks.size > 0 }); }
+    }
     if (message.transferId && !scope.controller.signal.aborted) {
       this.post({ type: 'explorerUploadAck', serial: scope.serial, action: message.action, transferId: message.transferId, ...(failure ? { error: String(failure) } : {}) });
     }

@@ -192,6 +192,83 @@ async function browser(t, data, signal) {
   return {evaluate,frames,post,viewport,click,key,mouse,wheel,type,ime,format,search,screenshot,region};
 }
 
+// LOGCAT_BROWSER=1启动Edge，在240/728px验证表头下沿蓝条、滚动时错误吸顶及完整文本、后台回包保留和用户操作清错。
+
+test('Explorer loading browser animates below column headers without a serial row and preserves scroll', { skip: !enabled, timeout: 60000 }, async t => {
+  const c = new AbortController(), deadline = setTimeout(() => c.abort(new Error('Explorer browser deadline')), 45000); t.after(() => clearTimeout(deadline));
+  const page = await browser(t, await fixture(), c.signal);
+  const css = await fs.readFile(path.join(root, 'media/device-explorer/main.css'), 'utf8');
+  await page.evaluate(`document.body.insertAdjacentHTML('beforeend','<section id="device-explorer" style="position:fixed;inset:0;height:500px;background:#1e1e1e;z-index:100"></section>');document.head.appendChild(Object.assign(document.createElement('style'),{textContent:${JSON.stringify(css)}}));window.send=m=>window.__hostMessages.push(m)`);
+  for (const file of ['media/device-processes/processes.js', 'media/device-explorer/main.js']) await page.evaluate(await fs.readFile(path.join(root, file), 'utf8'));
+  await page.post({ type: 'explorerState', serial: 'phone', tab: 'files', active: true, fetching: false });
+  await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: Array.from({ length: 80 }, (_, i) => ({ path: '/file' + i, name: 'file' + i, kind: 'file' })) });
+  await page.evaluate('window.savedList=document.querySelector(".file-list");savedList.scrollTop=100');
+  for (const width of [240, 728]) {
+    await page.viewport(width);
+    await page.evaluate('savedList.scrollTop=100');
+    await page.post({ type: 'explorerLoading', serial: 'phone', fetching: true });
+    const visual = await page.evaluate(`(()=>{const head=document.querySelector('.file-head'),s=getComputedStyle(head,'::after'),a=document.getAnimations().find(a=>a.animationName==='explorer-fetching');a.pause();a.currentTime=0;const start=getComputedStyle(head,'::after').backgroundPosition;a.currentTime=600;const bar=document.querySelector('.files-view .toolbar').getBoundingClientRect(),h=head.getBoundingClientRect();return {color:s.backgroundImage,height:s.height,top:parseFloat(s.top),headerHeight:head.clientHeight,headerY:h.y,toolbarBottom:bar.bottom,serialRows:document.querySelectorAll('.pathbar').length,position:s.position,start,end:getComputedStyle(head,'::after').backgroundPosition,scroll:savedList.scrollTop,same:savedList===document.querySelector('.file-list')}})()`);
+    assert.ok(visual.color.includes('rgb(55, 148, 255)')); assert.equal(visual.height, '2px'); assert.equal(visual.top, visual.headerHeight); assert.equal(visual.serialRows, 0); assert.ok(Math.abs(visual.headerY - visual.toolbarBottom) < 1); assert.equal(visual.position, 'absolute'); assert.notEqual(visual.start, visual.end); assert.equal(visual.scroll, 100); assert.equal(visual.same, true);
+    await page.screenshot('explorer-loading-' + width);
+    await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: 'read failed' });
+    assert.equal(await page.evaluate('document.getElementById("device-explorer").getAttribute("aria-busy")'), 'true');
+    await page.post({ type: 'explorerLoading', serial: 'phone', fetching: false });
+    assert.equal(await page.evaluate('getComputedStyle(document.querySelector(".file-head"),"::after").content'), 'none');
+    const reason = 'Permission denied: <device path>\nFailed to list directory with a long diagnostic reason';
+    await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: reason });
+    await page.post({ type: 'explorerFiles', serial: 'phone', path: '/background', entries: [] });
+    await page.evaluate('savedList.scrollTop=180;savedList.scrollLeft=80'); await page.frames();
+    const pinned = await page.evaluate(`(()=>{const error=document.querySelector('.state.error'),head=document.querySelector('.file-head'),cell=head.querySelector('.cell'),r=error.getBoundingClientRect(),h=head.getBoundingClientRect(),c=cell.getBoundingClientRect(),l=savedList.getBoundingClientRect();return {text:error.textContent,role:error.getAttribute('role'),position:getComputedStyle(error).position,y:r.y,headerBottom:h.bottom,columnBottom:c.bottom,x:r.x,listX:l.x,right:r.right,listRight:l.right,height:r.height,scrollHeight:error.scrollHeight,clientHeight:error.clientHeight,html:error.querySelectorAll('*').length}})()`);
+    assert.equal(pinned.text, reason); assert.equal(pinned.role, 'alert'); assert.equal(pinned.position, 'static'); assert.ok(Math.abs(pinned.y - pinned.headerBottom) < 1); assert.ok(await page.evaluate('(()=>{const error=document.querySelector(".state.error").getBoundingClientRect(),list=document.querySelector(".file-list").getBoundingClientRect();return list.top>=error.bottom})()')); assert.ok(Math.abs(pinned.x - pinned.listX) < 1); assert.ok(pinned.right <= pinned.listRight + 1); assert.ok(pinned.height > 18); assert.equal(pinned.scrollHeight, pinned.clientHeight); assert.equal(pinned.html, 0);
+    const aligned = await page.evaluate('(()=>{const head=[...document.querySelector(".file-head").children],cells=[...document.querySelector(".file-row").children];return head.every((h,i)=>{const a=h.getBoundingClientRect(),b=cells[i].getBoundingClientRect();return Math.abs(a.x-b.x)<1&&Math.abs(a.width-b.width)<1})})()');
+    assert.equal(aligned, true);
+    await page.screenshot('explorer-pinned-error-' + width);
+    await page.evaluate('document.querySelector(".state.error").click()'); await page.frames();
+    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: reason });
+    await page.evaluate('document.querySelector(".file-row").click()'); await page.frames();
+    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: 'next failure' });
+    await page.evaluate('document.querySelector(".files-view button[title=Refresh]").click()'); await page.frames();
+    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: 'keyboard failure' });
+    await page.key('ArrowDown');
+    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    await page.evaluate('savedList.scrollLeft=0');
+    await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: [{ path: '/dir-' + width, name: 'dir-' + width, kind: 'directory' }] });
+    await page.post({ type: 'explorerProgress', busy: false, error: 'expand failed' });
+    const reads = await page.evaluate('window.__hostMessages.filter(m=>m.action==="list").length');
+    const point = await page.evaluate('(()=>{const r=document.querySelector(".twisty").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()');
+    await page.mouse('mousePressed', point.x, point.y); await page.mouse('mouseReleased', point.x, point.y); await page.frames();
+    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    assert.equal(await page.evaluate('window.__hostMessages.filter(m=>m.action==="list").length'), reads + 1);
+    await page.post({ type: 'explorerProgress', busy: false, error: 'old error' });
+    await page.evaluate('window.send=m=>{window.__hostMessages.push(m);if(m.action==="refresh")window.dispatchEvent(new MessageEvent("message",{data:{type:"explorerProgress",busy:false,error:"new synchronous failure"}}))};document.querySelector(".files-view button[title=Refresh]").click()'); await page.frames();
+    assert.equal(await page.evaluate('document.querySelector(".state.error").textContent'), 'new synchronous failure');
+    await page.evaluate('document.querySelector(".state.error").click();window.send=m=>window.__hostMessages.push(m)');
+    await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: Array.from({ length: 80 }, (_, i) => ({ path: '/file' + i, name: 'file' + i, kind: 'file' })) });
+    await page.post({ type: 'explorerLoading', serial: 'phone', fetching: true });
+    await page.post({ type: 'explorerState', serial: 'phone', tab: 'files', active: false, fetching: false });
+    assert.equal(await page.evaluate('document.getElementById("device-explorer").getAttribute("aria-busy")'), 'false');
+    await page.post({ type: 'explorerState', serial: 'phone', tab: 'files', active: true, fetching: false });
+  }
+  await page.viewport(1000);
+  await page.evaluate('savedList.scrollLeft=0'); await page.frames();
+  for (const font of ['Arial', 'Consolas']) {
+    await page.evaluate(`document.getElementById('device-explorer').style.fontFamily=${JSON.stringify(font)}`); await page.frames();
+    assert.equal(await page.evaluate('(()=>{const head=[...document.querySelector(".file-head").children],cells=[...document.querySelector(".file-row").children];return head.every((h,i)=>Math.abs(h.getBoundingClientRect().width-cells[i].getBoundingClientRect().width)<1)})()'), true);
+  }
+  const grip = await page.evaluate('(()=>{const g=document.querySelector(".column-grip"),r=g.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,width:g.parentNode.getBoundingClientRect().width}})()');
+  await page.mouse('mousePressed', grip.x, grip.y); await page.mouse('mouseMoved', grip.x + 30, grip.y); await page.mouse('mouseReleased', grip.x + 30, grip.y); await page.frames();
+  assert.equal(await page.evaluate('document.querySelector(".file-head .cell").getBoundingClientRect().width'), grip.width + 30);
+  assert.equal(await page.evaluate('document.querySelector(".file-row .file-name").getBoundingClientRect().width'), grip.width + 30);
+  await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: [{ path: '/target', name: 'target', kind: 'directory' }, ...Array.from({ length: 80 }, (_, i) => ({ path: '/aaa' + i, name: 'aaa' + i, kind: 'directory' }))] });
+  await page.post({ type: 'explorerFiles', serial: 'phone', path: '/target', entries: [] });
+  await page.post({ type: 'explorerReveal', serial: 'phone', path: '/target' });
+  assert.equal(await page.evaluate('(()=>{const row=document.querySelector(".file-row[aria-selected=true]"),list=document.querySelector(".file-list");return row.dataset.path==="/target"&&Math.abs(row.getBoundingClientRect().top-list.getBoundingClientRect().top)<1&&list.scrollTop>0})()'), true);
+  assert.deepEqual(await page.evaluate('window.__pageErrors'), []);
+});
+
 // Device Tools browser 无ADB：读取真实模板/样式/渲染函数，断言主题、长标签、图标、刷新，以及设备/风味外框的鼠标hover、按下和展开颜色。
 test('Device Tools browser clips long device labels', {skip:!enabled,timeout:60000}, async t=>{
   const c=new AbortController(),deadline=setTimeout(()=>c.abort(new Error('Device Tools browser deadline')),45000);t.after(()=>clearTimeout(deadline));

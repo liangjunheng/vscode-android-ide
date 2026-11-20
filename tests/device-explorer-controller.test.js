@@ -64,7 +64,38 @@ test('context lifecycle cancels old scope and cleans watchers', async () => {
     await f.controller.setContext(undefined, false);
     assert.ok(f.posts.some(m => m.type === 'explorerState' && m.serial === 'phone'));
     assert.ok(f.stopCount >= 1);
-    assert.equal(f.posts.at(-1).serial, undefined);
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').serial, undefined);
+  } finally { await f.close(); }
+});
+
+// Node>=22控制并发目录读取及取消，断言ready重放获取态、全部结束才隐藏，失活后无旧消息且切设备归属正确。
+test('Explorer loading follows concurrent reads errors ready and cancellation', async () => {
+  const pending = new Map();
+  const f = await fixture({ directoryEntries: (remote, signal) => remote === '/' ? [] : new Promise((resolve, reject) => {
+    const abort = () => { pending.delete(remote); reject(signal.reason); };
+    signal.addEventListener('abort', abort, { once: true });
+    pending.set(remote, { resolve: () => { signal.removeEventListener('abort', abort); pending.delete(remote); resolve([]); }, reject: () => { signal.removeEventListener('abort', abort); pending.delete(remote); reject(new Error('read failed')); } });
+  }) });
+  const loading = () => f.posts.filter(m => m.type === 'explorerLoading');
+  try {
+    await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]);
+    assert.equal(loading().at(-1).fetching, false);
+    const first = f.controller.handle({ type: 'explorer', action: 'list', path: '/one' });
+    const second = f.controller.handle({ type: 'explorer', action: 'list', path: '/two' });
+    assert.equal(loading().at(-1).fetching, true);
+    await f.controller.handle({ type: 'explorer', action: 'ready' });
+    assert.equal(f.posts.findLast(m => m.type === 'explorerState').fetching, true);
+    pending.get('/one').resolve(); await first; assert.equal(loading().at(-1).fetching, true);
+    pending.get('/two').reject(); await second; assert.equal(loading().at(-1).fetching, false);
+    assert.match(f.posts.findLast(m => m.type === 'explorerProgress').error, /read failed/);
+    const cancelled = f.controller.handle({ type: 'explorer', action: 'list', path: '/cancel' });
+    assert.equal(loading().at(-1).fetching, true);
+    const count = loading().length; await f.controller.setContext('phone', false); await cancelled;
+    assert.equal(pending.size, 0); assert.equal(loading().length, count);
+    assert.equal(f.posts.findLast(m => m.type === 'explorerState').fetching, false);
+    assert.equal(f.posts.findLast(m => m.type === 'explorerState').active, false);
+    await f.controller.setContext('other', true); await Promise.all([...f.controller.scope.tasks]);
+    assert.equal(loading().at(-1).serial, 'other'); assert.equal(loading().at(-1).fetching, false);
   } finally { await f.close(); }
 });
 
@@ -78,9 +109,9 @@ test('list fallback and unsafe paths remain visible errors', async () => {
     const fallback = f.posts.find(m => m.type === 'explorerFiles' && m.path === '/data');
     assert.deepEqual(Array.from(fallback.entries, e => e.name), ['data', 'local']);
     await f.controller.handle({ type: 'explorer', action: 'list', path: '/broken' });
-    assert.match(f.posts.at(-1).error, /adb unavailable/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /adb unavailable/);
     await f.controller.handle({ type: 'explorer', action: 'copyPath', paths: ['/ok', '/../escape'] });
-    assert.match(f.posts.at(-1).error, /Invalid device path/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /Invalid device path/);
   } finally { await f.close(); }
 });
 
@@ -96,14 +127,14 @@ test('file commands honor cancel confirmation and path copying', async () => {
     await f.controller.handle({ type: 'explorer', action: 'copyPath', paths: ['/a', '/b'] });
     assert.deepEqual(f.calls.find(c => c[0] === 'clipboard'), ['clipboard', '/a\n/b']);
     await f.controller.handle({ type: 'explorer', action: 'delete', paths: [] });
-    assert.match(f.posts.at(-1).error, /Select a file/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /Select a file/);
   } finally { await f.close(); }
 });
 
 // 前端解析后的父目录进入真实execute/create/list链；文件与目录类型不混淆且名称穿越仍被拒绝。
 test('new file and directory commands use the resolved parent and refresh it',async()=>{
   for(const action of ['newFile','newDirectory']){const f=await fixture({input:'new item'});try{await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);await f.controller.handle({type:'explorer',action,parent:'/dest/'});assert.deepEqual(f.calls.find(c=>c[0]==='create'),['create','/dest/new item',action==='newDirectory']);assert.ok(f.calls.some(c=>c[0]==='list'&&c[1]==='/dest/'));}finally{await f.close();}}
-  const f=await fixture({input:'../escape'});try{await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);await f.controller.handle({type:'explorer',action:'newFile',parent:'/dest/'});assert.match(f.posts.at(-1).error,/Invalid file name/);assert.equal(f.calls.some(c=>c[0]==='create'),false);}finally{await f.close();}
+  const f=await fixture({input:'../escape'});try{await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);await f.controller.handle({type:'explorer',action:'newFile',parent:'/dest/'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/Invalid file name/);assert.equal(f.calls.some(c=>c[0]==='create'),false);}finally{await f.close();}
 });
 
 // 验证分块上传 ACK、字节进度、相对路径、大小不匹配和重复传输的清理结果。
@@ -118,16 +149,16 @@ test('upload protocol enforces bytes, relative paths, duplicates and cleanup', a
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadEnd', transferId: 't1' });
     assert.deepEqual(f.calls.find(c => c[0] === 'push').slice(2), ['/dir/file.bin']);
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadBegin', transferId: 't2', target: '/', relativePath: 'bad/../x', size: 1 });
-    assert.match(f.posts.at(-1).error, /relative path/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /relative path/);
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadBegin', transferId: 't3', target: '/', relativePath: 'x', size: 2 });
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadBegin', transferId: 't3', target: '/', relativePath: 'y', size: 1 });
-    assert.match(f.posts.at(-1).error, /already exists/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /already exists/);
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadEnd', transferId: 't3' });
-    assert.match(f.posts.at(-1).error, /not open/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /not open/);
     assert.equal(f.controller.scope.uploads.has('t3'), false);
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadBegin', transferId: 'size-mismatch', target: '/', relativePath: 'mismatch.bin', size: 5 });
     await f.controller.handle({ type: 'explorer', serial: 'phone', action: 'uploadEnd', transferId: 'size-mismatch' });
-    assert.match(f.posts.at(-1).error, /size does not match/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /size does not match/);
   } finally { await f.close(); }
 });
 
@@ -137,12 +168,12 @@ test('directory upload ACK waits for creation and refresh without staging file r
   try{await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);const message={type:'explorer',serial:'phone',action:'uploadBegin',transferId:'directory',target:'/dest',relativePath:'empty',directory:true};
     const task=f.controller.handle(message);await ready;assert.equal(f.posts.some(m=>m.type==='explorerUploadAck'&&m.transferId==='directory'),false);release();await task;
     const ack=f.posts.findLast(m=>m.type==='explorerUploadAck');assert.equal(ack.transferId,'directory');assert.equal(ack.error,undefined);assert.deepEqual(f.calls.find(c=>c[0]==='create'),['create','/dest/empty',true]);assert.ok(f.calls.some(c=>c[0]==='list'&&c[1]==='/dest'));assert.equal(f.controller.scope.uploads.size,0);assert.equal(f.calls.some(c=>c[0]==='push'),false);
-    await f.controller.handle({...message,transferId:'unsafe',relativePath:'../outside'});assert.match(f.posts.at(-1).error,/relative path/);await f.controller.handle({...message,transferId:'other',serial:'other'});assert.match(f.posts.at(-1).error,/context changed/);assert.equal(f.calls.filter(c=>c[0]==='create').length,1);
+    await f.controller.handle({...message,transferId:'unsafe',relativePath:'../outside'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/relative path/);await f.controller.handle({...message,transferId:'other',serial:'other'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/context changed/);assert.equal(f.calls.filter(c=>c[0]==='create').length,1);
   }finally{release();await f.close();}
 });
 // 已存在/权限拒绝等create错误必须原样回ACK，不能继续上传或宣称目录完成。
 test('directory upload reports create failures instead of false completion',async()=>{
-  const f=await fixture({create:async()=>{throw new Error('directory already exists');}});try{await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);await f.controller.handle({type:'explorer',serial:'phone',action:'uploadBegin',transferId:'failed-directory',target:'/dest',relativePath:'empty',directory:true});assert.match(f.posts.at(-1).error,/directory already exists/);assert.equal(f.posts.some(m=>m.message==='Directory uploaded'),false);assert.equal(f.controller.scope.uploads.size,0);}finally{await f.close();}
+  const f=await fixture({create:async()=>{throw new Error('directory already exists');}});try{await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);await f.controller.handle({type:'explorer',serial:'phone',action:'uploadBegin',transferId:'failed-directory',target:'/dest',relativePath:'empty',directory:true});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/directory already exists/);assert.equal(f.posts.some(m=>m.message==='Directory uploaded'),false);assert.equal(f.controller.scope.uploads.size,0);}finally{await f.close();}
 });
 
 // 验证进程行归属、未知 PID 拒绝以及 Kill 与 ForceStop 使用不同后端动作。
@@ -157,7 +188,7 @@ test('process actions require owned rows and distinguish kill from force stop', 
     assert.deepEqual(f.calls.filter(c => c[0] === 'kill'), [['kill', 42]]);
     assert.deepEqual(f.calls.filter(c => c[0] === 'forceStop'), [['forceStop', 'com.example.app', 10]]);
     await f.controller.handle({ type: 'explorer', action: 'kill', pid: 99 });
-    assert.match(f.posts.at(-1).error, /no longer available/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /no longer available/);
   } finally { await f.close(); }
 });
 
@@ -270,7 +301,7 @@ test('Attach revalidates process identity and cancellation after configuration s
       if (outcome === 'process-gone') f.processState.onUpdate([]);
       release(outcome === 'cancel-picker' ? undefined : selected); await action;
       assert.equal(f.calls.some(call => ['debug', 'debugProject', 'information'].includes(call[0])), false);
-      if (outcome === 'process-gone') assert.match(f.posts.at(-1).error, /no longer available/);
+      if (outcome === 'process-gone') assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /no longer available/);
       if (outcome === 'cancel-scope') assert.equal(signal.aborted, true);
       if (outcome === 'cancel-picker') assert.equal(f.posts.some(message => message.error), false);
     } finally { release(); await f.close(); }
@@ -294,7 +325,7 @@ test('Attach revalidates row and operation signal after workspace selection', as
       release({ folder }); await pending;
       assert.equal(f.calls.filter(call => call[0] === 'picker').length, 1);
       assert.equal(f.calls.some(call => call[0] === 'debug'), false);
-      if (outcome === 'gone') assert.match(f.posts.at(-1).error, /no longer available/);
+      if (outcome === 'gone') assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /no longer available/);
     } finally { release(); await f.close(); }
   }
 });
@@ -361,7 +392,7 @@ test('Processes Android JVM attach preserves sourcePaths without invoking the Bu
 
 // 匹配注册也不等于会话成功，startDebugging=false须明确报错而非进程操作成功。
 test('Android debugger refusal remains a visible error with registered support',async()=>{
-  const f=await fixture({debugResult:false,quickPick:items=>items.find(item=>item.config?.type==='android')});try{f.config.launch.push({name:'Attach',type:'android',request:'attach'});f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app'}]);await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.at(-1).error,/Android debug (?:adapter|session) did not start/);assert.equal(f.posts.some(m=>m.message==='Process action complete'),false);}finally{await f.close();}
+  const f=await fixture({debugResult:false,quickPick:items=>items.find(item=>item.config?.type==='android')});try{f.config.launch.push({name:'Attach',type:'android',request:'attach'});f.config.debuggerExtensions.push({packageJSON:{contributes:{debuggers:[{type:'android'}]}}});await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.processState.onUpdate([{pid:42,name:'app'}]);await f.controller.handle({type:'explorer',action:'debug',pid:42});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/Android debug (?:adapter|session) did not start/);assert.equal(f.posts.some(m=>m.message==='Process action complete'),false);}finally{await f.close();}
 });
 
 // 同设备切换只取消活动操作并独立保留连接，Files重放缓存不重复读取；旧tab消息仍拒绝，精确60秒释放见view-idle。
@@ -372,11 +403,11 @@ test('independent Processes retains tracker while Files reuses its owned cache',
     f.calls.length=0;await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);
     assert.equal(f.calls.filter(c=>c[0]==='watch').length,1);assert.equal(f.calls.some(c=>c[0]==='list'||c[0]==='stat'),false);
     const count=f.stopCount;await f.controller.setContext('phone',true,'processes');assert.equal(f.stopCount,count);
-    await f.controller.handle({type:'explorer',action:'list',path:'/'});assert.match(f.posts.at(-1).error,/files view is not active/);
+    await f.controller.handle({type:'explorer',action:'list',path:'/'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/files view is not active/);
     f.calls.length=0;await f.controller.setContext('phone',true,'files');await Promise.all([...f.controller.scope.tasks]);
     assert.equal(f.calls.some(c=>c[0]==='stopWatch'||c[0]==='list'),false);assert.equal(f.stopCount,count);assert.equal(f.controller.scopes.size,2);assert.equal(f.controller.scopes.get('processes').processes.connected,true);
-    await f.controller.handle({type:'explorer',action:'tab',tab:'processes'});assert.match(f.posts.at(-1).error,/Device Tools view controls/);
-    await f.controller.handle({type:'explorer',action:'processes'});assert.match(f.posts.at(-1).error,/Processes view is not active/);
+    await f.controller.handle({type:'explorer',action:'tab',tab:'processes'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/Device Tools view controls/);
+    await f.controller.handle({type:'explorer',action:'processes'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/Processes view is not active/);
     await assert.rejects(f.controller.setContext('phone',true,'both'),/Invalid device surface/);
   }finally{await f.close();}
 });
@@ -398,7 +429,7 @@ test('process module revalidates selected row after asynchronous confirmation',a
     await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);
     f.processState.onUpdate([{pid:42,name:'app',packageName:'com.example.app',debugger:'default'}]);
     const pending=f.controller.handle({type:'explorer',action:'kill',pid:42});f.processState.onUpdate([]);await pending;
-    assert.equal(f.calls.some(c=>c[0]==='kill'),false);assert.match(f.posts.at(-1).error,/no longer available/);
+    assert.equal(f.calls.some(c=>c[0]==='kill'),false);assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/no longer available/);
   }finally{await f.close();}
 });
 
@@ -438,9 +469,9 @@ test('upload rejects another device without discarding its owned transfer',async
     await f.controller.setContext('phone',true);await Promise.all([...f.controller.scope.tasks]);
     await f.controller.handle({type:'explorer',serial:'phone',action:'uploadBegin',transferId:'owned',target:'/',relativePath:'owned.bin',size:0});
     await f.controller.handle({type:'explorer',serial:'other',action:'uploadEnd',transferId:'owned'});
-    assert.match(f.posts.at(-1).error,/device context changed/);assert.equal(f.controller.scope.uploads.has('owned'),true);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/device context changed/);assert.equal(f.controller.scope.uploads.has('owned'),true);
     for(let i=0;i<2;i++)await f.controller.handle({type:'explorer',serial:'phone',action:'uploadAbort',transferId:'owned'});
-    assert.equal(f.posts.at(-1).error,undefined);assert.equal(f.posts.at(-1).action,'uploadAbort');assert.equal(f.controller.scope.uploads.size,0);assert.equal(f.calls.some(c=>c[0]==='push'),false);
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').error,undefined);assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').action,'uploadAbort');assert.equal(f.controller.scope.uploads.size,0);assert.equal(f.calls.some(c=>c[0]==='push'),false);
   }finally{await f.close();}
 });
 
@@ -449,7 +480,7 @@ test('upload commands cannot create resources in the Processes surface',async()=
   const f=await fixture();try{
     await f.controller.setContext('phone',true,'processes');await Promise.all([...f.controller.scope.tasks]);f.calls.length=0;
     await f.controller.handle({type:'explorer',serial:'phone',action:'uploadBegin',transferId:'stale',target:'/',relativePath:'x',size:0});
-    assert.match(f.posts.at(-1).error,/files view is not active/);assert.equal(f.controller.scope.uploads.size,0);assert.equal(f.calls.some(c=>c[0]==='stat'||c[0]==='create'),false);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/files view is not active/);assert.equal(f.controller.scope.uploads.size,0);assert.equal(f.calls.some(c=>c[0]==='stat'||c[0]==='create'),false);
   }finally{await f.close();}
 });
 
@@ -477,7 +508,7 @@ test('directory expansion avoids preliminary stat and retains run-as permission 
     assert.deepEqual(f.calls.filter(c=>c[0]==='list'),[['list','/sdcard',undefined]]);assert.equal(f.calls.some(c=>c[0]==='stat'),false);
     f.calls.length=0;await f.controller.handle({type:'explorer',action:'list',path:'/data/data/com.example.app'});
     assert.deepEqual(f.calls.filter(c=>c[0]==='list'),[['list','/data/data/com.example.app',undefined],['list','/data/data/com.example.app','com.example.app']]);assert.equal(f.calls.some(c=>c[0]==='stat'),false);
-    f.calls.length=0;await f.controller.handle({type:'explorer',action:'list',path:'/broken'});assert.match(f.posts.at(-1).error,/adb unavailable/);assert.equal(f.calls.filter(c=>c[0]==='list').length,1);
+    f.calls.length=0;await f.controller.handle({type:'explorer',action:'list',path:'/broken'});assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error,/adb unavailable/);assert.equal(f.calls.filter(c=>c[0]==='list').length,1);
   }finally{await f.close();}
 });
 
@@ -498,7 +529,7 @@ test('locateApp reveals the selected Build application after listing every ances
     assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/data', '/data/data', '/data/data/com.example.app']);
     assert.equal(f.calls.some(c => c[0] === 'stat' || c[0] === 'picker'), false);
     assert.deepEqual(f.posts.filter(m => m.type === 'explorerFiles').map(m => m.path), ['/', '/data', '/data/data', '/data/data/com.example.app']);
-    assert.deepEqual(JSON.parse(JSON.stringify(f.posts.at(-1))), { type: 'explorerReveal', serial: 'phone', path: '/data/data/com.example.app' });
+    assert.deepEqual(JSON.parse(JSON.stringify(f.posts.findLast(m => m.type !== 'explorerLoading'))), { type: 'explorerReveal', serial: 'phone', path: '/data/data/com.example.app' });
     assert.equal(f.controller.scope.writer, undefined);
   } finally { await f.close(); }
 });
@@ -515,7 +546,7 @@ test('locateApp uses the current Build selection without scanning or picking', a
       selected = expected; f.calls.length = 0; f.posts.length = 0;
       await f.controller.handle({ type: 'explorer', action: 'locateApp', pkg: 'com.evil.app' });
       assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/data', '/data/data', '/data/data/' + expected]);
-      assert.equal(f.posts.at(-1).type, 'explorerReveal'); assert.equal(f.posts.at(-1).path, '/data/data/' + expected);
+      assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').type, 'explorerReveal'); assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').path, '/data/data/' + expected);
       assert.equal(f.calls.some(c => c[0] === 'picker'), false); assert.equal(scans, initialScans);
       assert.deepEqual(Array.from(f.controller.applicationIds), filterIds);
     }
@@ -537,11 +568,11 @@ test('locateApp fallback handles zero one and multiple workspace IDs with single
       if (count === 2) { assert.deepEqual(picks[0][1], ['com.example.app', 'com.example.other']); assert.equal(picks[0][2].canPickMany, false); }
       if (!count || cancel) {
         assert.equal(f.calls.some(c => c[0] === 'list'), false); assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
-        if (!count) assert.match(f.posts.at(-1).error, /No application ID found/);
+        if (!count) assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /No application ID found/);
         else assert.equal(f.posts.some(m => m.error), false);
       } else {
         const expected = count === 1 ? 'com.example.app' : 'com.example.other';
-        assert.equal(f.posts.at(-1).type, 'explorerReveal'); assert.equal(f.posts.at(-1).path, '/data/data/' + expected);
+        assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').type, 'explorerReveal'); assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').path, '/data/data/' + expected);
         assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/data', '/data/data', '/data/data/' + expected]);
       }
       assert.equal(f.controller.scope.writer, undefined);
@@ -559,7 +590,7 @@ test('locateApp fallback picker respects scope cancellation and writer exclusion
       const locate = f.controller.handle({ type: 'explorer', action: 'locateApp' }); await started;
       assert.equal(f.calls.find(c => c[0] === 'picker')[2].canPickMany, false);
       await f.controller.handle({ type: 'explorer', action: 'newDirectory', parent: '/' });
-      assert.match(f.posts.at(-1).error, /already running/); assert.equal(f.calls.some(c => c[0] === 'create'), false);
+      assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /already running/); assert.equal(f.calls.some(c => c[0] === 'create'), false);
       const old = f.controller.scope, aborted = new Promise(resolve => old.controller.signal.addEventListener('abort', resolve, { once: true }));
       const change = f.controller.setContext(view === 'files' ? 'other' : 'phone', true, view); await aborted;
       release('com.example.app'); await locate;
@@ -589,7 +620,7 @@ test('locateApp rejects unavailable selection invalid IDs missing directories no
     try {
       await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.posts.length = 0;
       await f.controller.handle({ type: 'explorer', action: 'locateApp' });
-      assert.match(f.posts.at(-1).error, error);
+      assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, error);
       assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
     } finally { await f.close(); }
   }
@@ -604,8 +635,8 @@ test('locateApp reuses virtual parents and run-as without masking permission err
     await f.controller.handle({ type: 'explorer', action: 'locateApp' });
     assert.deepEqual(f.calls.filter(c => c[0] === 'list'), [['list', '/', undefined], ['list', '/data', undefined], ['list', '/data/data', undefined], ['list', app, undefined], ['list', app, 'com.example.app']]);
     assert.equal(f.calls.filter(c => c[0] === 'packages').length, 1);
-    assert.equal(f.posts.at(-1).type, 'explorerReveal');
-    assert.equal(f.posts.at(-1).path, app);
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').type, 'explorerReveal');
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').path, app);
   } finally { await f.close(); }
 });
 
@@ -619,7 +650,7 @@ test('locateApp pending directory read respects scope cancellation and existing 
       await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0; f.posts.length = 0;
       const locate = f.controller.handle({ type: 'explorer', action: 'locateApp' }); await started;
       await f.controller.handle({ type: 'explorer', action: 'newDirectory', parent: '/' });
-      assert.match(f.posts.at(-1).error, /already running/);
+      assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /already running/);
       assert.equal(f.calls.some(c => c[0] === 'create'), false);
       const old = f.controller.scope, aborted = new Promise(resolve => old.controller.signal.addEventListener('abort', resolve, { once: true }));
       const change = f.controller.setContext(view === 'files' ? 'other' : 'phone', true, view); await aborted;
@@ -641,8 +672,8 @@ test('locateApp works while the initial automatic refresh is pending', async () 
     await f.controller.setContext('phone', true); await started;
     assert.equal(f.controller.scope.writer, undefined);
     await f.controller.handle({ type: 'explorer', action: 'locateApp' });
-    assert.equal(f.posts.at(-1).type, 'explorerReveal');
-    assert.equal(f.posts.at(-1).path, '/data/data/com.example.app');
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').type, 'explorerReveal');
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').path, '/data/data/com.example.app');
     assert.deepEqual(f.calls.filter(c => c[0] === 'list').map(c => c[1]), ['/', '/', '/data', '/data/data', '/data/data/com.example.app']);
     release(); await Promise.all([...f.controller.scope.tasks]);
     assert.equal(f.posts.filter(m => m.type === 'explorerReveal').length, 1);
@@ -656,7 +687,7 @@ test('locateApp is restricted to the Files surface', async () => {
   try {
     await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]); f.calls.length = 0;
     await f.controller.handle({ type: 'explorer', action: 'locateApp' });
-    assert.match(f.posts.at(-1).error, /files view is not active/);
+    assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /files view is not active/);
     assert.equal(f.calls.some(c => c[0] === 'picker' || c[0] === 'list'), false);
     assert.equal(f.posts.some(m => m.type === 'explorerReveal'), false);
   } finally { await f.close(); }
@@ -680,7 +711,7 @@ test('toolbar file commands publish created uploaded deleted refreshed and downl
     options.openDialog = [{ scheme: 'file', fsPath: f.temp }];
     await f.controller.handle({ type: 'explorer', action: 'download', paths: ['/keep.txt'] });
     assert.equal(await fsp.readFile(path.join(f.temp, 'keep.txt'), 'utf8'), 'downloaded');
-    assert.equal(f.posts.at(-1).message, 'Download complete'); assert.equal(f.posts.at(-1).busy, false);
+    assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').message, 'Download complete'); assert.equal(f.posts.findLast(m => m.type !== 'explorerLoading').busy, false);
     await f.controller.handle({ type: 'explorer', action: 'delete', paths: ['/keep.txt'] });
     assert.equal(f.posts.findLast(m => m.type === 'explorerFiles').entries.some(e => e.path === '/keep.txt'), false);
     entries.add('/external.txt');
@@ -706,7 +737,7 @@ test('toolbar file commands preserve cancellation and surface operation failures
       await f.controller.setContext('phone', true); await Promise.all([...f.controller.scope.tasks]); f.posts.length = 0;
       if (action === 'refresh') { options.listUnavailable = ['/']; }
       await f.controller.handle({ type: 'explorer', action, parent: '/', target: '/', paths: ['/x'] });
-      assert.match(f.posts.at(-1).error, /failed|adb unavailable/);
+      assert.match(f.posts.findLast(m => m.type !== 'explorerLoading').error, /failed|adb unavailable/);
       assert.equal(f.posts.some(m => m.message === 'Upload complete' || m.message === 'Download complete' || m.type === 'explorerFiles'), false);
       if (action === 'download') { await assert.rejects(fsp.stat(path.join(f.temp, 'x')), { code: 'ENOENT' }); }
     } finally { await f.close(); }
