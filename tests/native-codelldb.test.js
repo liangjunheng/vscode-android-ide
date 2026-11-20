@@ -150,8 +150,8 @@ test('built-in Native real DAP attach loads project-built libraries and owns one
   assert.deepEqual(options.initCommands, ['settings set target.foo true']);
   assert.deepEqual(options.symbolSearchPaths, ['external/unverified']);
   assert.deepEqual(Array.from(config.symbolSearchPaths), []);
-  assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.user true', ...[app, engine].map(filename => 'target modules add -- ' + JSON.stringify(filename))]);
-  assert.deepEqual(Array.from(config.postRunCommands), ['image list -o -f']);
+  assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.user true']);
+  assert.deepEqual(Array.from(config.postRunCommands), [[app, engine].map(filename => 'target modules add -- ' + JSON.stringify(filename)), 'target modules list', 'image list -o -f'].flat());
   assert.deepEqual(options.preRunCommands, ['settings set target.user true']); assert.equal(config.androidNativeLibraries, undefined);
   assert.equal(f.inputCalls, 0); assert.equal(f.dialogCalls, 0); assert.equal(f.notices.length, 0); assert.equal(f.symbolUpdates.length, 0);
   assert.equal(f.projectLibraryCalls.length, 1); assert.deepEqual(f.projectLibraryCalls[0], { projectRoot: root, abi: 'arm64-v8a' });
@@ -196,7 +196,8 @@ test('Native project libraries reach CodeLLDB once using the newest duplicates w
   assert.equal((await request(f, adapter, 'attach')).success, true);
   const config = f.children[0].configuration;
   assert.deepEqual(Array.from(config.symbolSearchPaths), []);
-  assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.foo true', ...[unique, selected, second].map(filename => 'target modules add -- ' + JSON.stringify(filename))]);
+  assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.foo true']);
+  assert.deepEqual(Array.from(config.postRunCommands), [[unique, selected, second].map(filename => 'target modules add -- ' + JSON.stringify(filename)), 'target modules list', 'image list -o -f'].flat());
   assert.deepEqual(native.preRunCommands, ['settings set target.foo true']); assert.equal(config.androidNativeLibraries, undefined);
   assert.deepEqual(Array.from(config.initCommands).filter(command => command.includes('target.exec-search-paths')), []);
   assert.equal(f.projectLibraryCalls.length, 1); assert.equal(f.symbolPicks.length, 0); assert.equal(f.dialogCalls, 0);
@@ -207,7 +208,8 @@ test('Native project libraries reach CodeLLDB once using the newest duplicates w
   fs.utimesSync(first, now, now); fs.utimesSync(secondAlternative, now, now);
   const next = await f.parent({ androidProjectRoot: temp, native: { abi: 'arm64-v8a' } }, true);
   assert.equal((await request(f, next, 'attach')).success, true);
-  assert.deepEqual(Array.from(f.children[1].configuration.preRunCommands), [unique, first, secondAlternative, added].map(filename => 'target modules add -- ' + JSON.stringify(filename)));
+  assert.equal(f.children[1].configuration.preRunCommands, undefined);
+  assert.deepEqual(Array.from(f.children[1].configuration.postRunCommands), [[unique, first, secondAlternative, added].map(filename => 'target modules add -- ' + JSON.stringify(filename)), 'target modules list', 'image list -o -f'].flat());
   assert.equal(f.projectLibraryCalls.length, 2); assert.equal(f.symbolPicks.length, 0); assert.equal(f.symbolUpdates.length, 0); assert.equal(f.symbolStore.size, 0);
 });
 

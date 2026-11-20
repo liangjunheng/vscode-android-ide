@@ -98,12 +98,14 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         };
         let excludeProperties = ["abi", "abiSupported", "abiMap", "sdkRoot", "ndkRoot", "androidNativeToolchain", "androidLldbServerSocket"];
         if (config.native) for (let key in config.native) if (!excludeProperties.includes(key)) lldbConfig[key] = structuredClone(config.native[key]);
-        if (config.androidNativeLibraries?.length) {
-            if (lldbConfig.preRunCommands !== undefined && (!Array.isArray(lldbConfig.preRunCommands) || lldbConfig.preRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native preRunCommands must be a string array');
-            lldbConfig.preRunCommands = [...(lldbConfig.preRunCommands ?? []), ...nativeLibraryCommands(config.androidNativeLibraries)];
-        }
+        if (lldbConfig.preRunCommands !== undefined && (!Array.isArray(lldbConfig.preRunCommands) || lldbConfig.preRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native preRunCommands must be a string array');
         if (lldbConfig.postRunCommands !== undefined && (!Array.isArray(lldbConfig.postRunCommands) || lldbConfig.postRunCommands.some((value: unknown) => typeof value !== 'string'))) throw new Error('Native postRunCommands must be a string array');
-        lldbConfig.postRunCommands = [...(lldbConfig.postRunCommands ?? []), 'image list -o -f'];
+        lldbConfig.postRunCommands = [
+            ...(lldbConfig.postRunCommands ?? []),
+            ...(config.androidNativeLibraries?.length ? nativeLibraryCommands(config.androidNativeLibraries) : []),
+            'target modules list',
+            'image list -o -f',
+        ];
         Object.assign(lldbConfig, { type: 'lldb', request: 'attach', pid: this.host.processId({ ...config, pid, processId: pid }), androidTarget: config.target.udid, androidPackageName: config.packageName, androidProjectRoot: config.androidProjectRoot });
         return lldbConfig;
     }
@@ -160,6 +162,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             if (!codeLldb.isActive) await codeLldb.activate();
         }
         this.checkOpen();
+        this.consoleLog('========== TARGET MODULES LIST / IMAGE LIST ==========');
         await this.startChild(lldbConfig);
         if (!config.androidNativeLibraries?.length && (!Array.isArray(config.native?.symbolSearchPaths) || config.native.symbolSearchPaths.length === 0)) {
             void vscode.window.showWarningMessage('Android Native debugger attached, but no project-built .so files with debug information were found for this ABI. Build the project with Native debug information and use the matching APK. External and precompiled libraries are not loaded automatically.');
