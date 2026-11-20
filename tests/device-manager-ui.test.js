@@ -80,7 +80,7 @@ test('title selector replaces device list and registers only the mirror view', a
   assert.ok(runningSource.includes('id=\"tic-d\"') && runningSource.includes('id=\"tic-l\"'), 'leading device icons remain');
   const dropdowns = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
   assert.match(dropdowns, /select::picker\(select\)\{[^}]*min-width:anchor-size\(width\)/);
-  const handlers = {}, views = [], errors = [], debugRegistrations = [], debugProviders = [];
+  const handlers = {}, views = [], errors = [], debugRegistrations = [], debugProviders = [], buildActions = [];
   const vscode = { DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2}, workspace: { findFiles: async () => [], getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }), onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; }, executeCommand: async () => undefined }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { debugRegistrations.push([type, factory]); return { dispose() {} }; }, registerDebugConfigurationProvider: (type, provider, trigger) => { debugProviders.push([type, provider, trigger]); return { dispose() {} }; }, onDidStartDebugSession: () => ({ dispose() {} }), onDidTerminateDebugSession: () => ({ dispose() {} }) } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
   // 通过真实 Native adapter 转译加载；仅隔离其直接上游/工具链边界，本用例不启动后端或设备命令。
@@ -101,7 +101,7 @@ test('title selector replaces device list and registers only the mirror view', a
     './nativeSymbols': { selectNativeLibraries: async () => [] },
   });
   // UI 回归只验证设备视图接线；JVM debugger 的外部注册边界由独立测试覆盖，因此在这里隔离整个注册模块。
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/native-debugger/adapter': adapter, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { constructor() { this.refreshes = 0; } async handle(message) { buildActions.push(message.action); if (message.action === 'refresh') this.refreshes++; } dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/native-debugger/adapter': adapter, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
   assert.deepEqual(views, ['android-ide.runningDevice', 'android-ide.logcat']);
   // extension 同一工厂注册两种外部入口；android-tools仅保留resolver，android-debug提供六项动态内置配置。
   assert.deepEqual(debugRegistrations.map(item => item[0]).sort(), ['android-debug', 'android-tools'].sort());
@@ -116,6 +116,7 @@ test('title selector replaces device list and registers only the mirror view', a
   assert.equal(typeof dynamic[1].resolveDebugConfiguration,'function');
   assert.equal(typeof debugRegistrations.find(item => item[0] === 'android-debug')[1].createDebugAdapterDescriptor, 'function');
   await handlers['android-ide.refresh']();
+  assert.deepEqual(buildActions, ['refresh']);
   assert.match(errors[0], /adb unavailable/);
 });
 

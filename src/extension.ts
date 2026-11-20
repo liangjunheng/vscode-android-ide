@@ -63,7 +63,11 @@ export function activate(ctx: vscode.ExtensionContext) {
   const build = new AndroidBuildController(message => { running.publishBuildState(message); logcat.publishBuildState(message); });
   registerJvmDebugger(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath)?.packageName : undefined);
   const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined), (message, serial) => build.handle(message, serial));
-  const refresh = () => running.refresh().catch(error => vscode.window.showErrorMessage(String(error)));
+  // Device Tools刷新同时刷新设备列表和Gradle项目/Android variants；任一刷新失败都交给命令入口显示真实错误。
+  const refresh = () => Promise.all([
+    running.refresh(),
+    build.handle({ type: 'buildPanel', action: 'refresh' }),
+  ]).catch(error => vscode.window.showErrorMessage(String(error)));
   const androidFactory = createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined);
   ctx.subscriptions.push(
     vscode.debug.registerDebugAdapterDescriptorFactory('android-tools', androidFactory),
