@@ -1,5 +1,4 @@
 import * as fs from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { discoverProjectLibraries } from './projectLibraries';
@@ -13,7 +12,7 @@ interface NativeSymbolOptions {
   token?: vscode.CancellationToken;
 }
 
-/** 每次按项目编译记录与ELF信息发现库，清除旧白名单；同名自动取mtime最新产物，同时间按路径排序稳定选择，结果写入项目.vscode，不读取旧结果决定加载。
+/** 每次按项目编译记录与ELF信息发现库，清除旧白名单；同名自动取mtime最新产物，同时间按路径排序稳定选择。
  * native-symbol-selection.test.js验证唯一全集、同名最新、时间相同、取消与旧记录隔离；native-codelldb.test.js验证精确LLDB命令。 */
 export async function selectNativeLibraries(_searchPaths: readonly string[], options: NativeSymbolOptions): Promise<string[] | undefined> {
   if (options.token?.isCancellationRequested) return undefined;
@@ -41,13 +40,6 @@ export async function selectNativeLibraries(_searchPaths: readonly string[], opt
   }
   nativeLibraryCommands(selected);
   if (options.token?.isCancellationRequested) return undefined;
-  const directory = path.join(root, '.vscode');
-  await fs.promises.mkdir(directory, { recursive: true });
-  const temporary = path.join(directory, '.android-native-symbols-' + randomUUID() + '.tmp');
-  try {
-    await fs.promises.writeFile(temporary, JSON.stringify({ schemaVersion: 1, packageName: options.packageName, abi: options.abi, selection: 'project-build-latest', files: selected.map(filename => path.relative(root, filename)) }, null, 2), { flag: 'wx' });
-    await fs.promises.rename(temporary, path.join(directory, 'android-native-symbols.json'));
-  } finally { await fs.promises.rm(temporary, { force: true }); }
   return selected;
 }
 

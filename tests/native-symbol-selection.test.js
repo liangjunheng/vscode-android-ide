@@ -108,23 +108,6 @@ test('Native same-name automatic selection never invokes a file picker', async (
   assert.equal(f.calls.length, 0);
 });
 
-/** 自动记录只落当前项目.vscode且使用相对路径；记录不是白名单，写入失败不能伪报成功。 */
-test('Native writes only the current project automatic symbol manifest and reports write failures', async () => {
-  const f = fixture(); f.files = [path.join(f.options.projectRoot, 'build/libapp.so')];
-  paths(await f.api.selectNativeLibraries([], f.options), f.files);
-  const filename = path.join(f.options.projectRoot, '.vscode', 'android-native-symbols.json');
-  assert.deepEqual(f.renamed, [filename]);
-  const record = JSON.parse(f.written.get(filename));
-  assert.equal(record.selection, 'project-build-latest'); assert.equal(record.abi, 'arm64-v8a');
-  assert.deepEqual(record.files, [path.join('build', 'libapp.so')]);
-  f.files = [path.join(f.options.projectRoot, 'build/libnew.so')];
-  paths(await f.api.selectNativeLibraries([], f.options), f.files);
-  assert.deepEqual(JSON.parse(f.written.get(filename)).files, [path.join('build', 'libnew.so')]);
-  f.fileError = new Error('project manifest denied');
-  await assert.rejects(f.api.selectNativeLibraries([], f.options), /project manifest denied/);
-  assert.equal([...f.written.keys()].some(key => key.endsWith('.tmp')), false);
-});
-
 test('Native module commands preserve exact paths and reject command separators', () => {
   const f = fixture(), windows = path.win32.join('C:/', 'native symbols', 'module "quoted"', 'libapp.so');
   paths(f.api.nativeLibraryCommands([windows, "/tmp/O'Brien/libapp.so"]), [
