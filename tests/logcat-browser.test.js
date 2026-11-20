@@ -136,7 +136,7 @@ async function browser(t, data, signal) {
     let state;window.__hostMessages=[];window.__pageErrors=[];
     window.addEventListener('error',event=>window.__pageErrors.push(event.error?.stack || event.message));
     window.addEventListener('unhandledrejection',event=>window.__pageErrors.push(String(event.reason)));
-    window.acquireVsCodeApi=()=>({getState:()=>state,setState:value=>{state=structuredClone(value)},postMessage:message=>window.__hostMessages.push(message)});
+    window.navigator.clipboard={writeText:async value=>{window.__copiedError=value}};window.acquireVsCodeApi=()=>({getState:()=>state,setState:value=>{state=structuredClone(value)},postMessage:message=>window.__hostMessages.push(message)});
   })()`);
   for (const script of data.scripts) await evaluate(script);
   assert.equal(await evaluate('window.__hostMessages[0].type'), 'ready');
@@ -192,13 +192,13 @@ async function browser(t, data, signal) {
   return {evaluate,frames,post,viewport,click,key,mouse,wheel,type,ime,format,search,screenshot,region};
 }
 
-// LOGCAT_BROWSER=1启动Edge，在240/728px验证表头下沿蓝条、滚动时错误吸顶及完整文本、后台回包保留和用户操作清错。
+// LOGCAT_BROWSER=1启动Edge，在240/728px验证表头下沿蓝条、滚动时错误浮层及完整文本、后台回包保留、复制不关闭和关闭消失。
 
 test('Explorer loading browser animates below column headers without a serial row and preserves scroll', { skip: !enabled, timeout: 60000 }, async t => {
   const c = new AbortController(), deadline = setTimeout(() => c.abort(new Error('Explorer browser deadline')), 45000); t.after(() => clearTimeout(deadline));
   const page = await browser(t, await fixture(), c.signal);
   const css = await fs.readFile(path.join(root, 'media/device-explorer/main.css'), 'utf8');
-  await page.evaluate(`document.body.insertAdjacentHTML('beforeend','<section id="device-explorer" style="position:fixed;inset:0;height:500px;background:#1e1e1e;z-index:100"></section>');document.head.appendChild(Object.assign(document.createElement('style'),{textContent:${JSON.stringify(css)}}));window.send=m=>window.__hostMessages.push(m)`);
+  await page.evaluate(`document.body.insertAdjacentHTML('beforeend','<section id="device-explorer" style="position:relative;width:100%;height:500px;background:#1e1e1e;z-index:100"></section>');document.head.appendChild(Object.assign(document.createElement('style'),{textContent:${JSON.stringify(css)}}));window.send=m=>window.__hostMessages.push(m)`);
   for (const file of ['media/device-processes/processes.js', 'media/device-explorer/main.js']) await page.evaluate(await fs.readFile(path.join(root, file), 'utf8'));
   await page.post({ type: 'explorerState', serial: 'phone', tab: 'files', active: true, fetching: false });
   await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: Array.from({ length: 80 }, (_, i) => ({ path: '/file' + i, name: 'file' + i, kind: 'file' })) });
@@ -218,34 +218,36 @@ test('Explorer loading browser animates below column headers without a serial ro
     await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: reason });
     await page.post({ type: 'explorerFiles', serial: 'phone', path: '/background', entries: [] });
     await page.evaluate('savedList.scrollTop=180;savedList.scrollLeft=80'); await page.frames();
-    const pinned = await page.evaluate(`(()=>{const error=document.querySelector('.state.error'),head=document.querySelector('.file-head'),cell=head.querySelector('.cell'),r=error.getBoundingClientRect(),h=head.getBoundingClientRect(),c=cell.getBoundingClientRect(),l=savedList.getBoundingClientRect();return {text:error.textContent,role:error.getAttribute('role'),position:getComputedStyle(error).position,y:r.y,headerBottom:h.bottom,columnBottom:c.bottom,x:r.x,listX:l.x,right:r.right,listRight:l.right,height:r.height,scrollHeight:error.scrollHeight,clientHeight:error.clientHeight,html:error.querySelectorAll('*').length}})()`);
-    assert.equal(pinned.text, reason); assert.equal(pinned.role, 'alert'); assert.equal(pinned.position, 'static'); assert.ok(Math.abs(pinned.y - pinned.headerBottom) < 1); assert.ok(await page.evaluate('(()=>{const error=document.querySelector(".state.error").getBoundingClientRect(),list=document.querySelector(".file-list").getBoundingClientRect();return list.top>=error.bottom})()')); assert.ok(Math.abs(pinned.x - pinned.listX) < 1); assert.ok(pinned.right <= pinned.listRight + 1); assert.ok(pinned.height > 18); assert.equal(pinned.scrollHeight, pinned.clientHeight); assert.equal(pinned.html, 0);
+    const pinned = await page.evaluate(`(()=>{const error=document.querySelector('.explorer-error-toast'),r=error.getBoundingClientRect(),root=document.getElementById('device-explorer').getBoundingClientRect(),text=error.querySelector('.explorer-error-text');return {text:text.textContent,role:error.getAttribute('role'),position:getComputedStyle(error).position,y:r.y,bottom:r.bottom,left:r.left,right:r.right,rootBottom:root.bottom,rootLeft:root.left,rootRight:root.right,height:r.height,scrollHeight:text.scrollHeight,clientHeight:text.clientHeight,html:text.querySelectorAll('*').length,buttons:[...error.querySelectorAll('button')].map(button=>button.title)}})()`);
+    assert.equal(pinned.text, reason); assert.equal(pinned.role, 'alert'); assert.equal(pinned.position, 'absolute'); assert.equal(pinned.bottom, pinned.rootBottom - 5); assert.equal(pinned.left, pinned.rootLeft + 5); assert.equal(pinned.right, pinned.rootRight - 5); assert.ok(pinned.height > 18); assert.equal(pinned.scrollHeight, pinned.clientHeight); assert.equal(pinned.html, 0); assert.deepEqual(pinned.buttons, ['Copy error', 'Close error']);
     const aligned = await page.evaluate('(()=>{const head=[...document.querySelector(".file-head").children],cells=[...document.querySelector(".file-row").children];return head.every((h,i)=>{const a=h.getBoundingClientRect(),b=cells[i].getBoundingClientRect();return Math.abs(a.x-b.x)<1&&Math.abs(a.width-b.width)<1})})()');
     assert.equal(aligned, true);
     await page.screenshot('explorer-pinned-error-' + width);
-    await page.evaluate('document.querySelector(".state.error").click()'); await page.frames();
-    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    await page.evaluate("[...document.querySelectorAll('.explorer-error-actions button')].find(button=>button.title==='Copy error').click()"); await page.frames();
+    assert.equal(await page.evaluate('document.querySelectorAll(".explorer-error-toast").length'), 1);
+    await page.evaluate("[...document.querySelectorAll('.explorer-error-actions button')].find(button=>button.title==='Close error').click()"); await page.frames();
+    assert.equal(await page.evaluate('document.querySelectorAll(".explorer-error-toast").length'), 0);
     await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: reason });
     await page.evaluate('document.querySelector(".file-row").click()'); await page.frames();
-    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    assert.equal(await page.evaluate('document.querySelectorAll(".explorer-error-toast").length'), 1);
     await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: 'next failure' });
     await page.evaluate('document.querySelector(".files-view button[title=Refresh]").click()'); await page.frames();
-    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    assert.equal(await page.evaluate('document.querySelectorAll(".explorer-error-toast").length'), 1);
     await page.post({ type: 'explorerProgress', serial: 'phone', busy: false, error: 'keyboard failure' });
     await page.key('ArrowDown');
-    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    assert.equal(await page.evaluate('document.querySelectorAll(".explorer-error-toast").length'), 1);
     await page.evaluate('savedList.scrollLeft=0');
     await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: [{ path: '/dir-' + width, name: 'dir-' + width, kind: 'directory' }] });
     await page.post({ type: 'explorerProgress', busy: false, error: 'expand failed' });
     const reads = await page.evaluate('window.__hostMessages.filter(m=>m.action==="list").length');
     const point = await page.evaluate('(()=>{const r=document.querySelector(".twisty").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()');
     await page.mouse('mousePressed', point.x, point.y); await page.mouse('mouseReleased', point.x, point.y); await page.frames();
-    assert.equal(await page.evaluate('document.querySelectorAll(".state.error").length'), 0);
+    assert.equal(await page.evaluate('document.querySelectorAll(".explorer-error-toast").length'), 1);
     assert.equal(await page.evaluate('window.__hostMessages.filter(m=>m.action==="list").length'), reads + 1);
     await page.post({ type: 'explorerProgress', busy: false, error: 'old error' });
     await page.evaluate('window.send=m=>{window.__hostMessages.push(m);if(m.action==="refresh")window.dispatchEvent(new MessageEvent("message",{data:{type:"explorerProgress",busy:false,error:"new synchronous failure"}}))};document.querySelector(".files-view button[title=Refresh]").click()'); await page.frames();
-    assert.equal(await page.evaluate('document.querySelector(".state.error").textContent'), 'new synchronous failure');
-    await page.evaluate('document.querySelector(".state.error").click();window.send=m=>window.__hostMessages.push(m)');
+    assert.equal(await page.evaluate('document.querySelector(".explorer-error-text").textContent'), 'new synchronous failure');
+    await page.evaluate("[...document.querySelectorAll('.explorer-error-actions button')].find(button=>button.title==='Close error').click();window.send=m=>window.__hostMessages.push(m)");
     await page.post({ type: 'explorerFiles', serial: 'phone', path: '/', entries: Array.from({ length: 80 }, (_, i) => ({ path: '/file' + i, name: 'file' + i, kind: 'file' })) });
     await page.post({ type: 'explorerLoading', serial: 'phone', fetching: true });
     await page.post({ type: 'explorerState', serial: 'phone', tab: 'files', active: false, fetching: false });

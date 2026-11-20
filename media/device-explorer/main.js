@@ -12,8 +12,8 @@
   // D: upload input displays nested causes and clears old failures on success；输入嵌套读取错误后成功重传，断言完整原因与旧alert消失。
   // E: host context events clear hovered upload targets；拖入后发送设备/连接/状态消息，断言目标为null且类清除。
   // F: upload owns one batch and cancels pending ACK on view or device change / upload aborts owned FileReader before any stale chunk can be sent；断言切换中止且无旧分块。
-  const state = { serial: '', deviceName: '', tab: document.body.dataset?.deviceViewMode === 'processes' ? 'processes' : 'files', filter: false, capabilities: {}, busy: false, message: '', error: '', directories: new Map(), expanded: new Set(['/']), processes: [], selected: [], processSelected: null, sort: { key: 'packageName', asc: true }, menu: null, transfer: null, dragTarget: null, loading: false, fetching: false, fileColumns: ['180px', 'max-content', 'max-content', '90px'] };
-  let fileColumnObserver, observedFileHead;
+  const state = { serial: '', deviceName: '', tab: document.body.dataset?.deviceViewMode === 'processes' ? 'processes' : 'files', filter: false, capabilities: {}, busy: false, message: '', directories: new Map(), expanded: new Set(['/']), processes: [], selected: [], processSelected: null, sort: { key: 'packageName', asc: true }, menu: null, transfer: null, dragTarget: null, loading: false, fetching: false, fileColumns: ['180px', 'max-content', 'max-content', '90px'] };
+  let fileColumnObserver, observedFileHead, errorTimer, errorText = '';
   // 一个视图复用排序器；目录回归断言选择和重复展开不重新构造或排序元数据。
   const fileCollator = new Intl.Collator(undefined, { sensitivity: 'base' });
   // 输入时间戳/日期字符串，输出本地YYYY-MM-DD HH:mm:ss；缺失/无效返回空白，不改变时区。
@@ -36,14 +36,18 @@
   function toolbarButton(title, name, handler) { const control = button(title, name, handler); control.children[0].className = 'explorer-toolbar-glyph explorer-glyph-' + name; return control; }
   // 文本使用textContent安全呈现，表格名称/单元格同时保留完整悬停值；Node>=22的UI六按钮回归及layout长值裁剪回归断言title与内容相同。
   const text = (tag, value, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = value == null ? '' : String(value); if (cls === 'cell' || cls === 'name') e.title = e.textContent; return e; };
-  // 用户继续操作时移除旧错误，滚动和后台回包不触发；npm test 的 Explorer pinned error 回归断言本地选择、缓存展开和命令清错。
+  // 关闭错误浮层并取消自动清除；错误文本可复制，其他操作不改变其生命周期。
   function dismissError() {
-    if (!state.error) return;
-    state.error = ''; state.message = '';
-    const header = root.querySelector('.file-header'), error = header && Array.from(header.children).find(child => child.className === 'state error');
-    error?.remove();
+    if (!errorText) return;
+    clearTimeout(errorTimer); errorTimer = undefined; errorText = ''; render();
   }
-  // 发送有效Explorer动作并保留单击清错语义，ready握手不清错；根节点捕获监听在同一次点击中先清错再执行原操作。
+  // 显示错误并在5秒后自动关闭；新错误替换旧错误时重新开始同一计时，不依赖点击或轮询。
+  function setError(value) {
+    if (!value) return;
+    clearTimeout(errorTimer); errorText = value;
+    errorTimer = setTimeout(() => { errorTimer = undefined; if (errorText === value) { errorText = ''; render(); } }, 5000);
+  }
+  // 发送有效Explorer动作；错误浮层不因其他操作消失，ready握手语义保持不变。
   function action(name, extra) { if ((!state.serial || state.active === false) && name !== 'ready') return; post(Object.assign({ type: 'explorer', action: name }, extra || {})); }
   // 将远端路径规范化，避免本地路径和目录遍历污染协议。
   function safeRemote(p) { const parts = String(p || '').replaceAll('\\', '/').split('/'); const out=[]; for (const x of parts) { if (!x || x === '.') continue; if (x === '..') out.pop(); else out.push(x); } return '/' + out.join('/'); }
@@ -69,13 +73,13 @@
     row.oncontextmenu = event => { event.preventDefault(); if (!state.selected.includes(entry.path)) selectFile(entry, event); openMenu(event.clientX, event.clientY); };
     return row;
   }
-  // 展开/收起复用已有快照且不重复查询；根节点点击捕获已清除旧错误，npm test 的 pinned error及目录缓存回归验证单击清错并执行展开。
+  // 展开/收起复用已有快照且不重复查询；错误浮层独立显示，不阻断目录操作，目录缓存回归验证零重复请求。
   function toggleDir(entry) {
     const p = safeRemote(entry.path);
     if (state.expanded.has(p)) { state.expanded.delete(p); render(); }
     else { state.expanded.add(p); render(); if (!state.directories.has(p)) action('list', { path: p }); }
   }
-  // 用户选择保留Ctrl/Shift锚点，目录点击仍展开/收起；根节点点击捕获负责清错，npm test 的 pinned error及A/B回归验证单击清错与选择。
+  // 用户选择保留Ctrl/Shift锚点，目录点击仍展开/收起；错误浮层不因选择或展开提前关闭，A/B回归验证选择与拖放。
   function selectFile(entry, ev) { const p=safeRemote(entry.path); const all=visibleEntries(); const i=all.findIndex(x=>x.path===p); if(ev.shiftKey&&state.selected.length){const a=all.findIndex(x=>x.path===state.selected[0]); state.selected=all.slice(Math.min(a,i),Math.max(a,i)+1).map(x=>x.path);} else if(ev.ctrlKey||ev.metaKey){state.selected=state.selected.includes(p)?state.selected.filter(x=>x!==p):state.selected.concat(p);} else state.selected=[p]; if(!ev.shiftKey&&!ev.ctrlKey&&!ev.metaKey&&(entry.kind==='directory'||entry.directoryLink)){toggleDir(entry);} else render(); }
   // 在活动文件视图中由条目更新独立拖放目标，空条目清理目标类；回归A/B/C/E断言目标生命周期与原选择保留。
   function selectDragTarget(entry) {
@@ -119,7 +123,7 @@
   // 同设备复用Files面板、滚动列表和表头，按路径增删/更新行而不重建滚动容器；设备改变重新建立所有权。六按钮回归保持禁用与错误区契约。
   // 回归：Node>=22运行node --test tests/device-explorer-ui.test.js tests/device-explorer-layout.test.js；stable file tree DOM与file tree expansion keeps selected viewport anchor断言展开/回复/进度/定位后节点身份、scrollTop/Left和选中行坐标保持。
   // 回归：Node>=22执行node --test tests/device-explorer-ui.test.js；Explorer toolbar exposes six working actions逐按钮点击断言消息/上传ACK，toolbar disabled states验证禁用；C/D覆盖错误区。
-// 复用列表和表头，错误作为表头下方吸顶alert保留至下一用户操作；npm test 的 Explorer pinned error及LOGCAT_BROWSER=1浏览器回归验证位置、滚动和清错。
+// 复用列表和表头，错误使用独立底部浮层显示；UI/Edge回归验证位置、滚动、复制、关闭和自动消失。
 function filesView(previous) {
   const wrap = previous?.className === "files-view" && previous.dataset.serial === state.serial ? previous : document.createElement("div");
   wrap.dataset.serial = state.serial;
@@ -162,11 +166,6 @@ function filesView(previous) {
     grip.addEventListener('pointerdown', event => resizeColumn(event, index, head)); cell.appendChild(grip); head.appendChild(cell);
   }
   if (!head.parentNode) header.insertBefore(head, header.children[0] || null);
-  let error = Array.from(header.children).find(child => child.className === 'state error');
-  if (state.error) {
-    if (!error) { error = text('div', state.error, 'state error'); error.setAttribute('role', 'alert'); header.appendChild(error); }
-    else { error.textContent = state.error; }
-  } else { error?.remove(); }
   const children = [];
   if (!state.serial) children.push(text('div', 'No device selected', 'state'));
   else {
@@ -201,7 +200,7 @@ function filesView(previous) {
     grip.setPointerCapture(event.pointerId);
   }
 
-  // 打开菜单使用真实目标目录；根节点点击捕获先清错，npm test 的 pinned error/菜单回归验证单击清错、路径和八项操作。
+  // 打开菜单使用真实目标目录；错误浮层不改变菜单动作，菜单回归验证路径和八项操作。
   function openMenu(x, y) {
     closeMenu();
     const menu = document.createElement('div'); menu.className = 'explorer-menu';
@@ -269,7 +268,7 @@ function filesView(previous) {
     if (!state.serial || state.active === false || state.tab !== 'files' || root.hidden) throw new Error('Select an active device file view before uploading');
     if (state.transfer) throw new Error('An upload is already running');
     const job = { serial: state.serial, controller: new AbortController(), pending: null };
-    state.error = ''; state.transfer = job; render();
+    state.transfer = job; render();
     try {
       const files = typeof readFiles === 'function' ? await readFiles(job.controller.signal) : readFiles;
       job.controller.signal.throwIfAborted();
@@ -311,7 +310,10 @@ function filesView(previous) {
     state.transfer?.controller.abort(error);
   }
   // 将文件输入或拖放失败写入错误区，AbortError不污染新设备；回归C/D/F断言具体原因、列表可选及上下文取消。
-  function showUploadError(error) { if (error?.name !== 'AbortError') { state.error = uploadErrorMessage(error); render(); } }
+  function showUploadError(error) { if (error?.name !== 'AbortError') { setError(uploadErrorMessage(error)); render(); } }
+  // 将错误递归转为可显示字符串，保留AggregateError的本地/设备/清理原因；回归C/D断言写入和清理原因及嵌套完整消息。
+  // 将错误浮层文本复制到系统剪贴板，不关闭浮层且不伪造复制成功提示；按钮点击不触发文件操作。
+  async function copyError() { if (errorText) { await navigator.clipboard.writeText(errorText); } }
   // 将错误递归转为可显示字符串，保留AggregateError的本地/设备/清理原因；回归C/D断言写入和清理原因及嵌套完整消息。
   function uploadErrorMessage(error) { return error?.errors ? [error.message, ...Array.from(error.errors, uploadErrorMessage)].join(': ') : String(error?.message || error); }
 
@@ -377,7 +379,7 @@ function filesView(previous) {
     const remote = safeRemote(message.path);
     const entry = (state.directories.get(parentOf(remote)) || []).find(item => item.path === remote);
     if (!entry || !(entry.kind === 'directory' || entry.directoryLink) || !state.directories.has(remote)) { showUploadError(new Error('Application data directory is no longer available')); return; }
-    state.error = ''; state.selected = [remote];
+    state.selected = [remote];
     for (let current = remote; current !== '/'; current = parentOf(current)) state.expanded.add(current);
     state.expanded.add('/'); render();
     const row = Array.from(root.querySelectorAll('.file-row')).find(item => item.dataset.path === remote);
@@ -406,7 +408,7 @@ function filesView(previous) {
     }
     if (m.type === 'explorerState') {
       if (m.serial !== state.serial) { state.directories.clear(); state.expanded = new Set(['/']); state.selected = []; state.processes = []; state.processSelected = null; }
-      if (m.tab !== state.tab || m.serial !== state.serial) { closeMenu(); state.error = ''; state.message = ''; state.busy = false; }
+      if (m.tab !== state.tab || m.serial !== state.serial) { closeMenu(); clearTimeout(errorTimer); errorTimer = undefined; errorText = ''; state.busy = false; }
       if (m.serial !== state.serial || m.active === false) { state.fetching = false; state.loading = false; }
       Object.assign(state, m); state.capabilities = m.capabilities || {}; state.tab = m.tab || state.tab;
       // Files切入且当前设备尚未收到根目录快照时先显示Loading，避免把未加载状态误报为空目录；收到/缓存根快照后交给真实进度消息结束加载。
@@ -414,9 +416,9 @@ function filesView(previous) {
       render();
     } else if (m.type === 'explorerLoading') { if (m.serial !== state.serial || state.active === false) return; state.fetching = !!m.fetching; if (!state.fetching) state.loading = false; render(); }
     else if (m.type === 'explorerReveal') { revealAppDirectory(m); }
-    else if (m.type === 'explorerFiles') { if (m.error) state.error = m.error; if (!m.error) { updateDirectory(m); if (safeRemote(m.path || '/') === '/') state.loading = false; } render(); }
-    else if (m.type === 'explorerProcesses') { state.error = m.error || ''; state.processes = m.processes || []; render(); }
-    else if (m.type === 'explorerProgress') { state.busy = !!m.busy; state.message = m.message || ''; if(m.error) { state.error = m.error; state.loading = false; } render(); }
+    else if (m.type === 'explorerFiles') { if (m.error) setError(m.error); if (!m.error) { updateDirectory(m); if (safeRemote(m.path || '/') === '/') state.loading = false; } render(); }
+    else if (m.type === 'explorerProcesses') { if (m.error) setError(m.error); state.processes = m.processes || []; render(); }
+    else if (m.type === 'explorerProgress') { state.busy = !!m.busy; state.message = m.message || ''; if(m.error) { setError(m.error); state.loading = false; } render(); }
     else if (m.type === 'explorerUploadAck') uploadAck(m);
   }
   // 原位更新标题与活动内容，Files原有面板不从root移除，进度独立增删；stable file tree DOM及浏览器anchor回归覆盖展开/异步快照/定位后的稳定位置，原surface回归保持视图互斥。
@@ -432,15 +434,26 @@ function filesView(previous) {
     const previous = root.children[1];
     const surface = state.tab === 'files' ? filesView(previous) : window.DeviceProcessesView.render({ state, action, renderParent: render, button, text });
     if (!previous) root.appendChild(surface); else if (previous !== surface) root.replaceChild(surface, previous);
+    let error = root.querySelector('.explorer-error-toast');
+    if (errorText) {
+      if (!error) {
+        error = document.createElement('div'); error.className = 'explorer-error-toast'; error.setAttribute('role', 'alert');
+        const body = document.createElement('div'); body.className = 'explorer-error-text';
+        const actions = document.createElement('div'); actions.className = 'explorer-error-actions';
+        const copy = button('Copy error', 'copy', () => void copyError()); copy.classList.add('explorer-error-action');
+        const close = button('Close error', 'close', dismissError); close.classList.add('explorer-error-action');
+        actions.append(copy, close); error.append(body, actions); root.appendChild(error);
+      }
+      error.querySelector('.explorer-error-text').textContent = errorText;
+    } else { error?.remove(); }
     const progress = root.querySelector('.progress');
     if (state.busy || state.loading) { if (progress) progress.textContent = state.message || (state.loading ? 'Loading' : 'Busy'); else root.appendChild(text('div', state.message || (state.loading ? 'Loading' : 'Busy'), 'progress')); }
     else progress?.remove();
   }
-  // 文件键盘导航清除旧错误并保持行选择；npm test 的 Explorer pinned error回归验证箭头选择清错，菜单取消及进程复制保持原行为。
-  function keyboard(e){if(root.hidden)return;if(state.tab==='files'&&state.selected.length&&['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','Enter'].includes(e.key))dismissError();if(e.key==='Escape'){closeMenu();return;}if(window.DeviceProcessesView.handleKeyboard(state,e))return;if(state.tab!=='files'||!state.selected.length)return;const all=visibleEntries(),i=all.findIndex(x=>x.path===state.selected[0]),cur=all[i];if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const n=Math.max(0,Math.min(all.length-1,i+(e.key==='ArrowDown'?1:-1)));state.selected=[all[n].path];render();}else if(e.key==='ArrowRight'&&cur&&(cur.kind==='directory'||cur.directoryLink)){e.preventDefault();if(!state.expanded.has(cur.path))toggleDir(cur);}else if(e.key==='ArrowLeft'&&cur){e.preventDefault();if(state.expanded.has(cur.path))state.expanded.delete(cur.path);else state.selected=[parentOf(cur.path)];render();}else if(e.key==='Enter'&&cur){e.preventDefault();cur.kind==='directory'?toggleDir(cur):action('open',{paths:[cur.path]});}}
-  // 根拖放事件解析行目标，内部移动保留、移到空白/外部或结束清理；回归B/C/E验证类与选择路径及drop失败。
-  // 捕获阶段清除固定错误，再让同一次点击完成展开、选择、刷新或菜单操作；点击错误栏自身也关闭，未点击时错误保持多行吸顶。
-  root.addEventListener('click',()=>dismissError(),true);
+  // 文件键盘导航保持行选择且不关闭错误浮层；键盘回归验证箭头选择、菜单取消及进程复制。
+  function keyboard(e){if(root.hidden)return;if(e.key==='Escape'){closeMenu();return;}if(window.DeviceProcessesView.handleKeyboard(state,e))return;if(state.tab!=='files'||!state.selected.length)return;const all=visibleEntries(),i=all.findIndex(x=>x.path===state.selected[0]),cur=all[i];if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const n=Math.max(0,Math.min(all.length-1,i+(e.key==='ArrowDown'?1:-1)));state.selected=[all[n].path];render();}else if(e.key==='ArrowRight'&&cur&&(cur.kind==='directory'||cur.directoryLink)){e.preventDefault();if(!state.expanded.has(cur.path))toggleDir(cur);}else if(e.key==='ArrowLeft'&&cur){e.preventDefault();if(state.expanded.has(cur.path))state.expanded.delete(cur.path);else state.selected=[parentOf(cur.path)];render();}else if(e.key==='Enter'&&cur){e.preventDefault();cur.kind==='directory'?toggleDir(cur):action('open',{paths:[cur.path]});}}
+  // 根拖放事件解析行目标，内部移动保留、移到空白/外部或结束清理；错误浮层由关闭按钮或5秒生命周期管理。
+
   root.addEventListener('dragover',(e)=>{e.preventDefault();const row=e.target?.closest?.('.file-row');if(row){const entry=(state.directories.get(parentOf(row.dataset.path))||[]).find(item=>item.path===row.dataset.path);selectDragTarget(entry);}else selectDragTarget(null);});root.addEventListener('dragleave',e=>{if(!e.relatedTarget||!root.contains(e.relatedTarget))selectDragTarget(null);});root.addEventListener('dragend',()=>selectDragTarget(null));root.addEventListener('drop',e=>dropUpload(e).catch(showUploadError));window.addEventListener('pagehide',cancelUpload);document.addEventListener('mousedown',(e)=>{if(state.menu&&!state.menu.contains(e.target))closeMenu();});document.addEventListener('keydown',keyboard);window.addEventListener('message',(e)=>receive(e.data||{}));
   window.addEventListener('pagehide', () => fileColumnObserver?.disconnect());
   render(); post({type:'explorer',action:'ready'});

@@ -2,7 +2,8 @@ const test=require('node:test');const assert=require('node:assert/strict');const
 const os=require('node:os');
 const processesCss=fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.css'),'utf8');
 // 执行真实前端并记录DOM/消息、捕获监听及文档键盘事件；复合类选择器按各类匹配，FileReader与同步ACK仅控制外部事件，不改写生产函数。
-function boot(options={}){const sent=[];const nodes={};const created=[];function el(tag){return {tagName:tag,children:[],style:{setProperty(){}},dataset:{},classList:{add(name){this._names=this._names||new Set();this._names.add(name)},remove(name){if(this._names)this._names.delete(name)},toggle(name,force){const next=force===undefined?!this.contains(name):force;if(next)this.add(name);else this.remove(name);return next},contains(name){return !!(this._names&&this._names.has(name))}},className:'',textContent:'',appendChild(x){return this.insertBefore(x,null)},insertBefore(x,before){if(x.parentNode)x.parentNode.removeChild(x);const index=before?this.children.indexOf(before):this.children.length;this.children.splice(index,0,x);x.parentNode=this;return x},removeChild(x){const index=this.children.indexOf(x);if(index>=0)this.children.splice(index,1);x.parentNode=null;return x},replaceChild(x,previous){const index=this.children.indexOf(previous);this.removeChild(previous);if(x.parentNode)x.parentNode.removeChild(x);this.children.splice(index,0,x);x.parentNode=this;return previous},replaceChildren(...x){for(const child of this.children)child.parentNode=null;this.children=[];for(const child of x)this.appendChild(child)},addEventListener(type,fn,options){if(options===true||options?.capture){this.captureListeners=this.captureListeners||{};(this.captureListeners[type]??=[]).push(fn);}else this['on'+type]=fn},setAttribute(key,value){this[key]=value;},remove(){this.parentNode?.removeChild(this)},querySelectorAll(selector){const found=[];const visit=node=>{for(const child of node.children||[]){if(selector.startsWith('.')?selector.slice(1).split('.').every(name=>child.className.split(/\s+/).includes(name)||child.classList.contains(name)):child.tagName===selector)found.push(child);visit(child);}};visit(this);return found},contains(node){return node===this||this.children.some(child=>child.contains(node))},querySelector(selector){return this.querySelectorAll(selector)[0]||null},clientHeight:0,getBoundingClientRect(){return {width:0,height:0}},scrollIntoView(options){this.scrolled=options},select(){},click(){if(!this.disabled)return this.onclick?.()}}}const doc={getElementById:id=>nodes[id]||(nodes[id]=el('div')),createElement:tag=>{const node=el(tag);created.push(node);return node;},body:el('body'),addEventListener(type,fn){this['on'+type]=fn}};nodes['device-explorer']=el('section');const ctx={document:doc,window:{send:m=>sent.push(m),addEventListener(type,fn){if(type==='message')this.message=fn}},navigator:{clipboard:{writeText:async v=>{ctx.copied=v}}},send:m=>{sent.push(m);options.onSend?.(m,ctx);},ResizeObserver:class { observe(){} disconnect(){} },AbortController,Intl:options.Intl||Intl,FileReader:options.FileReader||UploadReader,innerWidth:1000,innerHeight:800,console,Math,Date,Set,Map,Promise,Uint8Array,ArrayBuffer,btoa:s=>Buffer.from(s,'binary').toString('base64'),setTimeout,clearTimeout};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.js'),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.js'),'utf8'),ctx);return {ctx,sent,created,api:ctx.window.__deviceExplorer,root:nodes['device-explorer']}}
+function boot(options={}){const sent=[];const nodes={};const created=[];const timers=new Map();let nextTimer=1;const setTimer=(fn,delay)=>{const id=nextTimer++;timers.set(id,{fn,delay});return id};const clearTimer=id=>timers.delete(id);function el(tag){return {tagName:tag,children:[],style:{setProperty(){}},dataset:{},classList:{add(name){this._names=this._names||new Set();this._names.add(name)},remove(name){if(this._names)this._names.delete(name)},toggle(name,force){const next=force===undefined?!this.contains(name):force;if(next)this.add(name);else this.remove(name);return next},contains(name){return !!(this._names&&this._names.has(name))}},className:'',textContent:'',appendChild(x){return this.insertBefore(x,null)},append(...items){for(const item of items)this.appendChild(item)},insertBefore(x,before){if(x.parentNode)x.parentNode.removeChild(x);const index=before?this.children.indexOf(before):this.children.length;this.children.splice(index,0,x);x.parentNode=this;return x},removeChild(x){const index=this.children.indexOf(x);if(index>=0)this.children.splice(index,1);x.parentNode=null;return x},replaceChild(x,previous){const index=this.children.indexOf(previous);this.removeChild(previous);if(x.parentNode)x.parentNode.removeChild(x);this.children.splice(index,0,x);x.parentNode=this;return previous},replaceChildren(...x){for(const child of this.children)child.parentNode=null;this.children=[];for(const child of x)this.appendChild(child)},addEventListener(type,fn,options){if(options===true||options?.capture){this.captureListeners=this.captureListeners||{};(this.captureListeners[type]??=[]).push(fn);}else this['on'+type]=fn},setAttribute(key,value){this[key]=value;},remove(){this.parentNode?.removeChild(this)},querySelectorAll(selector){const found=[];const visit=node=>{for(const child of node.children||[]){if(selector.startsWith('.')?selector.slice(1).split('.').every(name=>child.className.split(/\s+/).includes(name)||child.classList.contains(name)):child.tagName===selector)found.push(child);visit(child);}};visit(this);return found},contains(node){return node===this||this.children.some(child=>child.contains(node))},querySelector(selector){return this.querySelectorAll(selector)[0]||null},clientHeight:0,getBoundingClientRect(){return {width:0,height:0}},scrollIntoView(options){this.scrolled=options},select(){},click(){if(!this.disabled)return this.onclick?.()}}}const doc={getElementById:id=>nodes[id]||(nodes[id]=el('div')),createElement:tag=>{const node=el(tag);created.push(node);return node;},body:el('body'),addEventListener(type,fn){this['on'+type]=fn}};nodes['device-explorer']=el('section');const ctx={document:doc,window:{send:m=>sent.push(m),addEventListener(type,fn){if(type==='message')this.message=fn}},navigator:{clipboard:{writeText:async v=>{ctx.copied=v}}},send:m=>{sent.push(m);options.onSend?.(m,ctx);},ResizeObserver:class { observe(){} disconnect(){} },AbortController,Intl:options.Intl||Intl,FileReader:options.FileReader||UploadReader,innerWidth:1000,innerHeight:800,console,Math,Date,Set,Map,Promise,Uint8Array,ArrayBuffer,btoa:s=>Buffer.from(s,'binary').toString('base64'),setTimeout:setTimer,clearTimeout};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-processes/processes.js'),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.js'),'utf8'),ctx);return {ctx,sent,created,timers,api:ctx.window.__deviceExplorer,root:nodes['device-explorer']}}
+function errorText(b){return b.root.querySelector('.explorer-error-text')?.textContent??''}
 // CSS回归直接读取独立Processes资源，验证窄面板左右padding和卡片间距不会只依赖浏览器矩阵。
 test('Processes CSS keeps compact balanced list spacing',()=>{assert.match(processesCss,/\.process-list\{[^}]*padding:2px[^}]*scrollbar-gutter:stable both-edges\}/);assert.match(processesCss,/\.process-card\{[^}]*margin:0 0 10px;padding:5px/);});
 
@@ -16,12 +17,12 @@ test('Explorer shows loading before the initial root snapshot',()=>{
   assert.equal(b.root.querySelector('.file-list').children[0].textContent,'Empty directory');
 });
 
-// Node>=22投递多行错误，经root捕获后执行原目标事件；覆盖停止冒泡的展开、键盘清错及同次刷新同步新失败，不重复查询缓存。
-test('Explorer pinned error persists through background updates and clears on user operations', () => {
+// Node>=22投递多行错误，经root捕获后执行原目标事件；覆盖错误浮层、关闭/复制、5秒生命周期及同次刷新同步新失败，不重复查询缓存。
+test('Explorer error toast persists through background updates and closes explicitly', () => {
   let b, refreshError;
   b = boot({ onSend: message => {
     if (message.action === 'refresh') {
-      assert.equal(b.api.state.error, '');
+      assert.equal(errorText(b), '<read failed>\nPermission denied');
       if (refreshError) b.api.receive({ type: 'explorerProgress', busy: false, error: refreshError });
     }
   } });
@@ -43,53 +44,63 @@ test('Explorer pinned error persists through background updates and clears on us
       if (stopped) break;
     }
   };
-  assert.equal(b.root.captureListeners.click.length, 1);
+  assert.equal(b.root.captureListeners?.click?.length || 0, 0);
   receive({ type: 'explorerState', serial: 's', tab: 'files', active: true });
   receive({ type: 'explorerFiles', path: '/', entries: [{ path: '/dir', kind: 'directory' }, { path: '/file', kind: 'file' }] });
   receive({ type: 'explorerFiles', path: '/dir', entries: [] });
   const fail = () => receive({ type: 'explorerProgress', busy: false, error: '<read failed>\nPermission denied' });
   const row = path => b.root.querySelectorAll('.file-row').find(row => row.dataset.path === path);
   fail();
-  click(b.root.querySelector('.state.error'));
-  assert.equal(b.api.state.error, '');
-  assert.equal(b.root.querySelector('.state.error'), null);
-  fail(); click(b.root); assert.equal(b.api.state.error, '');
-  fail(); click(b.root.querySelector('.file-head')); assert.equal(b.api.state.error, '');
+  const toast = b.root.querySelector('.explorer-error-toast');
+  assert.equal(toast.querySelector('.explorer-error-text').textContent, '<read failed>\nPermission denied');
+  assert.equal(toast.querySelectorAll('button').length, 2);
+  assert.equal(toast.querySelectorAll('button')[0].title, 'Copy error');
+  assert.equal(toast.querySelectorAll('button')[1].title, 'Close error');
+  assert.deepEqual([...b.timers.values()].map(timer => timer.delay), [5000]);
+  toast.querySelectorAll('button')[1].click();
+  assert.equal(b.timers.size, 1);
+  assert.equal(errorText(b), '');
+  assert.equal(b.root.querySelector('.explorer-error-toast'), null);
+  fail(); click(b.root); assert.equal(errorText(b), '<read failed>\nPermission denied');
+  fail(); click(b.root.querySelector('.file-head')); assert.equal(errorText(b), '<read failed>\nPermission denied');
   fail();
   receive({ type: 'explorerFiles', path: '/background', entries: [] });
-  assert.equal(b.api.state.error, '<read failed>\nPermission denied');
-  const errorNode = b.root.querySelector('.state.error'), header = b.root.querySelector('.file-header');
+  assert.equal(errorText(b), '<read failed>\nPermission denied');
+  const errorNode = b.root.querySelector('.explorer-error-toast'), header = b.root.querySelector('.file-header');
   assert.equal(errorNode.role, 'alert');
-  assert.equal(errorNode.textContent, '<read failed>\nPermission denied');
-  assert.equal(errorNode.parentNode, header); assert.equal(header.children[1], errorNode);
+  assert.equal(errorNode.querySelector('.explorer-error-text').textContent, '<read failed>\nPermission denied');
+  assert.equal(errorNode.parentNode, b.root); assert.equal(errorNode.querySelectorAll('button').length, 2);
   assert.equal(header.children[0].className, 'file-head'); assert.equal(header.children[0].children[0].textContent, 'Name');
-  click(row('/file')); assert.equal(b.api.state.error, '');
+  click(row('/file')); assert.equal(errorText(b), '<read failed>\nPermission denied');
   assert.deepEqual(Array.from(b.api.state.selected), ['/file']);
-  assert.equal(b.root.querySelector('.state.error'), null);
+  assert.ok(b.root.querySelector('.explorer-error-toast'));
   fail(); const expandRow = row('/dir'), expand = expandRow.children[0].children[0]; click(expand);
-  assert.equal(b.api.state.error, ''); assert.equal(b.api.state.expanded.has('/dir'), true);
+  assert.equal(errorText(b), '<read failed>\nPermission denied'); assert.equal(b.api.state.expanded.has('/dir'), true);
   assert.equal(row('/dir'), expandRow);
   fail(); const collapse = row('/dir').children[0].children[0]; click(collapse);
-  assert.equal(b.api.state.error, ''); assert.equal(b.api.state.expanded.has('/dir'), false);
+  assert.equal(errorText(b), '<read failed>\nPermission denied'); assert.equal(b.api.state.expanded.has('/dir'), false);
   assert.equal(b.sent.some(m => m.action === 'list'), false);
   fail(); const refresh = b.root.querySelectorAll('button').find(button => button.title === 'Refresh'); click(refresh);
-  assert.equal(b.api.state.error, ''); assert.equal(b.sent.at(-1).action, 'refresh');
+  assert.equal(errorText(b), '<read failed>\nPermission denied'); assert.equal(b.sent.at(-1).action, 'refresh');
   fail(); refreshError = 'new refresh failed';
   const beforeRefresh = b.sent.filter(message => message.action === 'refresh').length;
   click(b.root.querySelectorAll('button').find(button => button.title === 'Refresh'));
   assert.equal(b.sent.filter(message => message.action === 'refresh').length, beforeRefresh + 1);
-  assert.equal(b.api.state.error, refreshError); assert.equal(b.root.querySelector('.state.error').textContent, refreshError);
+  assert.equal(errorText(b), refreshError); assert.equal(b.root.querySelector('.explorer-error-text').textContent, refreshError);
   refreshError = undefined;
-  fail(); click(row('/file')); row('/file').oncontextmenu({ preventDefault() {} }); assert.equal(b.api.state.error, '');
-  fail(); click(b.root.querySelectorAll('button').find(button => button.title === 'Upload')); assert.equal(b.api.state.error, '');
+  fail(); click(row('/file')); row('/file').oncontextmenu({ preventDefault() {} }); assert.equal(errorText(b), '<read failed>\nPermission denied');
+  fail(); click(b.root.querySelectorAll('button').find(button => button.title === 'Upload')); assert.equal(errorText(b), '<read failed>\nPermission denied');
   fail(); b.root.querySelectorAll('button').find(button => button.title === 'New Directory').click();
-  assert.equal(b.sent.at(-1).action, 'newDirectory'); assert.equal(b.api.state.error, '<read failed>\nPermission denied');
+  assert.equal(b.sent.at(-1).action, 'newDirectory'); assert.equal(errorText(b), '<read failed>\nPermission denied');
   let prevented = false;
   b.ctx.document.onkeydown({ key: 'ArrowUp', preventDefault() { prevented = true; } });
-  assert.equal(prevented, true); assert.equal(b.api.state.error, ''); assert.deepEqual(Array.from(b.api.state.selected), ['/dir']);
-  assert.equal(b.root.querySelector('.state.error'), null);
+  assert.equal(prevented, true); assert.equal(errorText(b), '<read failed>\nPermission denied'); assert.deepEqual(Array.from(b.api.state.selected), ['/dir']);
+  assert.ok(b.root.querySelector('.explorer-error-toast'));
   fail(); receive({ type: 'explorerLoading', serial: 's', fetching: false });
-  assert.equal(b.api.state.error, '<read failed>\nPermission denied');
+  assert.equal(errorText(b), '<read failed>\nPermission denied');
+  receive({ type: 'explorerProgress', busy: false, error: '<read failed>\nPermission denied' });
+  const toastBeforeCopy = b.root.querySelector('.explorer-error-toast'); toastBeforeCopy.querySelectorAll('button').find(button => button.title === 'Copy error').click();
+  assert.equal(errorText(b), '<read failed>\nPermission denied');
 });
 
 // Node>=22向真实前端投递加载/错误/设备生命周期消息，断言蓝条状态正确、非活动消息无效且列表节点保持不变。
@@ -160,7 +171,7 @@ test('file selection and drop target have blue visual feedback',()=>{
   const css=fs.readFileSync(path.join(__dirname,'../media/device-explorer/main.css'),'utf8');
   assert.ok(css.includes('.file-row.drop-target,.file-row.drop-target:hover{background:#075fa8;color:#fff;'));
   assert.ok(css.includes('.file-row.selected,.file-row.selected:hover{background:var(--vscode-list-activeSelectionBackground,#094771)'));
-  assert.match(css, /\.file-header>\.state\.error\{[^}]*white-space:pre-wrap;overflow-wrap:anywhere;[^}]*cursor:pointer/);
+  assert.match(css, /\.explorer-error-toast\{[^}]*position:absolute;left:5px;right:5px;bottom:5px;[^}]*border:1px solid/);
   assert.equal(css.includes('line truncated'),false);
   assert.equal((css.match(/\{/g)||[]).length,(css.match(/\}/g)||[]).length);
 });
@@ -197,15 +208,15 @@ test('failed drop keeps file rows selectable and shows all upload causes',async(
   b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/dest',name:'dest',kind:'directory'}]});
   const folder=b.root.querySelector('.file-list').children[0]; folder.ondragover({preventDefault(){}});
   await b.root.ondrop(droppedEvent([],[uploadFile(0)],'/dest'));
-  assert.equal(b.api.state.dragTarget,null); assert.ok(b.api.state.error.includes('Permission denied: /dest')); assert.match(b.api.state.error,/cleanup failed/);
-  let list=b.root.querySelector('.file-list'); assert.equal(b.root.querySelector('.file-header').querySelector('.state.error').role,'alert'); assert.equal(list.children.find(node => node.dataset.path === '/dest').dataset.path,'/dest');
+  assert.equal(b.api.state.dragTarget,null); assert.ok(errorText(b).includes('Permission denied: /dest')); assert.match(errorText(b),/cleanup failed/);
+  let list=b.root.querySelector('.file-list'); assert.equal(b.root.querySelector('.explorer-error-toast').role,'alert'); assert.equal(list.children.find(node => node.dataset.path === '/dest').dataset.path,'/dest');
   list.children.find(node => node.dataset.path === '/dest').onclick({ctrlKey:true}); assert.deepEqual(Array.from(b.api.state.selected),['/dest']);
   b.api.receive({type:'explorerProgress',busy:false,error:'No space left on device',message:'Upload failed'});
-  list=b.root.querySelector('.file-list'); assert.equal(b.root.querySelector('.file-header').querySelector('.state.error').textContent,'No space left on device');
+  list=b.root.querySelector('.file-list'); assert.equal(b.root.querySelector('.explorer-error-text').textContent,'No space left on device');
   assert.equal(list.children.find(node => node.dataset.path === '/dest').classList.contains('selected'),true);
 });
 
-// 文件输入事件既要展开嵌套本地错误，也要在下一次成功上传时移除旧错误，不影响文件行。
+// 文件输入事件展开嵌套本地错误；成功上传不清除错误，错误浮层由关闭按钮或5秒生命周期管理，不影响文件行。
 test('upload input displays nested causes and clears old failures on success',async()=>{
   const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});
   b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
@@ -213,11 +224,11 @@ test('upload input displays nested causes and clears old failures on success',as
   const nested=new AggregateError([new AggregateError([new Error('file locked')],'reader failed')],'upload failed');
   let input=b.created.findLast(node=>node.type==='file');
   input.files=[{name:'bad',size:1,slice(){throw nested;}}]; await input.onchange();
-  assert.equal(b.api.state.error,'upload failed: reader failed: file locked');
-  assert.equal(b.root.querySelector('.file-header').querySelector('.state.error').role,'alert');
+  assert.equal(errorText(b),'upload failed: reader failed: file locked');
+  assert.equal(b.root.querySelector('.explorer-error-toast').role,'alert');
   input=b.created.findLast(node=>node.type==='file'); input.files=[uploadFile(0)]; await input.onchange();
-  assert.equal(b.api.state.error,''); assert.equal(b.api.state.transfer,null);
-  const list=b.root.querySelector('.file-list');assert.equal(b.root.querySelector('.file-header').querySelector('.state.error'),null);
+  assert.equal(errorText(b),'upload failed: reader failed: file locked'); assert.equal(b.api.state.transfer,null);
+  const list=b.root.querySelector('.file-list');assert.ok(b.root.querySelector('.explorer-error-toast'));
   assert.equal(list.children[0].dataset.path,'/a'); assert.equal(b.sent.filter(m=>m.action==='uploadEnd').length,1);
 });
 
@@ -278,7 +289,7 @@ test('app directory reveal expands ancestors and preserves ownership',()=>{
   b.api.receive({type:'explorerState',serial:'s',tab:'processes',active:true});b.api.receive({type:'explorerReveal',serial:'s',path:'/data'});assert.equal(b.api.state.selected[0],chain[3]);
   b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});b.root.hidden=true;b.api.receive({type:'explorerReveal',serial:'s',path:'/data'});assert.equal(b.api.state.selected[0],chain[3]);b.root.hidden=false;
   b.api.receive({type:'explorerReveal',serial:'s',path:'/missing'});
-  assert.match(b.api.state.error,/no longer available/);assert.equal(b.api.state.selected[0],chain[3]);
+  assert.match(errorText(b),/no longer available/);assert.equal(b.api.state.selected[0],chain[3]);
 });
 
 // 稳定DOM必须由真实render维持：独立header持有真实表头，list仅持有行；覆盖展开、快照、进度/错误、同设备状态及设备切换。
@@ -289,7 +300,7 @@ test('stable file tree DOM preserves scroll owners and keyed selected rows',()=>
   assert.equal(b.root.children[1],surface);assert.equal(surface.children[2],list);assert.equal(header.children[0],head);assert.equal(list.children[0],row);assert.equal(row['aria-selected'],'true');assert.equal(list.scrollTop,120);assert.equal(list.scrollLeft,40);
   b.api.receive({type:'explorerProgress',busy:true,message:'Reading directory'});b.api.receive({type:'explorerProgress',busy:false});assert.equal(surface.children[2],list);assert.equal(header.children[0],head);assert.equal(list.children[0],row);
   b.api.receive({type:'explorerProgress',busy:false,error:'read failed\nPermission denied'});b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
-  assert.equal(surface.querySelector('.file-header'),header);assert.equal(header.children[0],head);assert.equal(header.children[1].textContent,'read failed\nPermission denied');assert.equal(surface.children[2],list);assert.equal(list.children[0],row);assert.equal(list.querySelector('.file-head'),null);
+  assert.equal(surface.querySelector('.file-header'),header);assert.equal(header.children[0],head);assert.equal(b.root.querySelector('.explorer-error-text').textContent,'read failed\nPermission denied');assert.equal(surface.children[2],list);assert.equal(list.children[0],row);assert.equal(list.querySelector('.file-head'),null);
   b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/folder',name:'renamed',kind:'directory',permissions:'drwx'}]});assert.equal(list.children[0],row);assert.equal(header.children[0],head);assert.equal(row.children[0].children[2].textContent,'renamed');assert.equal(row.children[1].textContent,'drwx');
   b.api.receive({type:'explorerState',serial:'other',tab:'files',active:true});assert.notEqual(b.root.children[1],surface);assert.notEqual(b.root.querySelector('.file-list'),list);
 });
@@ -335,7 +346,7 @@ test('process cards retain metadata missing values and empty states safely',()=>
   b.api.receive({type:'explorerState',serial:'s',tab:'processes'});assert.equal(b.root.children[1].children[1].children[0].textContent,'No processes');
   const long='com.example.'+'long'.repeat(80)+'<img>';b.api.receive({type:'explorerProcesses',processes:[{pid:42,name:long,abi:'arm64-v8a',vm:'ART',userId:0,debugger:'waiting'}]});let card=b.root.children[1].children[1].children[0];assert.equal(card.className,'process-card');
   assert.equal(card.children[0].children[0].textContent,long);assert.equal(card.children[0].children[0].children.length,0);assert.equal(card.children[0].children[1].textContent,'PID 42');assert.deepEqual(Array.from(card.children[1].children,field=>field.children[0].textContent),['ABI','VM','User ID','Debugger']);assert.deepEqual(Array.from(card.children[1].children,field=>field.children[1].textContent),['arm64-v8a','ART','0','Waiting']);
-  let prevented=false;card.onkeydown({key:'Enter',preventDefault(){prevented=true;}});assert.equal(prevented,true);assert.equal(b.api.state.processSelected,42);b.api.receive({type:'explorerProcesses',processes:[{pid:9,packageName:'fallback'}]});card=b.root.children[1].children[1].children[0];assert.equal(card.children[0].children[0].textContent,'fallback');assert.deepEqual(Array.from(card.children[1].children,field=>field.children[1].textContent),['-','-','-','Default']);b.api.receive({type:'explorerProcesses',processes:[],error:'Device disconnected'});assert.equal(b.root.children[1].children[1].children[0].textContent,'Device disconnected');
+  let prevented=false;card.onkeydown({key:'Enter',preventDefault(){prevented=true;}});assert.equal(prevented,true);assert.equal(b.api.state.processSelected,42);b.api.receive({type:'explorerProcesses',processes:[{pid:9,packageName:'fallback'}]});card=b.root.children[1].children[1].children[0];assert.equal(card.children[0].children[0].textContent,'fallback');assert.deepEqual(Array.from(card.children[1].children,field=>field.children[1].textContent),['-','-','-','Default']);b.api.receive({type:'explorerProcesses',processes:[],error:'Device disconnected'});assert.equal(errorText(b),'Device disconnected');
 });
 
 // 每卡片五个图标动作捕获该行PID，不依赖已选卡片；刷新位于标题栏。
@@ -448,7 +459,7 @@ test('upload validates active view and command correlation',async()=>{
 test('upload input event displays local read failures',async()=>{
   const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});b.api.receive({type:'explorerState',serial:'s',tab:'files'});
   const input=b.created.findLast(node=>node.type==='file');input.files=[{name:'bad',size:1,slice(){throw new Error('file disappeared');}}];
-  await input.onchange();assert.equal(b.api.state.error,'file disappeared');assert.equal(b.api.state.transfer,null);
+  await input.onchange();assert.equal(errorText(b),'file disappeared');assert.ok(b.root.querySelector('.explorer-error-toast'));assert.equal(b.api.state.transfer,null);
 });
 
 // 真实浏览器文件输入使用原生FileReader，消息端仅模拟设备ACK；事件Promise/MutationObserver验证背压和最终失败，不暴露测试API。
@@ -488,7 +499,7 @@ test('upload browser input uses real FileReader and waits for final device ACK',
     assert.equal(await page.evaluate(()=>window.messages.filter(m=>m.action==='uploadEnd').length),2);
     await page.evaluate(()=>{
       window.failCommit=true;window.failed=new Promise(resolve=>{
-        const observer=new MutationObserver(()=>{if(document.querySelector('.state.error')?.textContent==='device write failed'){observer.disconnect();resolve();}});
+        const observer=new MutationObserver(()=>{if(document.querySelector('.explorer-error-text')?.textContent==='device write failed'){observer.disconnect();resolve();}});
         observer.observe(document.getElementById('device-explorer'),{childList:true,subtree:true});
       });
     });
@@ -513,7 +524,7 @@ test('upload cancellation during commit and cleanup failure stay explicit',async
 test('upload drop event displays local read failure',async()=>{
   const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});b.api.receive({type:'explorerState',serial:'s',tab:'files'});
   let prevented=false;await b.root.ondrop({preventDefault(){prevented=true;},dataTransfer:{types:[],items:[],files:[{name:'bad',size:1,slice(){throw new Error('dropped file vanished');}}]}});
-  assert.equal(prevented,true);assert.equal(b.api.state.error,'dropped file vanished');assert.equal(b.api.state.transfer,null);
+  assert.equal(prevented,true);assert.equal(errorText(b),'dropped file vanished');assert.ok(b.root.querySelector('.explorer-error-toast'));assert.equal(b.api.state.transfer,null);
 });
 
 // 文件系统entry替身按浏览器readEntries多批结束协议返回，不替代实际drop/上传调用链。
@@ -531,7 +542,7 @@ test('directory drops preserve empty folders and all browser entry batches at th
 // 目录读取失败是整批错误，扫描完整之前不创建远端目录；空目录不能以dt.files为空而被忽略。
 test('directory drop read errors never become partial successful uploads',async()=>{
   const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});b.api.receive({type:'explorerState',serial:'s',tab:'files'});
-  await b.root.ondrop(droppedEvent([droppedDirectory('bad',[[droppedDirectory('empty',[])],new Error('cannot read directory')])]));assert.equal(b.api.state.error,'cannot read directory');assert.equal(b.sent.some(m=>m.transferId),false);assert.equal(b.api.state.transfer,null);
+  await b.root.ondrop(droppedEvent([droppedDirectory('bad',[[droppedDirectory('empty',[])],new Error('cannot read directory')])]));assert.equal(errorText(b),'cannot read directory');assert.ok(b.root.querySelector('.explorer-error-toast'));assert.equal(b.sent.some(m=>m.transferId),false);assert.equal(b.api.state.transfer,null);
   await b.root.ondrop(droppedEvent([droppedDirectory('empty',[])]));const begin=b.sent.find(m=>m.action==='uploadBegin');assert.equal(begin.directory,true);assert.equal(begin.relativePath,'empty');assert.equal(b.sent.some(m=>m.action==='uploadEnd'),false);
 });
 // 扫描属于一个上传所有者；切走立即结束等待且迟到回调不能向新设备发命令或清掉其新批次。
@@ -550,7 +561,7 @@ test('file drops toolbar uploads and URI lists honor directory selection',async(
   const event=droppedEvent([],[],'/link');event.dataTransfer.types=['text/uri-list'];event.dataTransfer.getData=()=> '# source\r\nfile:///C:/one\r\nfile:///C:/two\r\n';await b.root.ondrop(event);assert.equal(b.sent.at(-1).action,'uploadUris');assert.equal(b.sent.at(-1).target,'/link');assert.deepEqual(Array.from(b.sent.at(-1).uris),['file:///C:/one','file:///C:/two']);
 });
 
-// CDP原生文件拖放传递真实本地目录，浏览器生成FileSystemEntry；不替换readEntries或FileReader，只模拟设备ACK。
+// CDP原生文件拖放传递真实本地目录，浏览器生成FileSystemEntry；不替换readEntries或FileReader，只模拟设备ACK，错误浮层使用真实DOM。
 test('native browser directory drop preserves empty folders and actual bytes at the hovered destination',{skip:!process.env.EXPLORER_PLAYWRIGHT,timeout:60000},async t=>{
   const temp=fs.mkdtempSync(path.join(os.tmpdir(),'explorer-native-drop-')),folder=path.join(temp,'bundle'),bytes=Buffer.from([0,255,13,10,42]);fs.mkdirSync(path.join(folder,'empty'),{recursive:true});fs.writeFileSync(path.join(folder,'bytes.bin'),bytes);
   const {chromium}=require(process.env.EXPLORER_PLAYWRIGHT);let browser;
@@ -558,11 +569,11 @@ test('native browser directory drop preserves empty folders and actual bytes at 
     browser=await chromium.launch({executablePath:process.env.EXPLORER_BROWSER,headless:true});t.after(async()=>{await browser.close();fs.rmSync(temp,{recursive:true,force:true});});const page=await browser.newPage();const errors=[];page.on('pageerror',error=>errors.push(String(error)));
     // FileSystemEntry需要非opaque origin；route只供应测试页面，保留原生目录API及本地文件读取权限检查。
     await page.route('http://explorer.test/',route=>route.fulfill({contentType:'text/html',body:'<body data-device-view-mode="explorer"><section id="device-explorer"></section></body>'}));await page.goto('http://explorer.test/');
-    await page.evaluate(()=>{const deliver=data=>window.dispatchEvent(new MessageEvent('message',{data}));window.messages=[];let completed;window.completed=new Promise(resolve=>{completed=resolve;});window.deliver=deliver;window.send=message=>{window.messages.push(message);if(message.transferId){deliver({type:'explorerUploadAck',serial:message.serial,action:message.action,transferId:message.transferId});if(message.action==='uploadEnd')completed();}};document.addEventListener('drop',event=>{window.dropped={types:[...event.dataTransfer.types],files:[...event.dataTransfer.files].map(file=>file.name),entries:[...event.dataTransfer.items].map(item=>{const e=item.webkitGetAsEntry();return e?{name:e.name,directory:e.isDirectory}:null;})};},true);const observer=new MutationObserver(()=>{if(document.querySelector('.state.error')){observer.disconnect();completed();}});observer.observe(document.getElementById('device-explorer'),{subtree:true,childList:true});});
+    await page.evaluate(()=>{const deliver=data=>window.dispatchEvent(new MessageEvent('message',{data}));window.messages=[];let completed;window.completed=new Promise(resolve=>{completed=resolve;});window.deliver=deliver;window.send=message=>{window.messages.push(message);if(message.transferId){deliver({type:'explorerUploadAck',serial:message.serial,action:message.action,transferId:message.transferId});if(message.action==='uploadEnd')completed();}};document.addEventListener('drop',event=>{window.dropped={types:[...event.dataTransfer.types],files:[...event.dataTransfer.files].map(file=>file.name),entries:[...event.dataTransfer.items].map(item=>{const e=item.webkitGetAsEntry();return e?{name:e.name,directory:e.isDirectory}:null;})};},true);const observer=new MutationObserver(()=>{if(document.querySelector('.explorer-error-toast')){observer.disconnect();completed();}});observer.observe(document.getElementById('device-explorer'),{subtree:true,childList:true});});
     for(const file of ['device-processes/processes.js','device-explorer/main.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../media',file),'utf8')});
     await page.evaluate(()=>{window.deliver({type:'explorerState',serial:'s',tab:'files',active:true});window.deliver({type:'explorerFiles',path:'/',entries:[{path:'/destination',name:'destination',kind:'directory'}]});});
     const box=await page.locator('.file-row').boundingBox();assert.ok(box);const cdp=await page.context().newCDPSession(page),data={items:[],files:[folder],dragOperationsMask:1},position={x:box.x+box.width/2,y:box.y+box.height/2};
-    for(const type of ['dragEnter','dragOver','drop'])await cdp.send('Input.dispatchDragEvent',{type,...position,data});const native=await page.evaluate(()=>window.dropped);assert.deepEqual(native.types,['Files']);assert.deepEqual(native.entries,[{name:'bundle',directory:true}]);await page.evaluate(()=>window.completed);assert.equal(await page.locator('.state.error').count(),0);
+    for(const type of ['dragEnter','dragOver','drop'])await cdp.send('Input.dispatchDragEvent',{type,...position,data});const native=await page.evaluate(()=>window.dropped);assert.deepEqual(native.types,['Files']);assert.deepEqual(native.entries,[{name:'bundle',directory:true}]);await page.evaluate(()=>window.completed);assert.equal(await page.locator('.explorer-error-toast').count(),0);
     const messages=await page.evaluate(()=>window.messages),begin=messages.filter(m=>m.action==='uploadBegin');assert.deepEqual(begin.map(m=>m.relativePath).sort(),['bundle','bundle/bytes.bin','bundle/empty']);assert.equal(begin.filter(m=>m.directory===true).length,2);assert.ok(begin.every(m=>m.target==='/destination'&&m.serial==='s'));assert.deepEqual(Buffer.concat(messages.filter(m=>m.action==='uploadChunk').map(m=>Buffer.from(m.data,'base64'))),bytes);assert.equal(messages.filter(m=>m.action==='uploadEnd').length,1);assert.equal(messages.some(m=>m.action==='uploadAbort'),false);assert.deepEqual(errors,[]);await cdp.detach();
   }finally{if(browser)await browser.close();fs.rmSync(temp,{recursive:true,force:true});}
 });
@@ -588,7 +599,7 @@ test('directory replies preserve collapse and cache ownership across errors and 
   const b=boot();b.api.receive({type:'explorerState',serial:'s',tab:'files'});b.api.receive({type:'explorerFiles',path:'/',entries:[{path:'/A',kind:'directory'}]});
   for(let i=0;i<2;i++)b.root.querySelector('.file-list').children[0].children[0].children[0].onclick({stopPropagation(){}});
   b.api.receive({type:'explorerFiles',path:'/A',entries:[]});assert.equal(b.api.state.expanded.has('/A'),false);
-  b.api.receive({type:'explorerFiles',path:'/broken',error:'Permission denied'});assert.equal(b.api.state.directories.has('/broken'),false);assert.equal(b.api.state.error,'Permission denied');
+  b.api.receive({type:'explorerFiles',path:'/broken',error:'Permission denied'});assert.equal(b.api.state.directories.has('/broken'),false);assert.equal(errorText(b),'Permission denied');
   b.api.receive({type:'deviceViewMode',mode:'processes'});assert.equal(b.api.state.directories.size,2);
   b.api.receive({type:'explorerConnection',serial:'other',view:'files',connected:false});assert.equal(b.api.state.directories.size,2);
   b.api.receive({type:'explorerConnection',serial:'s',view:'files',connected:false});assert.equal(b.api.state.directories.size,0);
