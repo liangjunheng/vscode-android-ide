@@ -103,6 +103,28 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-run').disabled, true);
 });
 
+// 缓存内容回显不代表真实查询完成；busy快照持续转圈并锁定操作，只有正式结果才解除loading。
+test('build panel displays cached variants without ending the real refresh loading state', () => {
+  const f = fixture();
+  const cached = { type: 'buildState', projects: [{ id: 'root', label: 'Cached project' }], project: 'root',
+    targets: [{ id: ':app:DemoDebug', label: 'app | DemoDebug' }], target: ':app:DemoDebug', busy: true, status: 'Discovering Gradle tasks' };
+  for (let i = 0; i < 2; i++) {
+    f.receive(cached);
+    assert.equal(f.get('build-project').children[1].textContent, 'Cached project');
+    assert.equal(f.get('build-target').value, ':app:DemoDebug');
+    for (const id of ['build-project-loading', 'build-target-loading']) assert.equal(f.get(id).hidden, false);
+    for (const id of ['build-project', 'build-target', 'build-build', 'build-install']) assert.equal(f.get(id).disabled, true);
+    assert.equal(f.get('build-status').textContent, 'Discovering Gradle tasks');
+  }
+  f.receive({ ...cached, busy: false, targets: [{ id: ':app:PaidDebug', label: 'app | PaidDebug' }], target: ':app:PaidDebug', status: 'Ready' });
+  assert.equal(f.get('build-target').value, ':app:PaidDebug');
+  for (const id of ['build-project-loading', 'build-target-loading']) assert.equal(f.get(id).hidden, true);
+  assert.equal(f.get('build-build').disabled, false);
+  f.receive({ ...cached, busy: false, targets: [], target: '', status: 'Failed', error: 'Gradle refresh failed' });
+  assert.equal(f.get('build-target-loading').hidden, true);
+  assert.equal(f.get('build-status').textContent, 'Gradle refresh failed');
+});
+
 // npm test：Logcat 仅有模式和启停，删除控件必须不存在；严格断言共享状态回显、禁用、失败恢复和动作消息。
 test('Logcat build panel shares controls without Device Tools-only nodes', () => {
   const f = fixture(true, true), get = f.get;
@@ -214,9 +236,9 @@ test('build panel integration owns controller and connects both directions', asy
   let running, build, logcat;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
   // 模拟只读当前Gradle包名，断言Native工厂只在需要时按workspace调用。
-  class Build { constructor(post) { build = this; this.post = post; } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
+  class Build { constructor(post, ext, cache) { build = this; this.post = post; this.cache = cache; } async initialize() { calls.push(['initialize']); } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
   const debugFactory = {}, jvmRegistrations = [];
-  const extensionContext = { extensionPath: 'extension-root', subscriptions };
+  const extensionContext = { extensionPath: 'extension-root', subscriptions, workspaceState: { get() {}, async update() {} } };
   const factoryContexts = [], packageResolvers = [];
   const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; }, onDidTerminateDebugSession: () => ({ dispose() {} }) } };
   Object.assign(vscode.workspace, { findFiles: async () => [], onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) });
@@ -226,6 +248,8 @@ test('build panel integration owns controller and connects both directions', asy
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   module.exports.activate(extensionContext);
   assert.ok(subscriptions.includes(build));
+  assert.equal(build.cache, extensionContext.workspaceState);
+  assert.deepEqual(calls.filter(call => call[0] === 'initialize'), [['initialize']]);
   assert.equal(commandNames.includes('android-ide.openProfiler'), false);
   assert.ok(commandNames.includes('android-ide.showLogcat'));
 

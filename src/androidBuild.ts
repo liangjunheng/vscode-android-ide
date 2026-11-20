@@ -13,6 +13,8 @@ interface Target { id: string; label: string; module: string; variant: string; a
 interface RunMode { id: string; label: string; action: 'run' | 'debug'; config?: vscode.DebugConfiguration; }
 interface Operation { controller: AbortController; done: Promise<void>; action?: string; }
 interface OwnedProcess { child: ChildProcess; closed: Promise<void>; termination?: Promise<void>; }
+interface GradleProjectCache { projects: { root: string; tasks: string[] }[]; }
+const GRADLE_CACHE_KEY = 'android-ide.gradleProjects.v1';
 /** 当前 Build 选择解析出的调试源码身份，不包含设备或会话状态。 */
 export interface AndroidDebugProject { androidProjectRoot: string; androidModuleRoot: string; androidVariant: string; androidSourceRoots: string[]; androidNativeModules?: NativeSourceModule[]; packageName?: string; androidAbiSupported?: string[]; }
 const LIMIT = 256 * 1024;
@@ -103,6 +105,8 @@ function packageFor(project: Project, target: Target): string {
 // 管理单一操作、定向安装及输出资源；npm test android-build 回归执行所有动作及生命周期。
 export class AndroidBuildController implements vscode.Disposable {
   private projects: Project[] = [];
+  private cachedProjects?: Project[];
+  private initialization?: Promise<void>;
   private projectId = '';
   private targetId = '';
   private operation?: Operation;
@@ -120,9 +124,42 @@ export class AndroidBuildController implements vscode.Disposable {
 
   // 保存状态出口；调试会话监听在启动前建立并在所属会话终止后释放，避免错过立即终止事件。
   // 回归：node --test tests/android-build.test.js，验证立即终止后可重入且不误停其他会话。
-  constructor(private post: (message: any) => void, extensionPath: string) {
+  constructor(private post: (message: any) => void, extensionPath: string, private readonly workspaceState?: vscode.Memento) {
     this.output = vscode.window.createOutputChannel('Android Build');
     this.tooling = new GradleToolingClient(extensionPath);
+  }
+
+  // 一次性初始化共享Promise，重复调用不重新读取旧缓存或启动查询；android-build初始化重复调用回归验证。
+  initialize(): Promise<void> {
+    return this.initialization ??= this.restoreAndRefresh();
+  }
+
+  // 受信任工作区的成功缓存仅用于界面loading回显，坏缓存明确失败；android-build缓存隔离与异常状态回归验证。
+  private async restoreAndRefresh(): Promise<void> {
+    if (this.disposed) throw new Error('Android build controller is disposed');
+    if (!vscode.workspace.isTrusted) return this.handle({ type: 'buildPanel', action: 'refresh' });
+    try {
+      const cached = this.workspaceState?.get<GradleProjectCache>(GRADLE_CACHE_KEY);
+      if (cached !== undefined) {
+        if (!cached || !Array.isArray(cached.projects) || cached.projects.some(project => !project || typeof project.root !== 'string' || !path.isAbsolute(project.root)
+          || !Array.isArray(project.tasks) || project.tasks.some(task => typeof task !== 'string' || !/^:(?:[^:\r\n]+:)*[^:\r\n]+$/.test(task)))) throw new Error('Invalid Gradle project cache');
+        const folders = vscode.workspace.workspaceFolders?.map(folder => path.resolve(folder.uri.fsPath)) || [];
+        this.cachedProjects = cached.projects.filter(project => folders.some(folder => {
+          const relative = path.relative(folder, project.root);
+          return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep));
+        })).map(project => ({ id: project.root, label: path.basename(project.root), root: project.root,
+          wrapper: path.join(project.root, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew'), tasks: project.tasks }));
+        this.projectId = this.cachedProjects[0]?.id || '';
+        this.chooseDefault(this.cachedProjects);
+      }
+    } catch (error) {
+      this.cachedProjects = undefined;
+      this.projects = [];
+      this.projectId = ''; this.targetId = '';
+      this.state('Failed', String(error));
+      throw error;
+    }
+    return this.handle({ type: 'buildPanel', action: 'refresh' });
   }
 
   // 只读所选项目/模块/变体applicationId，可限定所属workspace；未知交Native/Explorer后备解析，真实故障不吞。
@@ -153,12 +190,13 @@ export class AndroidBuildController implements vscode.Disposable {
 
   // 发布并保存两侧共用的项目、风味和运行快照；node --test tests/android-build.test.js 的 sync 回归断言晚订阅、忙碌、错误和停止原样回放。
   private state(status: string, error?: string): void {
-    const project = this.projects.find(p => p.id === this.projectId);
+    const projects = this.cachedProjects ?? this.projects;
+    const project = projects.find(p => p.id === this.projectId);
     const targets = buildTargets(project?.tasks || []);
     const target = targets.find(item => item.id === this.targetId);
     const applicationLabel = target ? (target.module || ':').replace(/^:/, '') + ' | ' + target.variant : project?.label || 'Application';
     const runModes = getAndroidDebugConfigurations().map((config, index) => ({ id: 'debug-' + index, label: config.name, action: 'debug' as const }));
-    this.snapshot = { type: 'buildState', projects: this.projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
+    this.snapshot = { type: 'buildState', projects: projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
       targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy: !!this.operation, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) };
     this.post(this.snapshot);
   }
@@ -243,14 +281,19 @@ export class AndroidBuildController implements vscode.Disposable {
       }
     }
     this.check(operation);
+    // 成功模型验证后进入不可取消的存储提交；停止需等待update完成，绝不写入失败或未完成的查询结果。
+    await this.workspaceState?.update(GRADLE_CACHE_KEY, { projects: projects.map(project => ({ root: project.root,
+      tasks: project.tasks.filter(task => /:(assemble|install)[\w.-]+$/.test(task)) })) });
+    this.check(operation);
     this.projects = projects;
+    this.cachedProjects = undefined;
     if (!projects.some(p => p.id === this.projectId)) this.projectId = projects[0]?.id || '';
     this.chooseDefault();
   }
 
   // 只选择真实变体，优先 Debug；npm test refresh/selection 断言默认项和非法输入。
-  private chooseDefault(): void {
-    const targets = buildTargets(this.projects.find(p => p.id === this.projectId)?.tasks || []);
+  private chooseDefault(projects = this.projects): void {
+    const targets = buildTargets(projects.find(p => p.id === this.projectId)?.tasks || []);
     if (!targets.some(t => t.id === this.targetId)) this.targetId = targets.find(t => t.variant.toLowerCase() === 'debug')?.id || targets[0]?.id || '';
   }
 
@@ -416,7 +459,11 @@ export class AndroidBuildController implements vscode.Disposable {
     if (message.action === 'stop') { return this.stop(); }
     if (message.action === 'refresh' && !this.stopping && !this.operation?.controller.signal.aborted && this.operation?.action === 'refresh') return this.operation.done;
     if (this.operation || this.stopping) throw new Error('An Android operation is already running');
-    if (!vscode.workspace.isTrusted) { const error = 'Workspace is not trusted'; this.state('Unavailable', error); throw new Error(error); }
+    if (!vscode.workspace.isTrusted) {
+      const error = 'Workspace is not trusted';
+      this.cachedProjects = undefined; this.projects = []; this.projectId = ''; this.targetId = '';
+      this.state('Unavailable', error); throw new Error(error);
+    }
     if (message.action === 'project' || message.action === 'target') {
       const project = this.projects.find(p => p.id === message.value);
       if (message.action === 'project') { if (!project) throw new Error('Invalid project selection'); this.projectId = project.id; this.chooseDefault(); }
@@ -434,12 +481,15 @@ export class AndroidBuildController implements vscode.Disposable {
     }
     const operation: Operation = { controller: new AbortController(), done: Promise.resolve(), action: message.action };
     this.operation = operation;
-    // Gradle刷新开始时隐藏旧项目和变体，失败后不展示可能失效的结果；保留选择ID，成功刷新后可恢复原选项。
-    if (message.action === 'refresh') { this.projects = []; }
     this.state(message.action === 'refresh' ? 'Discovering Gradle tasks' : message.action + ': ' + this.targetId);
     operation.done = (async () => {
       try { const status = await this.execute(operation, message.action, serial); this.check(operation); this.operation = undefined; this.state(status); }
-      catch (error) { this.operation = undefined; this.state(error instanceof Cancelled ? 'Cancelled' : 'Failed', error instanceof Cancelled ? undefined : String(error)); throw error; }
+      catch (error) {
+        if (message.action === 'refresh') { this.projects = []; this.cachedProjects = undefined; this.projectId = ''; this.targetId = ''; }
+        this.operation = undefined;
+        this.state(error instanceof Cancelled ? 'Cancelled' : 'Failed', error instanceof Cancelled ? undefined : String(error));
+        throw error;
+      }
     })();
     return operation.done;
   }

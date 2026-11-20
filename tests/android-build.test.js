@@ -91,7 +91,13 @@ function fixture(t, platform = 'linux') {
       async dispose() {}
     } } : require(id),
   });
-  f.controller = new module.exports.AndroidBuildController(m => f.messages.push(m));
+  f.cache = undefined; f.cacheWrites = [];
+  f.storage = { get: () => f.cache, update: async (key, value) => {
+    if (f.cacheFailure) throw f.cacheFailure;
+    f.cacheWrites.push({ key, value }); f.cache = value;
+  } };
+  vscode.workspace.workspaceFolders = [{ uri: { fsPath: root } }];
+  f.controller = new module.exports.AndroidBuildController(m => f.messages.push(m), '', f.storage);
   f.parse = module.exports.parseGradleTasks;
   f.action = (action, value, serial) => f.controller.handle({ type: 'buildPanel', action, value }, serial);
   f.last = () => f.messages.at(-1);
@@ -114,6 +120,268 @@ test('android-build real task formats and refresh selections', async t => {
   await assert.rejects(f.action('project', 'forged'), /Invalid project/);
   await assert.rejects(f.action('target', ':evil:Debug'), /Invalid target/);
   await f.action('project', f.root);
+  await f.controller.dispose();
+});
+
+// 工作区缓存立即回显且保持busy，sync和刷新共用正式查询，完成后才保存新结果并Ready。
+test('android-build startup cache stays loading until the authoritative refresh completes', async t => {
+  const f = fixture(t);
+  f.cache = { projects: [{ root: f.root, tasks: [':cached:assembleDemoDebug', ':cached:installDemoDebug'] }] };
+  const cached = f.cache;
+  f.hold = true;
+  const startup = f.controller.initialize();
+  assert.equal(f.controller.initialize(), startup);
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  assert.equal(f.controller.currentNativeDebugMetadata(), undefined);
+  await assert.rejects(f.controller.resolveCurrentDebugProject('com.example.app', f.root, new AbortController().signal), /already running/);
+  assert.equal(f.last().busy, true);
+  assert.equal(f.last().target, ':cached:DemoDebug');
+  assert.notEqual(f.last().status, 'Ready');
+  assert.equal(f.cacheWrites.length, 0);
+  await f.action('sync');
+  assert.equal(f.last().busy, true);
+  assert.equal(f.last().target, ':cached:DemoDebug');
+  await new Promise(resolve => setImmediate(resolve));
+  const concurrent = f.action('refresh');
+  assert.equal(f.calls.length, 1);
+  await assert.rejects(f.action('build'), /already running/);
+  f.hold = false; f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await Promise.all([startup, concurrent]);
+  assert.equal(f.last().busy, false);
+  assert.equal(f.last().target, ':app:Debug');
+  assert.equal(f.last().status, 'Ready');
+  assert.equal(f.controller.currentApplicationId(), 'com.example.app');
+  const reads = f.cacheWrites.length;
+  await f.controller.initialize();
+  assert.equal(f.cacheWrites.length, reads);
+  assert.equal(f.cacheWrites.length, 1);
+  assert.notEqual(f.cache, cached);
+  assert.ok(f.cache.projects[0].tasks.includes(':app:assembleDebug'));
+  assert.ok(f.cache.projects[0].tasks.every(task => /:(assemble|install)/.test(task)));
+  f.hold = true;
+  const refresh = f.action('refresh');
+  assert.equal(f.last().target, ':app:Debug');
+  assert.equal(f.last().busy, true);
+  await new Promise(resolve => setImmediate(resolve));
+  f.hold = false; f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await refresh;
+  await f.controller.dispose();
+  const restored = [];
+  const reopened = new f.controller.constructor(message => restored.push(message), '', f.storage);
+  f.hold = true;
+  const reload = reopened.initialize();
+  assert.equal(restored.at(-1).target, ':app:Debug');
+  assert.equal(restored.at(-1).busy, true);
+  await new Promise(resolve => setImmediate(resolve));
+  f.hold = false; f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await reload;
+  assert.equal(restored.at(-1).busy, false);
+  await reopened.dispose();
+});
+
+// 正式刷新失败不能以缓存伪成功，也不能污染上次成功缓存；恢复后可正常更新。
+test('android-build startup failure ends loading and preserves only the successful cache', async t => {
+  const f = fixture(t);
+  f.cache = { projects: [{ root: f.root, tasks: [':app:assembleRelease', ':app:installRelease'] }] };
+  const cache = f.cache;
+  f.fail = 'Gradle startup failed';
+  await assert.rejects(f.controller.initialize(), /Gradle startup failed/);
+  assert.equal(f.last().busy, false);
+  assert.equal(f.last().status, 'Failed');
+  assert.match(f.last().error, /Gradle startup failed/);
+  assert.equal(f.last().targets.length, 0);
+  assert.equal(f.cache, cache);
+  assert.equal(f.cacheWrites.length, 0);
+  await f.action('refresh');
+  assert.equal(f.last().status, 'Ready');
+  assert.equal(f.cacheWrites.length, 1);
+  await f.controller.dispose();
+});
+
+// 查询取消不得写入缓存，持久化未结束时也不能提前结束loading，缓存存储故障需如实报错。
+test('android-build startup cancellation and cache persistence preserve loading ownership', async t => {
+  const f = fixture(t);
+  f.cache = { projects: [{ root: f.root, tasks: [':app:assembleRelease', ':app:installRelease'] }] };
+  const cache = f.cache;
+  f.hold = true;
+  const pending = f.controller.initialize();
+  const cancelled = assert.rejects(pending, /cancelled/);
+  await new Promise(resolve => setImmediate(resolve));
+  await f.action('stop'); await cancelled;
+  assert.equal(f.cache, cache);
+  assert.equal(f.cacheWrites.length, 0);
+  assert.equal(f.last().busy, false);
+  f.hold = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const update = f.storage.update;
+  f.storage.update = async (...args) => { await gate; return update(...args); };
+  const refresh = f.action('refresh');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.last().busy, true);
+  assert.notEqual(f.last().status, 'Ready');
+  release(); await refresh;
+  assert.equal(f.last().status, 'Ready');
+  f.cacheFailure = new Error('workspace storage failed');
+  await assert.rejects(f.action('refresh'), /workspace storage failed/);
+  assert.equal(f.last().busy, false);
+  assert.match(f.last().error, /workspace storage failed/);
+  await f.controller.dispose();
+});
+
+// 无缓存仍立即加载，工作区外缓存不回显，空工程的成功结果可以清除旧缓存。
+test('android-build initialization isolates workspace cache and persists an empty project result', async t => {
+  const f = fixture(t);
+  f.cache = { projects: [{ root: path.join(f.root, '..', 'unrelated'), tasks: [':app:assembleDebug', ':app:installDebug'] }] };
+  f.roots = [];
+  const startup = f.controller.initialize();
+  assert.equal(f.last().busy, true);
+  assert.equal(f.last().targets.length, 0);
+  await startup;
+  assert.equal(f.last().status, 'No Gradle project');
+  assert.equal(f.last().busy, false);
+  assert.equal(f.cache.projects.length, 0);
+  await f.controller.dispose();
+});
+
+// 空缓存首次启动也发布busy；读取缓存异常必须以Promise拒绝返回，供激活入口统一报告。
+test('android-build initialization without cache loads once and cache read errors reject asynchronously', async t => {
+  const f = fixture(t); f.hold = true;
+  const startup = f.controller.initialize();
+  assert.equal(f.last().busy, true);
+  assert.equal(f.last().projects.length, 0);
+  await f.action('sync');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.length, 1);
+  f.hold = false; f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await startup;
+  assert.equal(f.last().status, 'Ready');
+  assert.equal(f.cacheWrites[0].key, 'android-ide.gradleProjects.v1');
+  await f.controller.dispose();
+  const g = fixture(t);
+  g.storage.get = () => { throw new Error('cache read failed'); };
+  let pending;
+  assert.doesNotThrow(() => { pending = g.controller.initialize(); });
+  await assert.rejects(pending, /cache read failed/);
+  assert.equal(g.calls.length, 0);
+  assert.equal(g.last().status, 'Failed');
+  assert.equal(g.last().busy, false);
+  assert.equal(g.last().targets.length, 0);
+  await g.action('sync');
+  assert.match(g.last().error, /cache read failed/);
+  await g.controller.dispose();
+});
+
+// 多根查询第二项失败不能保存半份新缓存；工作区内嵌套根可回显，相邻前缀目录不能混入。
+test('android-build multi-root startup preserves the previous cache when a later root fails', async t => {
+  const f = fixture(t);
+  const nested = path.join(f.root, 'nested'); fs.mkdirSync(nested);
+  for (const file of ['gradlew', 'gradlew.bat']) fs.writeFileSync(path.join(nested, file), '');
+  f.roots = [f.root, nested];
+  f.cache = { projects: [f.root, nested, f.root + '-other'].map(root => ({ root, tasks: [':app:assembleDebug', ':app:installDebug'] })) };
+  const cached = f.cache;
+  f.hold = true;
+  const startup = f.controller.initialize();
+  const failed = assert.rejects(startup, /second root failed/);
+  assert.deepEqual(Array.from(f.last().projects, project => project.id), [f.root, nested]);
+  await new Promise(resolve => setImmediate(resolve));
+  f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.length, 2);
+  f.held.stderr.emit('data', Buffer.from('second root failed')); f.held.finish(1);
+  await failed;
+  assert.equal(f.cache, cached);
+  assert.equal(f.cacheWrites.length, 0);
+  assert.equal(f.last().busy, false);
+  assert.equal(f.last().projects.length, 0);
+  f.hold = false; await f.controller.dispose();
+});
+
+// 多工作区缓存经过序列化重开后仍可回显；新查询移除的工程及已消失变体不能留在正式结果中。
+test('android-build serialized multi-workspace cache is replaced by the authoritative project list', async t => {
+  const f = fixture(t);
+  const other = path.join(f.root, 'second'); fs.mkdirSync(other);
+  for (const file of ['gradlew', 'gradlew.bat']) fs.writeFileSync(path.join(other, file), '');
+  f.vscode.workspace.workspaceFolders = [{ uri: { fsPath: f.root } }, { uri: { fsPath: other } }];
+  f.cache = JSON.parse(JSON.stringify({ projects: [
+    { root: f.root, tasks: [':app:assembleOldDebug', ':app:installOldDebug'] },
+    { root: other, tasks: [':feature:assemblePaidDebug', ':feature:installPaidDebug'] },
+  ] }));
+  f.roots = [other]; f.hold = true;
+  const startup = f.controller.initialize();
+  assert.equal(f.last().projects.length, 2);
+  assert.equal(f.last().target, ':app:OldDebug');
+  assert.equal(f.last().busy, true);
+  await new Promise(resolve => setImmediate(resolve));
+  f.hold = false; f.held.stdout.emit('data', Buffer.from('feature:assemblePaidDebug\nfeature:installPaidDebug\n')); f.held.finish();
+  await startup;
+  assert.deepEqual(Array.from(f.last().projects, project => project.id), [other]);
+  assert.equal(f.last().target, ':feature:PaidDebug');
+  assert.equal(f.last().busy, false);
+  assert.deepEqual(Array.from(f.cache.projects, project => project.root), [other]);
+  assert.equal(f.last().targets.some(target => target.variant === 'OldDebug'), false);
+  await f.controller.dispose();
+});
+
+// 缓存不能绕过工作区信任；未受信任时不查询、不写缓存，错误快照可供晚订阅回放。
+test('android-build cached startup respects workspace trust and does not query Gradle', async t => {
+  const f = fixture(t);
+  f.cache = { projects: [{ root: f.root, tasks: [':app:assembleDebug', ':app:installDebug'] }] };
+  f.vscode.workspace.isTrusted = false;
+  await assert.rejects(f.controller.initialize(), /not trusted/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.cacheWrites.length, 0);
+  assert.equal(f.last().busy, false);
+  assert.equal(f.last().status, 'Unavailable');
+  assert.equal(f.last().projects.length, 0);
+  assert.equal(f.last().targets.length, 0);
+  await f.action('sync');
+  assert.match(f.last().error, /not trusted/);
+  await f.controller.dispose();
+});
+
+// 损坏的持久化缓存必须发布失败快照，不能把旧快照留给后来打开的面板或触发真实查询。
+test('android-build invalid cache publishes a failed state without using stale projects', async t => {
+  for (const cached of [{}, { projects: null }, { projects: [{ root: 'relative', tasks: [] }] },
+    { projects: [{ root: os.tmpdir(), tasks: [null] }] }]) {
+    const f = fixture(t); f.cache = cached;
+    await assert.rejects(f.controller.initialize(), /Invalid Gradle project cache/);
+    assert.equal(f.last().status, 'Failed');
+    assert.equal(f.last().busy, false);
+    assert.equal(f.last().projects.length, 0);
+    assert.equal(f.last().targets.length, 0);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.cacheWrites.length, 0);
+    const failed = f.last(); await f.action('sync'); assert.equal(f.last(), failed);
+    await f.controller.dispose();
+  }
+});
+
+// 已验证的真实结果进入不可取消存储提交后，Stop等待落盘；界面不发布Ready，下一次启动可重新验证该成功结果。
+test('android-build stop during cache commit waits for storage and never publishes Ready', async t => {
+  const f = fixture(t);
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const update = f.storage.update;
+  f.storage.update = async (...args) => { entered(); await gate; return update(...args); };
+  const pending = f.controller.initialize();
+  const cancelled = assert.rejects(pending, /cancelled/);
+  await started;
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  let stopped = false;
+  const stop = f.action('stop').then(() => { stopped = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.equal(f.last().busy, true);
+  assert.equal(f.messages.some(message => message.status === 'Ready'), false);
+  release(); await stop; await cancelled;
+  assert.equal(f.last().status, 'Stopped');
+  assert.equal(f.last().busy, false);
+  assert.equal(f.last().targets.length, 0);
+  assert.equal(f.controller.currentApplicationId(), undefined);
+  assert.equal(f.cacheWrites.length, 1);
+  assert.ok(f.cache.projects[0].tasks.includes(':app:assembleDebug'));
   await f.controller.dispose();
 });
 

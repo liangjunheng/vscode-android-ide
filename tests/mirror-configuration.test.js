@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
 // 执行真实activate配置及Build/Explorer接线；Node>=22 VM回归断言命名空间读写、恢复、资源归属和只读provider的延迟取值/错误传播。
-function fixture() {
+function fixture(initializeError) {
   const f = { value: false, workspaceValue: undefined, workspaceMode: undefined, globalMode: undefined, writes: [], applied: [], errors: [], instances: [], subscriptions: [], fail: false };
   const listener = { disposed: false, dispose() { this.disposed = true; } };
   const vscode = {
@@ -34,6 +34,7 @@ function fixture() {
   } }, vscode, './runningDevices': { RunningDeviceView: Running }, './androidBuild': { AndroidBuildController: class {
     // 记录实例和读取次数，供真实activate的闭包回归检查当前选择与错误不被缓存/吞掉。
     constructor() { f.build = this; this.reads = 0; this.applicationId = 'com.example.app'; }
+    async initialize() { this.initialized = true; if (initializeError) throw initializeError; }
     // 返回替身当前ID或抛metadata错误；wiring回归断言调用次数和相同异常。
     currentApplicationId() { this.reads++; if (this.error) throw this.error; return this.applicationId; }
     // 精确记录Attach提供方入参，wiring回归验证signal与当前模型结果不被缓存或吞错。
@@ -46,6 +47,16 @@ function fixture() {
   f.disposable = listener;
   return f;
 }
+
+// 激活无需打开面板即初始化；初始化失败可见且不阻断其他注册，不产生未观察的拒绝。
+test('extension starts Gradle initialization during activation and displays initialization errors', async () => {
+  const f = fixture(new Error('cache read failed'));
+  assert.doesNotThrow(() => f.activate());
+  assert.equal(f.build.initialized, true);
+  assert.ok(f.subscriptions.includes(f.build));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.errors, ['Error: cache read failed']);
+});
 
 // npm test：按钮默认写用户配置，已有工作区覆盖时只更新覆盖值，配置写入失败向按钮传播。
 test('mirror configuration remembers visibility and respects workspace overrides', async () => {
