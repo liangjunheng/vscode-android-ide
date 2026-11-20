@@ -110,7 +110,7 @@ test('abort waits for child close and never starts followup commands',async()=>{
   try{const pending=f.files.stat('/sdcard/a',controller.signal);const observed=pending.then(()=>{settled=true;},e=>{settled=true;return e;});controller.abort();await new Promise(resolve=>setImmediate(resolve));assert.equal(f.calls[0].child.killed,true);assert.equal(settled,false);f.calls[0].child.finish();assert.match(String(await observed),/abort/i);assert.equal(f.calls.length,1);}
   finally{await f.close();}
 });
-// 目录规模增加不增加ADB往返，设备脚本用当前层glob和批量stat，NUL解码仍完整保留500个名称且不递归find。
+// 目录规模增加不增加ADB往返，设备脚本用当前层glob逐项stat，NUL解码仍完整保留500个名称且不递归find。
 // 当前层glob即使设备stderr报告受限路径，也不把已返回的直接子项伪装成空目录；Node>=22回归断言非递归协议和完整解析。
 test('directory listing ignores unrelated find permission noise', async () => {
   const f = await fixture([{ data: metadata('/system/bin/sh'), error: "find: '/cache': Permission denied\nfind: '/data_mirror': Permission denied" }]);
@@ -118,7 +118,7 @@ test('directory listing ignores unrelated find permission noise', async () => {
   finally { await f.close(); }
 });
 
-test('directory metadata uses one ADB request and bounded stat batches',async()=>{
+test('directory metadata uses one ADB request with per-entry stat results',async()=>{
   const names=Array.from({length:500},(_,i)=>'/large/file '+i+(i===0?'\nquote\"':'')).map(name=>name.replace('\\n','\n'));
   const f=await fixture([{data:Buffer.concat(names.map(name=>metadata(name)))}]);
   try{const entries=await f.files.list('/large');assert.equal(entries.length,500);assert.equal(f.calls.length,1);assert.ok((f.calls[0].script.match(/stat -c /g)||[]).length>=1);assert.ok(f.calls[0].script.includes('for p in'));assert.equal(f.calls[0].script.includes('find -H'),false);assert.deepEqual(Array.from(entries,e=>e.path),names);}
