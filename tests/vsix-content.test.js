@@ -14,7 +14,7 @@ function fixture(t) {
   const manifest = { name: 'android-runtime-fixture', version: '1.0.0', publisher: 'fixture', engines: { vscode: '^1.95.0' }, description: 'Package content regression', main: './dist/extension.js', activationEvents: ['onStartupFinished'], license: 'MIT', repository: { type: 'git', url: 'https://github.com/microsoft/vscode-extension-samples.git' } };
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
   fs.copyFileSync(path.join(__dirname, '../.vscodeignore'), path.join(root, '.vscodeignore'));
-  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'resources/jvm-debugger/kotlin-debug-adapter.jar', 'resources/jvm-debugger/LICENSE', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
+  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'resources/jvm-debugger/kotlin-debug-adapter.jar', 'resources/gradle-tooling-server.jar', 'resources/gradle-tooling-LICENSE.txt', 'resources/jvm-debugger/LICENSE', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
   const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/native-debugger/upstream/src/debugMain.js', 'dist/extension.js.map', 'dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'runtime/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE', 'android-debugger/jvm/adapter.js'];
   for (const file of included.concat(excluded)) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
@@ -95,6 +95,9 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
   assert.ok(files.has('resources/platform-tools/runtime-manifest.json'));
   assert.ok(files.has('resources/platform-tools/adb-runtime-provenance.json'));
   assert.ok(files.has('resources/jvm-debugger/kotlin-debug-adapter.jar'));
+  assert.ok(files.has('resources/gradle-tooling-server.jar'));
+  assert.ok(files.has('resources/gradle-tooling-LICENSE.txt'));
+  assert.match(fs.readFileSync(path.join(root, 'resources/gradle-tooling-LICENSE.txt'), 'utf8'), /Gradle Tooling API 9\.8\.1/);
   assert.ok(fs.existsSync(path.join(root, 'resources/jvm-debugger/LICENSE')));
   assert.ok(files.has('resources/jvm-debugger/LICENSE'));
   assert.deepEqual(fs.readFileSync(path.join(root, 'resources/jvm-debugger/LICENSE')), fs.readFileSync(path.join(root, 'src/android-debugger/jvm-debugger/upstream/LICENSE')));

@@ -38,7 +38,8 @@ function noticesPlugin(entry) {
         // Native 源码许可随当前 bundle 发布；native-build.test.js 断言全文与缺失许可阻断。
         const nativeLicense = fs.readFileSync('src/android-debugger/native-debugger/upstream/LICENSE', 'utf8');
         const jvmLicense = fs.readFileSync('src/android-debugger/jvm-debugger/upstream/LICENSE', 'utf8');
-        fs.writeFileSync(path.join('dist', 'THIRD_PARTY_NOTICES.txt'), notices.text + '\n## Android Native Debugger\n\n' + nativeLicense + '\n## Kotlin/Java JVM Debugger\n\n' + jvmLicense);
+        const gradleLicense = fs.readFileSync('resources/gradle-tooling-LICENSE.txt', 'utf8');
+        fs.writeFileSync(path.join('dist', 'THIRD_PARTY_NOTICES.txt'), notices.text + '\n## Android Native Debugger\n\n' + nativeLicense + '\n## Kotlin/Java JVM Debugger\n\n' + jvmLicense + '\n## Gradle Tooling API\n\n' + gradleLicense);
         fs.writeFileSync(path.join('dist', 'runtime-js-dependencies.json'), JSON.stringify({ schemaVersion: 1, packages: notices.packages }, null, 2));
       });
     },

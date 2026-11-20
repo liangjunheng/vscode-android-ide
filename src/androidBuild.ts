@@ -5,12 +5,13 @@ import { ChildProcess, spawn } from 'child_process';
 import { adbPath } from './sdk';
 import { getAndroidDebugConfigurations, selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
 import { discoverVariantSources, NativeSourceModule } from './androidProjectModel';
+import { GradleToolingClient } from './gradleTooling';
 
 interface Project { id: string; label: string; root: string; wrapper: string; tasks: string[]; }
 interface ApkMetadata { applicationId: string; elements?: unknown; }
 interface Target { id: string; label: string; module: string; variant: string; assemble: string; install: string; }
 interface RunMode { id: string; label: string; action: 'run' | 'debug'; config?: vscode.DebugConfiguration; }
-interface Operation { controller: AbortController; done: Promise<void>; }
+interface Operation { controller: AbortController; done: Promise<void>; action?: string; }
 interface OwnedProcess { child: ChildProcess; closed: Promise<void>; termination?: Promise<void>; }
 /** 当前 Build 选择解析出的调试源码身份，不包含设备或会话状态。 */
 export interface AndroidDebugProject { androidProjectRoot: string; androidModuleRoot: string; androidVariant: string; androidSourceRoots: string[]; androidNativeModules?: NativeSourceModule[]; packageName?: string; androidAbiSupported?: string[]; }
@@ -41,6 +42,12 @@ function buildTargets(tasks: string[]): Target[] {
     found.set(id, item);
   }
   return [...found.values()].filter(t => t.assemble && t.install).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// 为Gradle项目发现错误补充根目录、Wrapper命令和原始输出；回归由android-build.test.js的失败重试用例断言。
+function gradleDiscoveryError(root: string, wrapper: string, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error('Gradle Project discovery failed in ' + root + ' via Tooling API (' + path.basename(wrapper) + ' distribution): ' + detail);
 }
 
 // 只解析所选项目/模块/变体的APK metadata；匹配缺失返回undefined，坏JSON/非法ID及IO故障原样抛错，不扫描其他模块。
@@ -109,10 +116,14 @@ export class AndroidBuildController implements vscode.Disposable {
   private outputText = '';
   private snapshot?: Record<string, any>;
   private readonly output: vscode.OutputChannel;
+  private readonly tooling: GradleToolingClient;
 
   // 保存状态出口；调试会话监听在启动前建立并在所属会话终止后释放，避免错过立即终止事件。
   // 回归：node --test tests/android-build.test.js，验证立即终止后可重入且不误停其他会话。
-  constructor(private post: (message: any) => void) { this.output = vscode.window.createOutputChannel('Android Build'); }
+  constructor(private post: (message: any) => void, extensionPath: string) {
+    this.output = vscode.window.createOutputChannel('Android Build');
+    this.tooling = new GradleToolingClient(extensionPath);
+  }
 
   // 只读所选项目/模块/变体applicationId，可限定所属workspace；未知交Native/Explorer后备解析，真实故障不吞。
   // 回归：Node>=22，node --test tests/android-build.test.js；current application ID两项断言多根/模块/变体隔离、切换、零副作用、缺失undefined及真实故障抛错。
@@ -213,7 +224,7 @@ export class AndroidBuildController implements vscode.Disposable {
     await owned.closed;
   }
 
-  // 发现工作区 wrapper 并读取实际 task 集合；npm test refresh 覆盖空项目、多根及有效选择保留。
+  // 通过长驻Tooling API读取通用项目任务，每次刷新查询真实模型；android-build与gradle-tooling测试验证复用、失败和取消。
   private async discover(operation: Operation): Promise<void> {
     const files = await vscode.workspace.findFiles('**/{settings.gradle,settings.gradle.kts,gradlew,gradlew.bat}', '**/{node_modules,.git,.gradle,build}/**');
     this.check(operation);
@@ -221,9 +232,15 @@ export class AndroidBuildController implements vscode.Disposable {
     const projects: Project[] = [];
     for (const root of roots) {
       const wrapper = path.join(root, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
-      if (!fs.existsSync(wrapper)) throw new Error('No Gradle Wrapper in ' + root);
-      const text = await this.run(operation, wrapper, ['tasks', '--all', '--console=plain'], root);
-      projects.push({ id: root, label: path.basename(root), root, wrapper, tasks: parseGradleTasks(text) });
+      try {
+        if (!fs.existsSync(wrapper)) throw new Error('No Gradle Wrapper in ' + root);
+        const tasks = await this.tooling.query(root, operation.controller.signal);
+        this.check(operation);
+        projects.push({ id: root, label: path.basename(root), root, wrapper, tasks });
+      } catch (error) {
+        this.check(operation);
+        throw gradleDiscoveryError(root, wrapper, error);
+      }
     }
     this.check(operation);
     this.projects = projects;
@@ -386,7 +403,8 @@ export class AndroidBuildController implements vscode.Disposable {
     }
   }
 
-  // 校验动作并独占执行；sync 只回放快照，首次订阅才发现项目；node --test tests/android-build.test.js 的 sync 回归断言双面板并发初始化不重复构建且错误不丢失。
+  // 校验动作并独占执行；相同Gradle刷新共享进行中的Promise，sync回放快照，其他动作继续互斥。
+  // 回归：node --test tests/android-build.test.js，覆盖每次刷新查询真实模型、并发合并、失败传播和取消。
   async handle(message: any, serial?: string): Promise<void> {
     if (this.disposed) throw new Error('Android build controller is disposed');
     if (!message || message.type !== 'buildPanel' || !['sync', 'refresh', 'project', 'target', 'build', 'install', 'run', 'runMode', 'debug', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
@@ -396,6 +414,7 @@ export class AndroidBuildController implements vscode.Disposable {
     }
     if (message.action === 'output') { this.output.show(true); return; }
     if (message.action === 'stop') { return this.stop(); }
+    if (message.action === 'refresh' && !this.stopping && !this.operation?.controller.signal.aborted && this.operation?.action === 'refresh') return this.operation.done;
     if (this.operation || this.stopping) throw new Error('An Android operation is already running');
     if (!vscode.workspace.isTrusted) { const error = 'Workspace is not trusted'; this.state('Unavailable', error); throw new Error(error); }
     if (message.action === 'project' || message.action === 'target') {
@@ -413,8 +432,10 @@ export class AndroidBuildController implements vscode.Disposable {
       this.state('Ready');
       return;
     }
-    const operation: Operation = { controller: new AbortController(), done: Promise.resolve() };
+    const operation: Operation = { controller: new AbortController(), done: Promise.resolve(), action: message.action };
     this.operation = operation;
+    // Gradle刷新开始时隐藏旧项目和变体，失败后不展示可能失效的结果；保留选择ID，成功刷新后可恢复原选项。
+    if (message.action === 'refresh') { this.projects = []; }
     this.state(message.action === 'refresh' ? 'Discovering Gradle tasks' : message.action + ': ' + this.targetId);
     operation.done = (async () => {
       try { const status = await this.execute(operation, message.action, serial); this.check(operation); this.operation = undefined; this.state(status); }
@@ -449,5 +470,9 @@ export class AndroidBuildController implements vscode.Disposable {
   }
 
   // 停用等待本控制器拥有的进程关闭再释放输出；npm test dispose 回归断言关闭及资源顺序。
-  async dispose(): Promise<void> { this.disposed = true; try { await this.stop(); } finally { this.output.dispose(); } }
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    try { await this.stop(); }
+    finally { try { await this.tooling.dispose(); } finally { this.output.dispose(); } }
+  }
 }

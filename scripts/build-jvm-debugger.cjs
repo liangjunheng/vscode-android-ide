@@ -184,6 +184,14 @@ async function build({ test = false } = {}) {
   verifyJar(runtime.java, jar);
   await fsp.mkdir(path.dirname(OUTPUT), { recursive: true });
   await fsp.copyFile(jar, OUTPUT);
+  await run(maven, ['-B', '-f', path.join(ROOT, 'src', 'gradle-tooling', 'pom.xml'), '-DskipTests', 'package'], ROOT, env);
+  const toolingJar = path.join(ROOT, 'src', 'gradle-tooling', 'target', 'gradle-tooling-server-1.0.0.jar');
+  const toolingArchive = await require('unzipper').Open.file(toolingJar);
+  const slf4jLicense = toolingArchive.files.find(entry => entry.path === 'META-INF/LICENSE.txt');
+  if (!slf4jLicense) fail('Tooling API SLF4J license missing');
+  const apacheLicense = await fsp.readFile(path.join(ROOT, 'resources', 'licenses', 'Apache-2.0', 'legalcode.txt'), 'utf8');
+  await fsp.writeFile(path.join(ROOT, 'resources', 'gradle-tooling-LICENSE.txt'), 'Gradle Tooling API 9.8.1 — Apache-2.0\n\n' + apacheLicense + '\n\nSLF4J API and Simple 2.0.17 — MIT\n\n' + (await slf4jLicense.buffer()).toString('utf8'));
+  await fsp.copyFile(toolingJar, path.join(ROOT, 'resources', 'gradle-tooling-server.jar'));
   await fsp.copyFile(path.join(UPSTREAM, 'LICENSE'), path.join(path.dirname(OUTPUT), 'LICENSE'));
   const bytes = await fsp.stat(OUTPUT);
   if (bytes.size === 0) fail(`generated JAR is empty: ${OUTPUT}`);

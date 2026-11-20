@@ -60,7 +60,7 @@ export function activate(ctx: vscode.ExtensionContext) {
   const explorer = new DeviceExplorerController(message => running.publishBuildState(message), () => build.currentApplicationId(), (packageName, workspaceRoot, signal) => build.resolveCurrentDebugProject(packageName, workspaceRoot, signal));
   const nativeMirror = vscode.workspace.getConfiguration('android-ide').get<boolean>('nativeMirror', false);
   const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer, nativeMirror);
-  const build = new AndroidBuildController(message => { running.publishBuildState(message); logcat.publishBuildState(message); });
+  const build = new AndroidBuildController(message => { running.publishBuildState(message); logcat.publishBuildState(message); }, ctx.extensionPath);
   registerJvmDebugger(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath)?.packageName : undefined);
   const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined), (message, serial) => build.handle(message, serial));
   // Device Tools刷新同时刷新设备列表和Gradle项目/Android variants；任一刷新失败都交给命令入口显示真实错误。

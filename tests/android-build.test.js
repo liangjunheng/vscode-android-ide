@@ -86,7 +86,10 @@ function fixture(t, platform = 'linux') {
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, AbortController, console,
     process: { platform, env: {}, kill: pid => { assert.equal(pid, -f.held.pid); if (f.closeOnKill) f.held.finish(null, 'SIGTERM'); } },
-    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './androidProjectModel' ? projectModel : require(id),
+    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
+      async query(root, signal) { if (f.toolingTasks) return f.toolingTasks; return f.parse(await f.controller.run({ controller: { signal } }, 'tooling-api', ['tasks'], root)); }
+      async dispose() {}
+    } } : require(id),
   });
   f.controller = new module.exports.AndroidBuildController(m => f.messages.push(m));
   f.parse = module.exports.parseGradleTasks;
@@ -104,11 +107,68 @@ test('android-build real task formats and refresh selections', async t => {
   assert.equal(f.last().target, ':app:Debug');
   assert.deepEqual(Array.from(f.last().targets, x => x.label), ['app | Debug', 'app | Release']);
   await f.action('target', ':app:Release');
+  const calls = f.calls.length;
   await f.action('refresh');
   assert.equal(f.last().target, ':app:Release');
+  assert.equal(f.calls.length, calls + 1);
   await assert.rejects(f.action('project', 'forged'), /Invalid project/);
   await assert.rejects(f.action('target', ':evil:Debug'), /Invalid target/);
   await f.action('project', f.root);
+  await f.controller.dispose();
+});
+
+// 大型工程的任务模型不经过256KiB日志缓冲；四组风味与安装任务完整保留。
+test('android-build discovers flavored variants from models larger than the log limit', async t => {
+  const f = fixture(t);
+  const variants = ['CnPhoneDebug', 'CnTabletDebug', 'GlobalPhoneDebug', 'GlobalTabletDebug'];
+  f.toolingTasks = variants.flatMap(variant => [':app:assemble' + variant, ':app:install' + variant]);
+  f.toolingTasks.push(...Array.from({ length: 8000 }, (_, i) => ':module:generateUnrelatedAndroidResourceTask' + i));
+  assert.ok(f.toolingTasks.join('\n').length > 256 * 1024);
+  await f.action('refresh');
+  assert.deepEqual(Array.from(f.last().targets, target => target.variant), variants);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.last().busy, false);
+  await f.controller.dispose();
+});
+
+// 实际Controller连接打包Tooling服务；显式工程环境断言多风味选择，不启动安装、构建或设备命令。
+test('android-build actual Tooling API discovers the selected project variants', { skip: !process.env.DSH_GRADLE_TEST_ANDROID_ROOT }, async t => {
+  const root = process.env.DSH_GRADLE_TEST_ANDROID_ROOT;
+  const toolingModule = { exports: {} };
+  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/gradleTooling.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module: toolingModule, exports: toolingModule.exports, process, Buffer, require });
+  const states = [];
+  const vscode = {
+    workspace: { isTrusted: true, findFiles: async () => [{ fsPath: path.join(root, 'settings.gradle.kts') }] },
+    window: { createOutputChannel: () => ({ replace() {}, dispose() {} }) },
+  };
+  const module = { exports: {} };
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController,
+    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+  const controller = new module.exports.AndroidBuildController(state => states.push(state), path.resolve(__dirname, '..'));
+  t.after(() => controller.dispose());
+  const times = [];
+  for (let i = 0; i < 6; i++) {
+    const start = performance.now();
+    await controller.handle({ type: 'buildPanel', action: 'refresh' });
+    times.push(Math.round(performance.now() - start));
+    const expected = JSON.parse(process.env.DSH_GRADLE_TEST_EXPECTED_VARIANTS || '["Debug"]');
+    assert.deepEqual(Array.from(states.at(-1).targets, target => target.variant), expected);
+    assert.equal(states.at(-1).busy, false);
+  }
+  t.diagnostic(JSON.stringify({ firstMs: times[0], stableMs: times.slice(1), targets: Array.from(states.at(-1).targets, target => target.id) }));
+  if (process.env.DSH_GRADLE_TEST_STATE_OUTPUT) fs.writeFileSync(process.env.DSH_GRADLE_TEST_STATE_OUTPUT, JSON.stringify(states.at(-1)));
+});
+
+// npm test：并发Gradle刷新共享同一模型查询，不重复执行，也不把相同请求误报为busy。
+test('android-build concurrent refreshes share the active discovery', async t => {
+  const f = fixture(t); f.hold = true;
+  const first = f.action('refresh');
+  await new Promise(resolve => setImmediate(resolve));
+  const second = f.action('refresh');
+  assert.equal(f.calls.length, 1);
+  f.hold = false; f.held.stdout.emit('data', Buffer.from(tasks)); f.held.finish();
+  await Promise.all([first, second]);
+  assert.equal(f.last().target, ':app:Debug');
   await f.controller.dispose();
 });
 
@@ -135,6 +195,26 @@ test('android-build sync replays shared state without repeating discovery or los
   f.fail = 'Gradle sync failure'; await assert.rejects(f.action('build'), /Gradle sync failure/);
   const failed = f.last(), commands = f.calls.length;
   await f.action('sync'); assert.equal(f.last(), failed); assert.match(f.last().error, /Gradle sync failure/); assert.equal(f.calls.length, commands);
+  await f.controller.dispose();
+});
+
+// npm test：Gradle Wrapper失败需带项目根和原始输出，失败清空旧选择，下一次显式刷新可重新获取项目和变体。
+test('android-build Gradle discovery failure is diagnosable and recoverable', async t => {
+  const f = fixture(t);
+  await f.action('refresh');
+  assert.equal(f.last().projects.length, 1);
+  fs.appendFileSync(path.join(f.root, 'settings.gradle.kts'), '\n// changed\n');
+  f.fail = 'Could not resolve plugin';
+  await assert.rejects(f.action('refresh'), error => {
+    assert.ok(error.message.includes('Gradle Project discovery failed in ' + f.root));
+    assert.match(error.message, /Could not resolve plugin/);
+    return true;
+  });
+  assert.deepEqual(Array.from(f.last().projects), []);
+  assert.deepEqual(Array.from(f.last().targets), []);
+  await f.action('refresh');
+  assert.equal(f.last().projects.length, 1);
+  assert.equal(f.last().target, ':app:Debug');
   await f.controller.dispose();
 });
 
@@ -594,7 +674,7 @@ test('android-build real Windows source runner preserves generated init path wit
   const script = path.join(root, 'generated ! init.gradle'); fs.writeFileSync(script, '// fixture');
   fs.writeFileSync(path.join(root, 'gradlew.bat'), '@echo off\r\necho FIRST=%1\r\necho SECOND=%~2\r\nif not exist "%~2" exit /b 91\r\nif not "%~3"==":app:__dshSourceIndex" exit /b 92\r\n');
   const module = { exports: {} }, channel = { replace() {}, show() {}, dispose() {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(() => {});
   const text = await controller.run({ controller: new AbortController() }, path.join(root, 'gradlew.bat'), ['--init-script', script, ':app:__dshSourceIndex'], root, process.env, script);
   assert.ok(text.includes('FIRST=--init-script')); assert.ok(text.includes('SECOND=' + script), JSON.stringify({ text, script })); await controller.dispose();
@@ -620,10 +700,12 @@ for (const platform of ['linux', 'win32']) test('android-build cancel and reentr
 // npm test：Windows wrapper 在带空格 cwd 执行，adb 保留绝对命令名且不经过 cmd。
 test('android-build Windows wrapper and adb have distinct safe command paths', async t => {
   const f = fixture(t, 'win32'); await f.action('refresh');
-  assert.equal(f.calls[0].command, 'cmd.exe');
-  assert.equal(f.calls[0].args.at(-1), 'gradlew.bat tasks --all --console=plain');
-  assert.equal(f.calls[0].options.cwd, f.root);
-  assert.equal(f.calls[0].options.shell, false);
+  assert.equal(f.calls[0].command, 'tooling-api');
+  await f.action('build');
+  assert.equal(f.calls.at(-1).command, 'cmd.exe');
+  assert.equal(f.calls.at(-1).args.at(-1), 'gradlew.bat :app:assembleDebug --console=plain');
+  assert.equal(f.calls.at(-1).options.cwd, f.root);
+  assert.equal(f.calls.at(-1).options.shell, false);
   await f.action('install', undefined, '192.168.1.1:5555');
   assert.equal(f.calls.at(-2).command, 'sdk adb');
   assert.equal(f.calls.at(-2).options.shell, false);
@@ -649,7 +731,7 @@ test('android-build real Windows wrapper executes in a path with spaces', { skip
   const channel = { text: '', replace(s) { this.text = s; }, show() {}, dispose() {} };
   const vscode = { workspace: { isTrusted: true, findFiles: async () => [{ fsPath: path.join(root, 'gradlew.bat') }] }, window: { createOutputChannel: () => channel } };
   const module = { exports: {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
   const states = [], controller = new module.exports.AndroidBuildController(m => states.push(m));
   await controller.handle({ type: 'buildPanel', action: 'refresh' });
   assert.equal(states.at(-1).target, ':app:Debug');
