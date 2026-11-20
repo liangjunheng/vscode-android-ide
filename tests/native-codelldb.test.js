@@ -312,7 +312,7 @@ test('Native real DAP launch installs explicit APK once and queries the exact pa
   for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
   assert.equal(f.calls.some(call => call[0] === 'process-list'), false);
   assert.deepEqual(Array.from(f.calls.find(call => call[0] === 'adb' && call[3].includes('pidof'))[3]), ['shell', 'pidof', 'com.example.app']);
-  assert.equal(f.calls.find(call => call[0] === 'adb' && call[3].includes('am'))[3].includes('-W'), false);
+  assert.equal(f.calls.find(call => call[0] === 'adb' && call[3].includes('am'))[3].includes('-W'), true);
   assert.equal(f.calls.find(call => call[0] === 'launch')[3], 'MainActivity');
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.calls.filter(call => call[0] === 'jdwp-cleanup').length, 1);
 });
@@ -339,6 +339,17 @@ test('Native start refusal exception absent child event and resume failure roll 
   }
 });
 
+test('Native attach cancels quietly when the package process is absent', async t => {
+  const f = await fixture(t); f.adbHook = (adb, serial, args) => args.includes('pidof') ? '' : undefined;
+  const result = await f.parent({ type: 'android-debug', mode: 'native', pid: undefined, processId: undefined, packageName: 'com.example.app' }, true);
+  assert.equal(result, undefined);
+  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0); assert.match(f.notices[0], /process for com\.example\.app is not running/);
+});
+
+test('Native attach preserves actual ADB device errors during pid lookup', async t => {
+  const f = await fixture(t); f.adbHook = (adb, serial, args) => args.includes('pidof') ? Promise.reject(new Error('Command failed: adb -s serial shell pidof com.example.app\nerror: device unauthorized')) : undefined;
+  await assert.rejects(f.parent({ type: 'android-debug', mode: 'native', pid: undefined, processId: undefined, packageName: 'com.example.app' }, true), /unauthorized/);
+});
 test('Native server errors invalid PIDs and invalid options become DAP failures without fake children', async t => {
   for (const config of [{ pid: -1 }, { pid: 42, processId: 43 }, { native: { initCommands: 7 } }, { target: 'select' }]) {
     const f = await fixture(t); const adapter = await f.parent(config); assert.equal((await request(f, adapter, 'attach')).success, false); assert.equal(f.children.length, 0); assert.equal(f.servers.length, 0);

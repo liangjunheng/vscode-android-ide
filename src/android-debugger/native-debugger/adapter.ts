@@ -227,6 +227,18 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
 /** 仅用共享 SDK 选择 Java 的 ADB，不解析 NDK；native-codelldb.test.js 验证无 NDK Java 六组合及设备身份。 */
 function javaAdb(config: vscode.DebugConfiguration): string { return readProjectLocalConfig(config.androidProjectRoot).debugger?.adbPath ?? adbPath(); }
 
+/** 判断 pidof 失败是否表示目标进程不存在；设备连接类错误继续传播。 */
+function missingAttachProcess(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return /pidof/.test(message) && !/(offline|unauthorized|no devices|device not found|failed to connect|cannot connect)/.test(message);
+}
+
+/** 进程不存在时提示用户并取消 Attach；设备离线、未授权和 ADB 故障继续向上报告。 */
+function notifyMissingAttachProcess(packageName: string): null {
+  void vscode.window.showWarningMessage('Android Attach failed: process for ' + packageName + ' is not running. Start the application and attach again.');
+  return null;
+}
+
 /** attach 优先显式 PID，其次包名精确进程，最后交互选择；取消返回 null、不读 Build；同文件断言两种 PID、取消及 Java 无 NDK。 */
 async function resolveAttachIdentity(config: vscode.DebugConfiguration, javaOnly: boolean): Promise<vscode.DebugConfiguration | null> {
   if (config.request !== 'attach') return config;
@@ -236,7 +248,13 @@ async function resolveAttachIdentity(config: vscode.DebugConfiguration, javaOnly
     if (config.packageName) {
       if (!/^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+$/.test(config.packageName)) throw new Error('A valid package name is required.');
       const adb = javaOnly ? javaAdb(config) : resolveNativeToolchain(config.androidProjectRoot, nativeToolchainOverrides(config.native)).adb;
-      pid = (await adbExec(adb, serial, ['shell', 'pidof', config.packageName], config.signal)).trim();
+      try {
+        pid = (await adbExec(adb, serial, ['shell', 'pidof', config.packageName], config.signal)).trim();
+      } catch (error) {
+        if (missingAttachProcess(error)) return notifyMissingAttachProcess(config.packageName);
+        throw error;
+      }
+      if (!pid) return notifyMissingAttachProcess(config.packageName);
     } else if (javaOnly) {
       const adb = javaAdb(config);
       const lines = (await adbExec(adb, serial, ['shell', 'ps', '-A', '-o', 'PID,NAME'], config.signal)).trim().split(/\r?\n/);

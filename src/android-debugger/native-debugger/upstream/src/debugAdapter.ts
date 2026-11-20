@@ -214,7 +214,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             const component = config.packageName + '/' + config.launchActivity;
             if (!/^[\w.$]+\/[\w.$]+$/.test(component)) throw new Error('Invalid Android launch component');
             this.consoleLog('Launching the app activity ' + component);
-            const output = await adbExec(adb, target.udid, ['shell', 'am', 'start', '-D', '-n', component], signal);
+            const output = await adbExec(adb, target.udid, ['shell', 'am', 'start', '-D', '-W', '-n', component], signal);
             if (/Error:|Exception|Status:\s*(?!ok\b)\S+/i.test(output)) throw new Error('Android launch failed: ' + output.trim());
             this.checkOpen();
             const pid = (await adbExec(adb, target.udid, ['shell', 'pidof', config.packageName], signal)).trim();
