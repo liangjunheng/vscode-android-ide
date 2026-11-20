@@ -30,8 +30,9 @@ function initBuildPanel(send) {
       project.disabled = state.busy;
       target.disabled = state.busy || !state.targets.length;
       for (const action of ['build', 'install']) get('build-' + action).disabled = state.busy || !state.target || (action !== 'build' && !serial);
-      get('build-project-loading').hidden = !state.busy;
-      get('build-target-loading').hidden = !state.busy;
+      const gradleLoading = state.gradleLoading ?? (state.busy && !state.running);
+      get('build-project-loading').hidden = !gradleLoading;
+      get('build-target-loading').hidden = !gradleLoading;
       get('build-logcat').disabled = false;
       get('build-device-loading').hidden = !state.deviceLoading;
       const mirrorVisible = viewMode === 'mirror';
@@ -47,7 +48,7 @@ function initBuildPanel(send) {
       get('build-mirror').title = mirrorVisible ? 'Hide mirroring' : 'Show mirroring';
       get('build-mirror').setAttribute('aria-label', get('build-mirror').title);
       document.body.classList.toggle('mirror-hidden', !mirrorVisible);
-      get('build-refresh').disabled = state.busy;
+      get('build-refresh').disabled = gradleLoading;
       get('build-root-count').textContent = (state.projects || []).length + ' Gradle roots';
       status.textContent = state.error || state.status || 'No Gradle project';
       status.title = status.textContent;

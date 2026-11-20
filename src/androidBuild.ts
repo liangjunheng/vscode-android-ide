@@ -196,8 +196,10 @@ export class AndroidBuildController implements vscode.Disposable {
     const target = targets.find(item => item.id === this.targetId);
     const applicationLabel = target ? (target.module || ':').replace(/^:/, '') + ' | ' + target.variant : project?.label || 'Application';
     const runModes = getAndroidDebugConfigurations().map((config, index) => ({ id: 'debug-' + index, label: config.name, action: 'debug' as const }));
+    const busy = !!this.operation;
+    const gradleLoading = this.operation?.action === 'refresh';
     this.snapshot = { type: 'buildState', projects: projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
-      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy: !!this.operation, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) };
+      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy, gradleLoading, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) };
     this.post(this.snapshot);
   }
 

@@ -191,7 +191,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         });
     }
 
-    /** 仅显式 APK 安装一次，无 -W 启动后按精确包查询唯一 PID；Java 不解析 NDK，attach 不进入本路径；同文件六组合/PID/取消回归。 */
+    /** 显式APK安装后以非阻塞调试启动并按精确包查询唯一PID；Java不解析NDK，attach不进入本路径；同文件六组合/PID/取消回归。 */
     protected async launchRequest(response: DebugProtocol.LaunchResponse): Promise<void> {
         await this.beginRequest(response, async () => {
             let config = this.config;
@@ -214,7 +214,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             const component = config.packageName + '/' + config.launchActivity;
             if (!/^[\w.$]+\/[\w.$]+$/.test(component)) throw new Error('Invalid Android launch component');
             this.consoleLog('Launching the app activity ' + component);
-            const output = await adbExec(adb, target.udid, ['shell', 'am', 'start', '-D', '-W', '-n', component], signal);
+            const output = await adbExec(adb, target.udid, ['shell', 'am', 'start', '-D', '-n', component], signal);
             if (/Error:|Exception|Status:\s*(?!ok\b)\S+/i.test(output)) throw new Error('Android launch failed: ' + output.trim());
             this.checkOpen();
             const pid = (await adbExec(adb, target.udid, ['shell', 'pidof', config.packageName], signal)).trim();

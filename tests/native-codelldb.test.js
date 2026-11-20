@@ -312,7 +312,7 @@ test('Native real DAP launch installs explicit APK once and queries the exact pa
   for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
   assert.equal(f.calls.some(call => call[0] === 'process-list'), false);
   assert.deepEqual(Array.from(f.calls.find(call => call[0] === 'adb' && call[3].includes('pidof'))[3]), ['shell', 'pidof', 'com.example.app']);
-  assert.equal(f.calls.find(call => call[0] === 'adb' && call[3].includes('am'))[3].includes('-W'), true);
+  assert.equal(f.calls.find(call => call[0] === 'adb' && call[3].includes('am'))[3].includes('-W'), false);
   assert.equal(f.calls.find(call => call[0] === 'launch')[3], 'MainActivity');
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.calls.filter(call => call[0] === 'jdwp-cleanup').length, 1);
 });

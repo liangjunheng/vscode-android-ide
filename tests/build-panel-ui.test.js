@@ -78,7 +78,11 @@ test('build panel UI renders safe options and routes all commands', () => {
   f.receive({ type: 'error', text: 'ADB timeout' });
   assert.equal(get('build-status').textContent, 'ADB timeout');
   assert.equal(get('build-status').classList?.failed, undefined);
-  f.receive({ ...state, busy: true, deviceLoading: false, status: 'Gradle :app:installDebug' });
+  f.receive({ ...state, busy: true, gradleLoading: false, deviceLoading: false, status: 'Starting Android debugger' });
+  assert.equal(get('build-project-loading').hidden, true);
+  assert.equal(get('build-target-loading').hidden, true);
+  assert.equal(get('build-refresh').disabled, false);
+  f.receive({ ...state, busy: true, gradleLoading: true, deviceLoading: false, status: 'Gradle :app:installDebug' });
   assert.equal(get('build-project-loading').hidden, false);
   assert.equal(get('build-target-loading').hidden, false);
   assert.equal(get('build-device-loading').hidden, true);

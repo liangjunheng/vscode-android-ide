@@ -454,6 +454,7 @@ test('android-build sync replays shared state without repeating discovery or los
   await initial;
   await f.action('target', ':app:Release');
   await f.action('runMode', 'debug-0');
+  assert.equal(f.last().gradleLoading, false);
   const selected = f.last();
   await f.action('sync'); assert.equal(f.last(), selected);
   await f.action('target', ':app:Debug'); await f.action('runMode', 'run');
