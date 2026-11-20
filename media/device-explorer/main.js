@@ -36,16 +36,20 @@
   function toolbarButton(title, name, handler) { const control = button(title, name, handler); control.children[0].className = 'explorer-toolbar-glyph explorer-glyph-' + name; return control; }
   // 文本使用textContent安全呈现，表格名称/单元格同时保留完整悬停值；Node>=22的UI六按钮回归及layout长值裁剪回归断言title与内容相同。
   const text = (tag, value, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = value == null ? '' : String(value); if (cls === 'cell' || cls === 'name') e.title = e.textContent; return e; };
+  // 清理错误浮层及自动关闭计时器；视图隐藏/断开时调用，不触发额外渲染。
+  function clearError() {
+    clearTimeout(errorTimer); errorTimer = undefined; errorText = '';
+  }
   // 关闭错误浮层并取消自动清除；错误文本可复制，其他操作不改变其生命周期。
   function dismissError() {
     if (!errorText) return;
-    clearTimeout(errorTimer); errorTimer = undefined; errorText = ''; render();
+    clearError(); render();
   }
-  // 显示错误并在5秒后自动关闭；新错误替换旧错误时重新开始同一计时，不依赖点击或轮询。
+  // 显示错误并在30秒后自动关闭；新错误替换旧错误时重新开始同一计时，不依赖点击或轮询。
   function setError(value) {
     if (!value) return;
     clearTimeout(errorTimer); errorText = value;
-    errorTimer = setTimeout(() => { errorTimer = undefined; if (errorText === value) { errorText = ''; render(); } }, 5000);
+    errorTimer = setTimeout(() => { errorTimer = undefined; if (errorText === value) { errorText = ''; render(); } }, 30000);
   }
   // 发送有效Explorer动作；错误浮层不因其他操作消失，ready握手语义保持不变。
   function action(name, extra) { if ((!state.serial || state.active === false) && name !== 'ready') return; post(Object.assign({ type: 'explorer', action: name }, extra || {})); }
@@ -396,20 +400,20 @@ function filesView(previous) {
     if (m.type === 'devices') { if (m.serial !== state.serial) { state.active = false; state.fetching = false; state.loading = false; render(); } return; }
     if (m.type === 'explorerConnection') {
       if (m.serial !== state.serial || m.connected !== false) return;
-      if (m.view === 'files') { state.fetching = false; state.loading = false; state.busy = false; state.directories.clear(); state.expanded = new Set(['/']); state.selected = []; }
+      if (m.view === 'files') { clearError(); state.fetching = false; state.loading = false; state.busy = false; state.directories.clear(); state.expanded = new Set(['/']); state.selected = []; }
       else { state.processes = []; state.processSelected = null; }
       render(); return;
     }
     if (m.type === 'deviceViewMode') {
       closeMenu();
       if (m.mode === 'explorer' || m.mode === 'processes') { state.tab = m.mode === 'processes' ? 'processes' : 'files'; render(); }
-      else { state.active = false; render(); }
+      else { clearError(); state.active = false; render(); }
       return;
     }
     if (m.type === 'explorerState') {
       if (m.serial !== state.serial) { state.directories.clear(); state.expanded = new Set(['/']); state.selected = []; state.processes = []; state.processSelected = null; }
-      if (m.tab !== state.tab || m.serial !== state.serial) { closeMenu(); clearTimeout(errorTimer); errorTimer = undefined; errorText = ''; state.busy = false; }
-      if (m.serial !== state.serial || m.active === false) { state.fetching = false; state.loading = false; }
+      if (m.tab !== state.tab || m.serial !== state.serial) { closeMenu(); clearError(); state.busy = false; }
+      if (m.serial !== state.serial || m.active === false) { clearError(); state.fetching = false; state.loading = false; }
       Object.assign(state, m); state.capabilities = m.capabilities || {}; state.tab = m.tab || state.tab;
       // Files切入且当前设备尚未收到根目录快照时先显示Loading，避免把未加载状态误报为空目录；收到/缓存根快照后交给真实进度消息结束加载。
       if (state.tab === 'files' && state.serial && state.active !== false && !state.directories.has('/')) { state.loading = true; }
@@ -452,7 +456,7 @@ function filesView(previous) {
   }
   // 文件键盘导航保持行选择且不关闭错误浮层；键盘回归验证箭头选择、菜单取消及进程复制。
   function keyboard(e){if(root.hidden)return;if(e.key==='Escape'){closeMenu();return;}if(window.DeviceProcessesView.handleKeyboard(state,e))return;if(state.tab!=='files'||!state.selected.length)return;const all=visibleEntries(),i=all.findIndex(x=>x.path===state.selected[0]),cur=all[i];if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const n=Math.max(0,Math.min(all.length-1,i+(e.key==='ArrowDown'?1:-1)));state.selected=[all[n].path];render();}else if(e.key==='ArrowRight'&&cur&&(cur.kind==='directory'||cur.directoryLink)){e.preventDefault();if(!state.expanded.has(cur.path))toggleDir(cur);}else if(e.key==='ArrowLeft'&&cur){e.preventDefault();if(state.expanded.has(cur.path))state.expanded.delete(cur.path);else state.selected=[parentOf(cur.path)];render();}else if(e.key==='Enter'&&cur){e.preventDefault();cur.kind==='directory'?toggleDir(cur):action('open',{paths:[cur.path]});}}
-  // 根拖放事件解析行目标，内部移动保留、移到空白/外部或结束清理；错误浮层由关闭按钮或5秒生命周期管理。
+  // 根拖放事件解析行目标，内部移动保留、移到空白/外部或结束清理；错误浮层由关闭按钮或30秒生命周期管理。
 
   root.addEventListener('dragover',(e)=>{e.preventDefault();const row=e.target?.closest?.('.file-row');if(row){const entry=(state.directories.get(parentOf(row.dataset.path))||[]).find(item=>item.path===row.dataset.path);selectDragTarget(entry);}else selectDragTarget(null);});root.addEventListener('dragleave',e=>{if(!e.relatedTarget||!root.contains(e.relatedTarget))selectDragTarget(null);});root.addEventListener('dragend',()=>selectDragTarget(null));root.addEventListener('drop',e=>dropUpload(e).catch(showUploadError));window.addEventListener('pagehide',cancelUpload);document.addEventListener('mousedown',(e)=>{if(state.menu&&!state.menu.contains(e.target))closeMenu();});document.addEventListener('keydown',keyboard);window.addEventListener('message',(e)=>receive(e.data||{}));
   window.addEventListener('pagehide', () => fileColumnObserver?.disconnect());

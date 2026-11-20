@@ -17,7 +17,7 @@ test('Explorer shows loading before the initial root snapshot',()=>{
   assert.equal(b.root.querySelector('.file-list').children[0].textContent,'Empty directory');
 });
 
-// Node>=22投递多行错误，经root捕获后执行原目标事件；覆盖错误浮层、关闭/复制、5秒生命周期及同次刷新同步新失败，不重复查询缓存。
+// Node>=22投递多行错误，经root捕获后执行原目标事件；覆盖错误浮层、关闭/复制、30秒生命周期及同次刷新同步新失败，不重复查询缓存。
 test('Explorer error toast persists through background updates and closes explicitly', () => {
   let b, refreshError;
   b = boot({ onSend: message => {
@@ -56,7 +56,7 @@ test('Explorer error toast persists through background updates and closes explic
   assert.equal(toast.querySelectorAll('button').length, 2);
   assert.equal(toast.querySelectorAll('button')[0].title, 'Copy error');
   assert.equal(toast.querySelectorAll('button')[1].title, 'Close error');
-  assert.deepEqual([...b.timers.values()].map(timer => timer.delay), [5000]);
+  assert.deepEqual([...b.timers.values()].map(timer => timer.delay), [30000]);
   toast.querySelectorAll('button')[1].click();
   assert.equal(b.timers.size, 1);
   assert.equal(errorText(b), '');
@@ -98,6 +98,9 @@ test('Explorer error toast persists through background updates and closes explic
   assert.ok(b.root.querySelector('.explorer-error-toast'));
   fail(); receive({ type: 'explorerLoading', serial: 's', fetching: false });
   assert.equal(errorText(b), '<read failed>\nPermission denied');
+  receive({ type: 'explorerState', serial: 's', tab: 'files', active: false });
+  assert.equal(errorText(b), ''); assert.equal(b.root.querySelector('.explorer-error-toast'), null);
+  receive({ type: 'explorerState', serial: 's', tab: 'files', active: true });
   receive({ type: 'explorerProgress', busy: false, error: '<read failed>\nPermission denied' });
   const toastBeforeCopy = b.root.querySelector('.explorer-error-toast'); toastBeforeCopy.querySelectorAll('button').find(button => button.title === 'Copy error').click();
   assert.equal(errorText(b), '<read failed>\nPermission denied');
@@ -216,7 +219,7 @@ test('failed drop keeps file rows selectable and shows all upload causes',async(
   assert.equal(list.children.find(node => node.dataset.path === '/dest').classList.contains('selected'),true);
 });
 
-// 文件输入事件展开嵌套本地错误；成功上传不清除错误，错误浮层由关闭按钮或5秒生命周期管理，不影响文件行。
+// 文件输入事件展开嵌套本地错误；成功上传不清除错误，错误浮层由关闭按钮或30秒生命周期管理，不影响文件行。
 test('upload input displays nested causes and clears old failures on success',async()=>{
   const b=boot({onSend:(m,ctx)=>{if(m.transferId)acknowledge(ctx,m);}});
   b.api.receive({type:'explorerState',serial:'s',tab:'files',active:true});
