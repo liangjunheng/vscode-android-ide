@@ -2,7 +2,7 @@
   "name": "vscode-android-ide",
   "displayName": "VSCode Android IDE",
   "description": "A VS Code Android IDE for managing devices, emulators, Logcat, and debugging without leaving your editor.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "liangjunheng",
   "license": "MIT",
   "repository": {
