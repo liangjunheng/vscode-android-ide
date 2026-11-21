@@ -77,7 +77,7 @@ function fixture(t, platform = 'linux') {
     return { moduleRoot: path.join(selection.projectRoot, ...selection.modulePath.slice(1).split(':')), roots: [], ...f.sourceModel };
   } };
   const debuggerModule = { exports: {} };
-  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : require(id), Promise });
+  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : require(id), Promise });
   const debugApi = { ...debuggerModule.exports, startAndroidDebugging: async (folder, config, target) => {
     (f.debugRequests ??= []).push({ folder, config, target });
     return debuggerModule.exports.startAndroidDebugging(folder, config, target);
@@ -86,7 +86,7 @@ function fixture(t, platform = 'linux') {
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, AbortController, console,
     process: { platform, env: {}, kill: pid => { assert.equal(pid, -f.held.pid); if (f.closeOnKill) f.held.finish(null, 'SIGTERM'); } },
-    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
+    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
       async query(root, signal) { if (f.toolingTasks) return f.toolingTasks; return f.parse(await f.controller.run({ controller: { signal } }, 'tooling-api', ['tasks'], root)); }
       async dispose() {}
     } } : require(id),
@@ -411,7 +411,7 @@ test('android-build actual Tooling API discovers the selected project variants',
   };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController,
-    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(state => states.push(state), path.resolve(__dirname, '..'));
   t.after(() => controller.dispose());
   const times = [];
@@ -619,6 +619,8 @@ test('android-build all six built-in configurations debug without Gradle install
     assert.equal(config.apkPath, undefined); assert.equal(config.androidApkInstalled, undefined);
     assert.equal(config.androidSourceRoots, undefined); assert.equal(config.sourcePaths, undefined);
     assert.equal(config.java?.sourcePaths, undefined);
+    assert.equal(config.native?.abi, 'auto');
+    assert.deepEqual(JSON.parse(JSON.stringify(config.native?.symbolSearchPaths)), []);
     assert.equal(f.calls.length, before + 1);
     assert.ok(f.calls.at(-1).args.includes('get-state'));
     assert.equal(f.modelCalls.length, 0);
@@ -631,11 +633,11 @@ test('android-build all six built-in configurations debug without Gradle install
 // 显式配置不被metadata覆盖，缺metadata也可启动；立即终止和启动取消不留下所属会话或监听。
 test('android-build preserves explicit Android and external options without model discovery', async t => {
   const f = fixture(t); await f.action('refresh');
-  for (const type of ['android-debug', 'android-tools', 'kotlin-jvm', 'third-party']) {
-    const selected = { name: 'Explicit ' + type, type, request: 'launch', ...(type === 'kotlin-jvm' ? { android: true } : {}),
+  for (const type of ['android-debug', 'android-tools', 'android-jvm', 'third-party']) {
+    const selected = { name: 'Explicit ' + type, type, request: 'launch', ...(type === 'android-jvm' ? { android: true } : {}),
       mode: type === 'android-tools' ? 'native' : 'dual', packageName: 'com.user.chosen', target: 'explicit-target', serial: 'explicit-serial',
       apkPath: '/explicit/app.apk', androidProjectRoot: '/explicit/root', preLaunchTask: 'user task', sourcePaths: ['top-src'],
-      java: { type: 'kotlin-jvm', sourcePaths: ['java-src'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
+      java: { type: 'android-jvm', sourcePaths: ['java-src'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
     f.configs = [selected]; fs.writeFileSync(f.metadata, '{invalid metadata must not be read');
     const snapshot = JSON.stringify(selected), before = f.calls.length;
     await f.action('debug', undefined, 'phone');
@@ -943,7 +945,7 @@ test('android-build real Windows source runner preserves generated init path wit
   const script = path.join(root, 'generated ! init.gradle'); fs.writeFileSync(script, '// fixture');
   fs.writeFileSync(path.join(root, 'gradlew.bat'), '@echo off\r\necho FIRST=%1\r\necho SECOND=%~2\r\nif not exist "%~2" exit /b 91\r\nif not "%~3"==":app:__dshSourceIndex" exit /b 92\r\n');
   const module = { exports: {} }, channel = { replace() {}, show() {}, dispose() {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(() => {});
   const text = await controller.run({ controller: new AbortController() }, path.join(root, 'gradlew.bat'), ['--init-script', script, ':app:__dshSourceIndex'], root, process.env, script);
   assert.ok(text.includes('FIRST=--init-script')); assert.ok(text.includes('SECOND=' + script), JSON.stringify({ text, script })); await controller.dispose();
@@ -1000,7 +1002,7 @@ test('android-build real Windows wrapper executes in a path with spaces', { skip
   const channel = { text: '', replace(s) { this.text = s; }, show() {}, dispose() {} };
   const vscode = { workspace: { isTrusted: true, findFiles: async () => [{ fsPath: path.join(root, 'gradlew.bat') }] }, window: { createOutputChannel: () => channel } };
   const module = { exports: {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
   const states = [], controller = new module.exports.AndroidBuildController(m => states.push(m));
   await controller.handle({ type: 'buildPanel', action: 'refresh' });
   assert.equal(states.at(-1).target, ':app:Debug');
@@ -1109,12 +1111,12 @@ test('Build-to-Explorer fallback occurs only for missing selected metadata and n
     await explorer.setContext('phone', true); await Promise.all([...explorer.scope.tasks]); scans = 0; lists.length = 0; posts.length = 0;
     await explorer.handle({ type: 'explorer', action: 'locateApp' });
     assert.equal(scans, 1); assert.equal(picks, 1);
-    assert.equal(posts.at(-1).type, 'explorerReveal'); assert.equal(posts.at(-1).path, '/data/data/com.example.other');
+    assert.equal(posts.findLast(m => m.type === 'explorerReveal').path, '/data/data/com.example.other');
     const release = path.join(f.root, 'app', 'build', 'outputs', 'apk', 'release'); fs.mkdirSync(release, { recursive: true });
     for (const invalid of ['{broken', JSON.stringify({ variantName: 'release', applicationId: '../evil' })]) {
       fs.writeFileSync(path.join(release, 'output-metadata.json'), invalid); scans = 0; picks = 0; lists.length = 0; posts.length = 0;
       await explorer.handle({ type: 'explorer', action: 'locateApp' });
-      assert.match(posts.at(-1).error, /JSON|Unexpected|property|Invalid applicationId/i);
+      assert.match(posts.findLast(m => m.type === 'explorerProgress').error, /JSON|Unexpected|property|Invalid applicationId/i);
       assert.equal(scans, 0); assert.equal(picks, 0); assert.equal(lists.length, 0);
       assert.equal(posts.some(m => m.type === 'explorerReveal'), false);
     }

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { omitAuto } from './autoConfig';
 
 export interface AndroidDebugTarget {
   serial: string;
@@ -12,14 +13,14 @@ export interface AndroidDebugTarget {
 // 提供Native/JVM/Dual各Launch/Attach六项兜底，每次返回独立选项；android-debugger-configurations.test.js断言矩阵与隔离。
 // 回归：Node>=22，node --test tests/android-debugger-configurations.test.js；断言模式及配置隔离。
 export function getAndroidDebugConfigurations(): vscode.DebugConfiguration[] {
-  const java = { type: 'kotlin-jvm', name: 'Android JVM' };
+  const java = { type: 'android-jvm', name: 'Android JVM', adapterJvmArgs: [] };
   return [
-    { type: 'android-debug', request: 'launch', name: 'Android: Android Native Debug Launch', mode: 'native', target: 'select', native: {} },
-    { type: 'android-debug', request: 'attach', name: 'Android: Android Native Debug Attach', mode: 'native', target: 'select', native: {} },
-    { type: 'android-debug', request: 'launch', name: 'Android: Android JVM Debug Launch', mode: 'java', target: 'select', java: { ...java } },
-    { type: 'android-debug', request: 'attach', name: 'Android: Android JVM Debug Attach', mode: 'java', target: 'select', java: { ...java } },
-    { type: 'android-debug', request: 'launch', name: 'Android: Android Dual(Native and JVM) Debug Launch', mode: 'dual', target: 'select', native: {}, java: { ...java } },
-    { type: 'android-debug', request: 'attach', name: 'Android: Android Dual(Native and JVM) Debug Attach', mode: 'dual', target: 'select', native: {}, java: { ...java } },
+    { type: 'android-debug', request: 'launch', name: 'Android: Android Native Debug Launch', mode: 'native', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', native: { abi: 'auto', symbolSearchPaths: [] } },
+    { type: 'android-debug', request: 'attach', name: 'Android: Android Native Debug Attach', mode: 'native', target: 'auto', pid: 'auto', native: {} },
+    { type: 'android-debug', request: 'launch', name: 'Android: Android JVM Debug Launch', mode: 'java', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', java: { ...java, sourcePaths: 'auto' } },
+    { type: 'android-debug', request: 'attach', name: 'Android: Android JVM Debug Attach', mode: 'java', target: 'auto', pid: 'auto', java: { ...java } },
+    { type: 'android-debug', request: 'launch', name: 'Android: Android Dual(Native and JVM) Debug Launch', mode: 'dual', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', native: { abi: 'auto', symbolSearchPaths: [] }, java: { ...java, sourcePaths: 'auto' } },
+    { type: 'android-debug', request: 'attach', name: 'Android: Android Dual(Native and JVM) Debug Attach', mode: 'dual', target: 'auto', pid: 'auto', native: {}, java: { ...java } },
   ];
 }
 
@@ -37,25 +38,34 @@ function externalConfigurations(folder?: vscode.WorkspaceFolder): vscode.DebugCo
   });
 }
 
-// 优先返回用户配置或显式内置 Native 默认项；输入工作区和优先策略，输出配置。
-// 回归：android-debugger-configurations.test.js 验证外部优先和内置优先两个入口。
+// 返回内置默认项或与其同名的外部配置；不同名外部项不能劫持内置入口。
+// 回归：android-debugger-configurations.test.js验证同名匹配和内置优先。
 export function findAndroidDebugConfiguration(folder?: vscode.WorkspaceFolder, preferBuiltIn = false): vscode.DebugConfiguration {
-  return (!preferBuiltIn && externalConfigurations(folder)[0]) || getAndroidDebugConfigurations()[0];
+  const builtIn = getAndroidDebugConfigurations()[0];
+  const matching = externalConfigurations(folder).find(config => config.name === builtIn.name);
+  return (!preferBuiltIn && matching) || builtIn;
 }
 
-// Build优先外部配置并以内置兜底；Processes展示三个内置Attach与全部有效外部项，取消不启动。回归：android-debugger-configurations.test.js及Processes调用链。
+// Launch仅采用与内置配置完全同名的外部项；不同名外部项不能劫持内置入口。Processes仍展示三个内置Attach和全部有效外部项。
+// 回归：android-debugger-configurations.test.js验证同名替换、不同名隔离、Attach外部保留和取消不启动。
 export async function selectAndroidDebugConfiguration(folder?: vscode.WorkspaceFolder, request?: 'launch' | 'attach'): Promise<vscode.DebugConfiguration | undefined> {
+  const builtIn = getAndroidDebugConfigurations();
   const external = externalConfigurations(folder);
   const configurations = request === 'attach'
-    ? [...getAndroidDebugConfigurations().filter(config => config.request === 'attach'), ...external]
-    : (external.length ? external : getAndroidDebugConfigurations()).filter(config => !request || config.request === request);
+    ? [...builtIn.filter(config => config.request === 'attach'), ...external]
+    : (() => {
+      const names = new Set(builtIn.filter(config => !request || config.request === request).map(config => config.name));
+      const matchingExternal = external.filter(config => names.has(config.name) && (!request || config.request === request));
+      return (matchingExternal.length ? matchingExternal : builtIn).filter(config => !request || config.request === request);
+    })();
   if (!configurations.length) throw new Error('No ' + request + ' debug configuration in launch.json');
-  const item = await vscode.window.showQuickPick(configurations.map(config => ({ label: config.name, description: config.type, config })), { placeHolder: request === 'attach' ? 'Select Android attach configuration' : external.length ? 'Select launch.json debug configuration' : 'Select built-in Android debug configuration' });
+  const item = await vscode.window.showQuickPick(configurations.map(config => ({ label: config.name, description: config.type, config })), { placeHolder: request === 'attach' ? 'Select Android attach configuration' : configurations.some(config => external.includes(config)) ? 'Select matching launch.json configuration' : 'Select built-in Android debug configuration' });
   return item?.config;
 }
 
 // 映射设备进程且保留外部选项与显式包名，Android统一入口隔离Native/JVM选项；android-debugger-configurations.test.js覆盖六模式、非法身份和输入不变。
 export function createAndroidDebugConfiguration(config: vscode.DebugConfiguration, target: AndroidDebugTarget): vscode.DebugConfiguration {
+  config = omitAuto(config);
   if (!config || typeof config.type !== 'string' || !['launch', 'attach'].includes(config.request)) throw new Error('Invalid Android debug configuration');
   if (!target.serial || !/^[\w.:-]+$/.test(target.serial)) throw new Error('Invalid Android device serial');
   for (const pid of [target.pid, target.processId]) {
@@ -94,7 +104,7 @@ export async function startAndroidDebugging(folder: vscode.WorkspaceFolder | und
     if (!await vscode.debug.startDebugging(folder, mapped)) throw new Error('Android debug session did not start');
     if (!started) throw new Error('Android debug session did not report a start event');
   } finally { listener.dispose(); }
-  if (mapped.type === 'android-tools' || mapped.type === 'android-debug' || (mapped.type === 'kotlin-jvm' && mapped.android)) {
+  if (mapped.type === 'android-tools' || mapped.type === 'android-debug' || (mapped.type === 'android-jvm' && mapped.android)) {
     try { await vscode.commands.executeCommand('workbench.view.debug'); }
     catch (error) { await vscode.window.showErrorMessage('Debug session started, but Run and Debug could not be opened: ' + String(error)); }
   }

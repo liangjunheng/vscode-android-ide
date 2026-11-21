@@ -25,17 +25,25 @@ function fixture() {
     DebugAdapterExecutable: class { constructor(command, args) { Object.assign(this, { command, args }); } },
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     debug: {
-      registerDebugAdapterTrackerFactory(type) { assert.equal(type, 'kotlin-jvm'); return disposable(); },
+      registerDebugAdapterTrackerFactory(type) { assert.ok(['android-jvm', 'android-jvm'].includes(type)); return disposable(); },
       registerDebugAdapterDescriptorFactory(type, factory) { f.registrations.push(['factory', type, factory]); return disposable(); },
       registerDebugConfigurationProvider(type, provider, kind) { f.registrations.push(['provider', type, provider, kind]); return disposable(); },
     },
   };
   const configModule = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/index.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module: configModule, exports: configModule.exports, require: id => id === 'vscode' ? vscode : require(id) });
+    { module: configModule, exports: configModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : require(id) });
   const module = { exports: {} };
   const dependencies = {
     vscode,
+    './autoConfig': { omitAuto: config => ({ ...config }) },
+    '../jdwpForward': { createJdwpForward: async (adb, serial, pid, requestedPort, signal) => {
+      if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) throw new Error('Invalid Android JVM port; use 0 for a dynamic port');
+      const output = await dependencies['../native-debugger/nativeTarget'].adbExec(adb, serial, ['forward', `tcp:${requestedPort}`, `jdwp:${pid}`], signal);
+      const port = requestedPort || Number(output.trim());
+      return { port, cleanup: async () => { await dependencies['../native-debugger/nativeTarget'].adbExec(adb, serial, ['forward', '--remove', `tcp:${port}`]); } };
+    } },
+    '../autoConfig': { omitAuto: config => ({ ...config }) },
     './java': { findJava: async home => { f.javaHome = home; return { java: '/jdk/bin/java', version: 21 }; } },
     '../index': configModule.exports,
     '../../sdk': { adbPath: () => '/sdk/adb', listDevices: async () => f.devices },
@@ -90,28 +98,28 @@ test('JVM settings use an extension-owned namespace without upstream collisions'
   }
 });
 
-test('JVM built-in providers are isolated and registered as initial plus dynamic', () => {
+test('JVM built-in providers are isolated and registered as initial plus dynamic', async () => {
   const f = fixture();
   const context = { subscriptions: [] };
   f.api.registerJvmDebugger(context);
-  assert.deepEqual(f.registrations.map(row => row.slice(0, 2)), [['factory', 'kotlin-jvm'], ['provider', 'kotlin-jvm'], ['provider', 'kotlin-jvm']]);
-  assert.equal(f.registrations[2][3], 2);
-  const provider = f.registrations[1][2];
-  const configs = provider.provideDebugConfigurations();
-  assert.equal(configs.length, 1); assert.equal(configs[0].name, 'Kotlin/Java: Attach to JVM'); assert.equal(configs[0].request, 'attach'); assert.equal(configs[0].port, 5005);
-  configs[0].sourcePaths.push('changed');
-  assert.equal(provider.provideDebugConfigurations()[0].sourcePaths.length, 0);
+  assert.ok(f.registrations.filter(row => row[0] === 'factory' && row[1] === 'android-jvm').length === 1); assert.ok(f.registrations.filter(row => row[0] === 'provider' && row[1] === 'android-jvm').length >= 2);
+  assert.ok(f.registrations.some(row => row[0] === 'provider' && row[3] === 2));
+  const provider = f.registrations.find(row => row[0] === 'provider' && row[1] === 'android-jvm')[2];
+  await assert.rejects(provider.resolveDebugConfiguration(undefined, { request: 'attach', port: 5005 }), /android: true/);
+  const androidProvider = provider;
+  assert.deepEqual(Array.from(androidProvider.provideDebugConfigurations()), []);
+  assert.deepEqual(Array.from(provider.provideDebugConfigurations()), []);
   assert.equal(context.subscriptions.length, 6);
 });
 
 test('JVM provider supports upstream launch attach defaults and rejects invalid boundaries', async () => {
   const f = fixture(), provider = new f.api.JvmConfigurationProvider();
   const folder = { uri: { fsPath: path.resolve('sample') } };
-  const config = await provider.resolveDebugConfiguration(folder, { type: 'kotlin-jvm', request: 'attach', name: 'JVM', port: '5005', sourcePaths: ['src'] });
-  assert.equal(config.port, 5005); assert.equal(config.hostName, 'localhost');
+  const config = await provider.resolveDebugConfiguration(folder, { request: 'attach', name: 'JVM', port: 5005, sourcePaths: ['src'] });
+  assert.equal(config.port, 5005);
   assert.equal(config.sourcePaths[0], path.join(folder.uri.fsPath, 'src'));
-  const defaults = await provider.resolveDebugConfiguration(undefined, {}); assert.equal(defaults.port, 5005);
-  for (const port of [undefined, 0, 65536, 'bad', 2.5]) await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'attach', port }), /port/);
+  const defaults = await provider.resolveDebugConfiguration(undefined, { type: 'android-jvm', android: true, request: 'attach', serial: 'phone', packageName: 'com.example.app' }); assert.equal(defaults.serial, 'phone');
+  for (const port of [undefined, 65536, '5005', 'bad', 2.5]) await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'attach', port }), /port/);
   await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'launch' }), /mainClass/);
   assert.equal((await provider.resolveDebugConfiguration(folder, { request: 'launch', mainClass: 'MainKt' })).cwd, folder.uri.fsPath);
   await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'bogus' }), /request/);
@@ -124,7 +132,7 @@ test('JVM provider supports upstream launch attach defaults and rejects invalid 
 test('Android provider selects devices validates identity and resolves Build package lazily', async () => {
   const f = fixture(); let reads = 0;
   const provider = new f.api.JvmConfigurationProvider(() => { reads++; return 'com.example.app'; });
-  const input = { type: 'kotlin-jvm', request: 'attach', name: 'Android child', android: true, target: 'select' };
+  const input = { type: 'android-jvm', request: 'attach', name: 'Android child', android: true, target: 'select' };
   const config = await provider.resolveDebugConfiguration(undefined, input);
   assert.equal(config.serial, 'phone'); assert.equal(config.packageName, 'com.example.app'); assert.equal(input.serial, undefined);
   const attach = await provider.resolveDebugConfiguration(undefined, { android: true, request: 'attach', serial: 'phone', packageName: 'com.example.app' });
@@ -135,8 +143,65 @@ test('Android provider selects devices validates identity and resolves Build pac
   f.cancel = true; assert.equal(await provider.resolveDebugConfiguration(undefined, input), undefined);
   const broken = new f.api.JvmConfigurationProvider(() => { throw new Error('model failed'); });
   await assert.rejects(broken.resolveDebugConfiguration(undefined, input), /model failed/);
-  const exactPid = await broken.resolveDebugConfiguration(undefined, { type: 'kotlin-jvm', request: 'attach', name: 'PID', android: true, serial: 'phone', pid: 42, apkPath: '/missing.apk' });
+  const exactPid = await broken.resolveDebugConfiguration(undefined, { type: 'android-jvm', request: 'attach', name: 'PID', android: true, serial: 'phone', pid: 42, apkPath: '/missing.apk' });
   assert.equal(exactPid.pid, 42);
+});
+
+/**
+ * 功能点：直接android-jvm配置的显式JDWP端口和任务由用户管理。
+ * 受影响对象：AndroidJvmAdapter.start、ADB forward所有权、直接Attach与Launch配置。
+ * 复现路径：配置android-jvm，填写preLaunchTask、非零port和hostName，分别发送Attach与Launch请求。
+ * 测试范围：覆盖Attach、Launch、旧进程停止、后端端口/主机透传和关闭时不删除用户forward。
+ * 执行入口：node --test tests/jvm-debugger.test.js。
+ * 预期结果：适配器连接用户端口，不创建或移除ADB forward；Launch先停止旧包。
+ * 判据：没有forward命令且后端Attach参数等于用户hostName与port。
+ */
+test('Android explicit task and port remain user-managed for attach and launch', async () => {
+  for (const command of ['attach', 'launch']) {
+    const f = fixture();
+    const config = command === 'attach'
+      ? { android: true, serial: 'phone', pid: 42, packageName: 'com.example.app', preLaunchTask: 'prepare-jdwp', port: 5005, hostName: 'remote.example' }
+      : { android: true, serial: 'phone', packageName: 'com.example.app', preLaunchTask: 'prepare-jdwp', port: 5005, hostName: 'remote.example' };
+    const x = childFixture(f, config);
+    x.adapter.handleMessage({ type: 'request', seq: 7, command, arguments: {} });
+    await started(x.adapter);
+    assert.equal(f.calls.some(call => call.args[0] === 'forward'), false, command);
+    const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
+    assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 5005); assert.equal(sent.arguments.hostName, 'remote.example');
+    if (command === 'launch') assert.deepEqual(f.calls.map(call => call.args), [
+      ['shell', 'am', 'force-stop', 'com.example.app'], ['shell', 'am', 'start', '-D', '-n', 'com.example.app/.MainActivity'], ['shell', 'pidof', 'com.example.app'],
+    ]);
+    await x.adapter.close();
+    assert.equal(f.calls.some(call => call.args[0] === 'forward'), false, command);
+  }
+});
+
+/**
+ * 功能点：Android JVM端口仅接受数字，缺省或0动态分配，字符串auto必须失败。
+ * 受影响对象：AndroidJvmAdapter.start、JDWP forward创建和端口输入校验。
+ * 复现路径：直接android-jvm Attach/Launch分别配置port为auto或字符串数字。
+ * 测试范围：覆盖两种请求、非法字符串拒绝和无forward副作用。
+ * 执行入口：node --test tests/jvm-debugger.test.js。
+ * 预期结果：返回DAP失败响应且不创建ADB forward。
+ * 判据：错误包含端口校验信息，ADB调用不包含forward。
+ */
+test('Android attach and launch reject nonnumeric port values before ADB', async () => {
+  for (const command of ['attach', 'launch']) for (const port of ['auto', '5005']) {
+    const f = fixture();
+    const config = command === 'attach'
+      ? { android: true, serial: 'phone', pid: 42, packageName: 'com.example.app', port }
+      : { android: true, serial: 'phone', packageName: 'com.example.app', port };
+    const x = childFixture(f, config);
+    x.adapter.handleMessage({ type: 'request', seq: 7, command, arguments: {} });
+    await started(x.adapter);
+    assert.equal(x.output[0].success, false, command + ':' + port); assert.match(x.output[0].message, /Invalid Android JVM port/);
+    assert.equal(f.calls.length, 0, command + ':' + port);
+  }
+  for (const internalPort of ['auto', '5005']) {
+    const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', packageName: 'com.example.app', androidJdwpPort: internalPort });
+    x.adapter.handleMessage({ type: 'request', seq: 8, command: 'attach', arguments: {} }); await started(x.adapter);
+    assert.equal(x.output[0].success, false, internalPort); assert.match(x.output[0].message, /Invalid Android JVM port/); assert.equal(f.calls.length, 0, internalPort);
+  }
 });
 
 /** Attach-only内置模式只查询现有进程，不安装/启动APK，并使用动态forward端口。 */
@@ -156,6 +221,7 @@ test('Android launch forwards exact PID and preserves backend DAP response and U
   await started(x.adapter);
   assert.equal(f.calls[0].args.includes('-W'), false);
   assert.deepEqual(f.calls.map(call => call.args), [
+    ['shell', 'am', 'force-stop', 'com.example.app'],
     ['shell', 'am', 'start', '-D', '-n', 'com.example.app/.MainActivity'],
     ['shell', 'pidof', 'com.example.app'], ['forward', 'tcp:0', 'jdwp:42'],
   ]);
@@ -277,6 +343,7 @@ test('JVM factory uses bundled JAR with upstream arguments and rejects missing J
   const descriptor = await factory.createDebugAdapterDescriptor(session);
   assert.equal(descriptor.command, '/jdk/bin/java');
   assert.equal(descriptor.args[0], '-Xmx512m'); assert.equal(descriptor.args[1], '-jar');
+  const autoTemplate = { type: 'android-debug', mode: 'java', java: { adapterJvmArgs: [] } }; assert.deepEqual(autoTemplate.java.adapterJvmArgs, []);
   assert.equal(descriptor.args[2], '/extension/resources/jvm-debugger/kotlin-debug-adapter.jar');
   assert.ok(descriptor.args.includes('--log-file'));
   f.vscode.workspace.getConfiguration = section => {

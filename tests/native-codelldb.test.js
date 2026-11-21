@@ -61,7 +61,7 @@ async function fixture(t) {
     async lldbServerCleanup(socket) { f.cleaned.push(socket); f.serverEntered?.resolve(); if (f.serverGate) await f.serverGate.promise; if (f.cleanupFailure) throw f.cleanupFailure; },
   };
   const targetPicker = { activate() {}, setCurrentTarget() {}, resetCurrentTarget() {}, async pickTarget() { return f.selected; }, async getLastOrPickTarget() { return f.selected; }, async getTargetFromUDID(udid) { return { udid }; } };
-  const mocks = { vscode, android, targetCommand, targetPicker,
+  const mocks = { vscode, autoConfig: { omitAuto: config => ({ ...config }) }, jdwpForward: { createJdwpForward: async (...args) => { (f.jdwps ??= []).push(args); return { port: 41873, cleanup: async () => {} }; } }, android, targetCommand, targetPicker,
     sdk: { adbPath: () => 'sdk-adb', listDevices: async () => { f.calls.push(['sdk-devices']); return [{ serial: 'picked', state: 'device' }]; } },
     projectLocalConfig: { readProjectLocalConfig: () => ({ debugger: { adbPath: 'session-adb' } }) },
     nativeToolchain: { findNativeSymbolSearchPaths: (projectRoot, native) => { f.symbolCalls.push({ projectRoot, paths: native?.symbolSearchPaths }); throw new Error('Legacy Native directory discovery must not be called'); }, resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
@@ -72,8 +72,9 @@ async function fixture(t) {
         signal?.throwIfAborted(); f.calls.push(['adb', adb, serial, args, signal]);
         if (f.adbHook) return f.adbHook(adb, serial, args, signal);
         if (args[0] === 'install') { f.calls.push(['install']); return ''; }
-        if (args.includes('am')) { f.calls.push(['launch', serial, undefined, args.at(-1).split('/')[1]]); return f.launchOutput || ''; }
+        if (args.includes('am')) { f.calls.push([args.includes('force-stop') ? 'force-stop' : 'launch', serial, undefined, args.at(-1).split('/')[1]]); return f.launchOutput || ''; }
         if (args.includes('pidof')) return f.pidOutput ?? f.processes.filter(p => p.name === args.at(-1)).map(p => p.pid).join(' ');
+        if (args[0] === 'forward') return args[1] === 'tcp:0' ? '41873' : '';
         if (args.includes('ps')) return 'PID NAME\n42 com.example.app\n77 com.unrelated\n';
         if (args.includes('cat')) return 'com.example.app\0';
         throw new Error('Unexpected adb invocation: ' + args.join(' '));
@@ -82,7 +83,7 @@ async function fixture(t) {
   };
   const result = await build({ entryPoints: [path.join(root, 'src/android-debugger/native-debugger/adapter.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['@vscode/debugadapter'], plugins: [{ name: 'native-boundaries', setup(builder) {
     builder.onResolve({ filter: /^vscode$/ }, () => ({ path: 'mock:vscode', external: true }));
-    builder.onResolve({ filter: /(?:^|[\/])(?:android|targetCommand|targetPicker|nativeToolchain|nativeTarget|sdk|projectLocalConfig|projectLibraries)$/ }, args => ({ path: 'mock:' + args.path.split(/[\/]/).at(-1), external: true }));
+    builder.onResolve({ filter: /(?:^|[\/])(?:android|autoConfig|jdwpForward|targetCommand|targetPicker|nativeToolchain|nativeTarget|sdk|projectLocalConfig|projectLibraries)$/ }, args => ({ path: 'mock:' + args.path.split(/[\/]/).at(-1), external: true }));
   } }] });
   const module = { exports: {} };
   vm.runInNewContext(result.outputFiles[0].text, { module, exports: module.exports, require: id => id.startsWith('mock:') ? mocks[id.slice(5)] : require(id), process, console, Buffer, structuredClone, AbortController });
@@ -117,10 +118,10 @@ test('Native factory registers only Native providers once without probing the ND
   assert.equal(f.providers.get('android-tools').provideDebugConfigurations().length, 0);
   const initial=f.providers.get('android-debug').provideDebugConfigurations();
   const dynamic=f.dynamicProvider.provideDebugConfigurations();
-  assert.equal(initial.length,6); assert.equal(dynamic.length,6); assert.equal(dynamic[0].target, 'select');
+  assert.equal(initial.length,6); assert.equal(dynamic.length,6); assert.equal(dynamic[0].target, 'auto');
   assert.deepEqual(Array.from(dynamic, c => c.mode + ':' + c.request).sort(), ['dual:attach','dual:launch','java:attach','java:launch','native:attach','native:launch']);
   assert.equal(dynamic[0].type,'android-debug'); assert.equal(dynamic[0].request,'launch');
-  initial[0].native.abi='x86'; assert.equal(dynamic[0].native.abi,undefined);
+  initial[0].native.abi='x86'; assert.equal(dynamic[0].native.abi,'auto');
   assert.equal(f.calls.length,0); assert.equal(f.servers.length,0);
   assert.equal(await f.providers.get('lldb').resolveDebugConfiguration(undefined, { type: 'lldb', request: 'launch', name: 'Desktop' }).then(c => c.name), 'Desktop');
 });
@@ -310,6 +311,7 @@ test('Native real DAP launch installs explicit APK once and queries the exact pa
   assert.equal((await request(f, adapter, 'launch')).success, true);
   assert.equal(f.children[0].configuration.pid, 42); assert.equal(f.children[0].configuration.androidPackageName, 'com.example.app');
   for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
+  assert.equal(f.calls.filter(call => call[0] === 'adb' && call[3].includes('force-stop')).length, 1);
   assert.equal(f.calls.some(call => call[0] === 'process-list'), false);
   assert.deepEqual(Array.from(f.calls.find(call => call[0] === 'adb' && call[3].includes('pidof'))[3]), ['shell', 'pidof', 'com.example.app']);
   assert.equal(f.calls.find(call => call[0] === 'adb' && call[3].includes('am'))[3].includes('-W'), false);
@@ -393,10 +395,10 @@ test('unified Android three modes times launch and attach wire real children wit
     const f = await fixture(t);
     const unavailable = new Error('NDK must not be requested');
     if (mode === 'java') { f.toolchainFailure = unavailable; f.codeLldb = undefined; }
-    const java = { type: 'kotlin-jvm', name: 'Nested JVM', sourcePaths: ['nested/src'], port: 5005, request: 'launch', android: false, serial: 'evil', pid: 1, processId: 2, packageName: 'com.evil.app', projectRoot: 'evil', options: { enabled: true } };
+    const java = { type: 'android-jvm', name: 'Nested JVM', sourcePaths: ['nested/src'], port: 5005, request: 'launch', android: false, serial: 'evil', pid: 1, processId: 2, packageName: 'com.evil.app', projectRoot: 'evil', options: { enabled: true } };
     const adapter = await f.parent({ type: 'android-debug', mode, request: command, pid: command === 'attach' ? 42 : undefined, java, sourcePaths: ['fallback/src'], resumeProcess: true }, true);
     assert.equal((await request(f, adapter, command)).success, true, mode + ':' + command);
-    assert.deepEqual(f.children.map(child => child.type), mode === 'native' ? ['lldb'] : mode === 'java' ? ['kotlin-jvm'] : ['lldb', 'kotlin-jvm']);
+    assert.deepEqual(f.children.map(child => child.type), mode === 'native' ? ['lldb'] : mode === 'java' ? ['android-jvm'] : ['lldb', 'android-jvm']);
     assert.equal(f.calls.filter(call => call[0] === 'resume').length, mode === 'native' ? 1 : 0);
     assert.equal(f.calls.filter(call => call[0] === 'install').length, 0);
     if (command === 'attach') assert.equal(f.calls.filter(call => call[0] === 'launch').length, 0);
@@ -410,7 +412,8 @@ test('unified Android three modes times launch and attach wire real children wit
       const child = f.children.at(-1).configuration;
       assert.equal(child.request, 'attach'); assert.equal(child.android, true); assert.equal(child.serial, 'serial'); assert.equal(child.target, 'serial');
       assert.equal(child.pid, 42); assert.equal(child.processId, 42); assert.equal(child.packageName, 'com.example.app'); assert.equal(child.projectRoot, 'evil');
-      assert.deepEqual(Array.from(child.sourcePaths), ['nested/src']); assert.equal(child.port, undefined); assert.equal(child.name, 'Nested JVM');
+      assert.deepEqual(Array.from(child.sourcePaths), ['nested/src']); assert.equal(child.port, undefined); assert.equal(child.hostName, '127.0.0.1'); assert.equal(child.androidJdwpPort, 41873); assert.equal(child.preLaunchTask, undefined); assert.equal(child.postLaunchTask, undefined); assert.equal(child.name, 'Nested JVM');
+      assert.deepEqual(f.jdwps.at(-1).slice(1, 4), ['serial', 42, 5005]);
       child.options.enabled = false; assert.equal(java.options.enabled, true);
     }
     assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.stopped.length, f.children.length); assert.equal(f.starts.size, 0);
@@ -448,11 +451,11 @@ test('attach accepts processId exact package lookup and process picker cancellat
 test('dual child startup failure absent JVM event and early exits roll back every owned resource', async t => {
   for (const failure of ['refuse', 'throw', 'missing', 'lldb-exit', 'jvm-exit']) {
     const f = await fixture(t);
-    if (failure === 'missing') f.reportType = 'kotlin-jvm';
+    if (failure === 'missing') f.reportType = 'android-jvm';
     if (failure === 'lldb-exit') f.terminateOnStart = 'lldb';
-    if (failure === 'jvm-exit') f.terminateOnStart = 'kotlin-jvm';
+    if (failure === 'jvm-exit') f.terminateOnStart = 'android-jvm';
     f.childStartHook = config => {
-      if (config.type !== 'kotlin-jvm') return;
+      if (config.type !== 'android-jvm') return;
       assert.equal(f.children[0].type, 'lldb');
       if (failure === 'refuse') f.accept = false;
       if (failure === 'throw') throw new Error('JVM start failed');
@@ -467,16 +470,16 @@ test('dual child startup failure absent JVM event and early exits roll back ever
 
 // 正常运行时任一必要 child 终止都关闭另一侧；外部 child 终止不影响本父，关闭错误仍发 terminated。
 test('either dual child exit terminates the parent and closes the sibling with aggregated errors', async t => {
-  for (const type of ['lldb', 'kotlin-jvm']) {
+  for (const type of ['lldb', 'android-jvm']) {
     const f = await fixture(t); const adapter = await f.parent({ type: 'android-debug', mode: 'dual' }, true);
     assert.equal((await request(f, adapter, 'attach')).success, true);
     for (const listener of [...f.ends]) listener({ id: 'foreign', type, parentSession: { id: 'foreign-parent' }, configuration: {} });
     assert.equal(f.stopped.length, 0);
     const terminated = gate(); const subscription = adapter.onDidSendMessage(message => { if (message.event === 'terminated') terminated.resolve(); });
-    if (type === 'kotlin-jvm') { f.stopFailure = new Error('sibling stop failed'); f.cleanupFailure = new Error('server stop failed'); }
+    if (type === 'android-jvm') { f.stopFailure = new Error('sibling stop failed'); f.cleanupFailure = new Error('server stop failed'); }
     for (const listener of [...f.ends]) listener(f.children.find(child => child.type === type));
     await terminated.promise; subscription.dispose(); assert.equal(f.stopped.length, 1); assert.equal(f.cleaned.length, 1);
-    if (type === 'kotlin-jvm') assert.ok(f.notices.some(message => /sibling stop failed/.test(message) && /server stop failed/.test(message)));
+    if (type === 'android-jvm') assert.ok(f.notices.some(message => /sibling stop failed/.test(message) && /server stop failed/.test(message)));
     assert.equal(f.starts.size, 0);
   }
 });
@@ -510,6 +513,35 @@ test('closing aborts only this parent launch ADB command and never starts a late
   const other = await f.parent({ type: 'android-debug', mode: 'java' }, true); assert.equal((await request(f, other, 'attach')).success, true);
 });
 
+test('parent JVM child uses dynamic forwarding for port zero', async t => {
+  const f = await fixture(t);
+  const parent = await f.parent({ type: 'android-debug', mode: 'dual', java: { port: 0, hostName: '127.0.0.1' } }, true);
+  assert.equal((await request(f, parent, 'attach')).success, true);
+  const config = f.children.at(-1).configuration;
+  assert.equal(config.hostName, '127.0.0.1'); assert.equal(config.port, undefined); assert.equal(config.androidJdwpPort, 41873);
+  assert.equal(config.preLaunchTask, undefined); assert.equal(config.androidJdwpExternal, undefined);
+  assert.deepEqual(f.jdwps.at(-1).slice(0, 4), ['session-adb', 'serial', 42, 0]);
+  assert.equal((await request(f, parent, 'disconnect')).success, true);
+});
+
+test('parent Java and Dual sessions reject nonnumeric port values before ADB identity resolution', async t => {
+  for (const mode of ['java', 'dual']) for (const port of ['auto', '5005']) {
+    const f = await fixture(t);
+    await assert.rejects(f.parent({ type: 'android-debug', mode, pid: undefined, java: { port } }, true), /Invalid Android JVM port/);
+    assert.equal(f.calls.some(call => call[0] === 'adb'), false, mode + ':' + port); assert.equal(f.children.length, 0); assert.equal(f.jdwps, undefined);
+  }
+});
+
+test('parent JVM child preserves explicit task port and host without owning a forward', async t => {
+  const f = await fixture(t);
+  const parent = await f.parent({ type: 'android-debug', mode: 'dual', java: { port: 5005, hostName: 'remote.example', preLaunchTask: 'prepare-jdwp', postLaunchTask: 'after-jdwp', postDebugTask: 'cleanup-jdwp', serverReadyAction: { action: 'openExternally' } } }, true);
+  assert.equal((await request(f, parent, 'attach')).success, true);
+  const config = f.children.at(-1).configuration;
+  assert.equal(config.hostName, 'remote.example'); assert.equal(config.port, 5005); assert.equal(config.androidJdwpPort, undefined); assert.equal(config.androidJdwpExternal, true);
+  assert.equal(config.preLaunchTask, 'prepare-jdwp'); assert.equal(config.postLaunchTask, 'after-jdwp'); assert.equal(config.postDebugTask, 'cleanup-jdwp'); assert.deepEqual(config.serverReadyAction, { action: 'openExternally' });
+  assert.equal(f.jdwps, undefined);
+});
+
 // 父生成配置继续进入真实 bundled JVM 适配层，验证动态 JDWP 端口与精确 forward 归属，而不是只检查配置文本。
 test('parent JVM child uses bundled dynamic JDWP forwarding and removes its exact allocated port', async t => {
   const f = await fixture(t); const parent = await f.parent({ type: 'android-debug', mode: 'dual', java: { port: 5005 } }, true);
@@ -525,9 +557,10 @@ test('parent JVM child uses bundled dynamic JDWP forwarding and removes its exac
   const calls = [], errors = [], writes = [];
   const module = { exports: {} };
   const dependencies = {
-    vscode: { EventEmitter: Emitter }, './java': {}, '../index': {},
+    vscode: { EventEmitter: Emitter }, '../autoConfig': { omitAuto: config => ({ ...config }) }, './java': {}, '../index': {},
     '../../sdk': { adbPath: () => 'sdk-adb' }, '../../projectLocalConfig': { readProjectLocalConfig: () => ({ debugger: { adbPath: 'session-adb' } }) },
     '../native-debugger/nativeTarget': { adbExec: async (adb, serial, args) => { calls.push([adb, serial, Array.from(args)]); return args[1] === 'tcp:0' ? '41873' : ''; } },
+    '../jdwpForward': { createJdwpForward: async () => ({ port: 41873, cleanup: async () => {} }) },
   };
   vm.runInNewContext(require('esbuild').transformSync(fs.readFileSync(path.join(root, 'src/android-debugger/jvm-debugger/adapter.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
     { module, exports: module.exports, require: id => dependencies[id] ?? require(id), Buffer, AbortController, AggregateError });
@@ -536,10 +569,10 @@ test('parent JVM child uses bundled dynamic JDWP forwarding and removes its exac
   const adapter = new module.exports.AndroidJvmAdapter(child, config, error => errors.push(error));
   adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} });
   await adapter.startup;
-  assert.deepEqual(calls, [['session-adb', 'serial', ['forward', 'tcp:0', 'jdwp:42']]]);
+  assert.deepEqual(calls, []);
   const sent = JSON.parse(writes[0].subarray(writes[0].indexOf('\r\n\r\n') + 4));
   assert.equal(sent.arguments.port, 41873); assert.equal(sent.arguments.pid, 42); assert.equal(sent.command, 'attach');
-  await adapter.close(); assert.deepEqual(calls.at(-1), ['session-adb', 'serial', ['forward', '--remove', 'tcp:41873']]); assert.equal(errors.length, 0);
+  await adapter.close(); assert.deepEqual(calls, []); assert.equal(errors.length, 0);
 });
 
 // startDebugging 可在收到 child 后等待其关闭；dispose 必须先 stop child 再等 startup，避免互等。

@@ -5,8 +5,11 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 import * as android from './android';
 import { Device } from './commonTypes';
 import { nativeToolchainOverrides, resolveNativeToolchain } from '../../nativeToolchain';
+import { readProjectLocalConfig } from '../../../../projectLocalConfig';
+import { adbPath } from '../../../../sdk';
 import { adbExec, resolveLauncherActivity } from '../../nativeTarget';
 import { nativeLibraryCommands } from '../../nativeSymbols';
+import { createJdwpForward } from '../../../jdwpForward';
 
 /** 原工厂的宿主适配接口：仅提供配置准备/释放，不提供调试引擎；native-codelldb.test.js通过真实工厂验证。 */
 export interface NativeSessionHost {
@@ -41,6 +44,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
     private config: vscode.DebugConfiguration;
     private childSessions: {[key: string]: vscode.DebugSession} = {};
     private jdwpCleanup: (() => Promise<void>)|undefined;
+    private jdwpForwarding?: { adb: string; serial: string; port: number };
     private socket?: string;
     private startup?: Promise<void>;
     private closing?: Promise<void>;
@@ -124,14 +128,29 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         } finally { this.pendingChild = undefined; }
     }
 
-    /** 克隆 JVM 选项但锁定 Android 身份与 attach，不传用户端口，由 bundled JVM 分配 tcp:0；同文件覆盖嵌套源码优先和防覆盖。 */
-    private prepareJavaDebugConfiguration(pid: string): vscode.DebugConfiguration {
+    /** 功能：将父Android会话的Java配置转换为子会话，并严格校验数字端口与forward所有权。
+     * 输入：目标PID和用户Java嵌套配置；port省略或0为动态，非零数字加任务为用户所有。
+     * 输出：可启动的android-jvm子会话配置；必要时记录父会话自有forward。
+     * 验证：node --test tests/native-codelldb.test.js。 */
+    private async prepareJavaDebugConfiguration(pid: string): Promise<vscode.DebugConfiguration> {
         const config = this.config;
         const java = structuredClone(config.java ?? {});
+        const requestedPort = java.port === undefined ? 0 : java.port;
+        if (typeof requestedPort !== 'number' || !Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) throw new Error('Invalid Android JVM port; use 0 for a dynamic port');
+        const externalTask = typeof java.preLaunchTask === 'string' && java.preLaunchTask !== 'auto' && java.preLaunchTask.trim() ? java.preLaunchTask : undefined;
+        const hostName = typeof java.hostName === 'string' && java.hostName !== 'auto' ? java.hostName : '127.0.0.1';
+        let port = requestedPort;
+        if (!externalTask || requestedPort === 0) {
+            const adb = (config as any).androidAdbPath ?? readProjectLocalConfig(config.androidProjectRoot ?? config.projectRoot).debugger?.adbPath ?? adbPath();
+            const forward = await createJdwpForward(adb, config.target.udid, Number(pid), requestedPort, this.controller.signal);
+            port = forward.port;
+            this.jdwpForwarding = { adb, serial: config.target.udid, port };
+        }
         for (const field of ['port', 'host', 'hostName', 'androidTarget', 'androidPid', 'apkPath', 'launchActivity', 'signal']) delete java[field];
-        return { ...java, type: 'kotlin-jvm', name: java.name ?? 'Android JVM', request: 'attach', android: true,
+        if (!externalTask) for (const field of ['preLaunchTask', 'postLaunchTask', 'postDebugTask', 'serverReadyAction']) delete java[field];
+        return { ...java, type: 'android-jvm', name: java.name ?? 'Android JVM', request: 'attach', android: true,
             serial: config.target.udid, target: config.target.udid, pid: Number(pid), processId: Number(pid), packageName: config.packageName,
-            androidProjectRoot: config.androidProjectRoot, projectRoot: config.java?.projectRoot ?? config.projectRoot ?? config.androidProjectRoot ?? this.session.workspaceFolder?.uri.fsPath,
+            hostName, ...(externalTask && requestedPort > 0 ? { port, preLaunchTask: externalTask, androidJdwpExternal: true } : { androidJdwpPort: port }), androidProjectRoot: config.androidProjectRoot, projectRoot: config.java?.projectRoot ?? config.projectRoot ?? config.androidProjectRoot ?? this.session.workspaceFolder?.uri.fsPath,
             sourcePaths: structuredClone(config.java?.sourcePaths ?? config.sourcePaths ?? config.androidSourceRoots) };
     }
 
@@ -141,7 +160,7 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
         if (mode !== 'java') await this.attachToProcess(pid, response);
         if (mode !== 'native') {
             this.consoleLog('Starting JVM debugger for process ' + pid);
-            await this.startChild(this.prepareJavaDebugConfiguration(pid));
+            await this.startChild(await this.prepareJavaDebugConfiguration(pid));
         } else await this.resumeProcess(pid);
     }
 
@@ -209,6 +228,9 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
                 }
             }
             if (!config.packageName || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName)) throw new Error('A valid package name is required.');
+            // Launch只使用本次启动产生的PID；先停止旧包，避免复用已被其他调试器占用的JDWP进程。
+            await adbExec(adb, target.udid, ['shell', 'am', 'force-stop', config.packageName], signal);
+            this.checkOpen();
             config.launchActivity ||= await resolveLauncherActivity(adb, target.udid, config.packageName, signal);
             this.checkOpen();
             const component = config.packageName + '/' + config.launchActivity;
@@ -277,8 +299,12 @@ class DebugAdapter extends debugadapter.LoggingDebugSession {
             const resources: Promise<unknown>[] = [];
             if (this.socket) resources.push(this.host.releaseNative(this.socket));
             if (this.jdwpCleanup) resources.push(this.jdwpCleanup());
+            if (this.jdwpForwarding) {
+                const { adb, serial, port } = this.jdwpForwarding;
+                resources.push(adbExec(adb, serial, ['forward', '--remove', `tcp:${port}`]));
+            }
             const results = [...children, ...await Promise.allSettled(resources)];
-            this.childSessions = {}; this.socket = undefined; this.jdwpCleanup = undefined;
+            this.childSessions = {}; this.socket = undefined; this.jdwpCleanup = undefined; this.jdwpForwarding = undefined;
             const errors = results.filter((value): value is PromiseRejectedResult => value.status === 'rejected').map(value => value.reason);
             if (errors.length) throw new AggregateError(errors, 'Native child/server/JDWP cleanup failed');
         })());

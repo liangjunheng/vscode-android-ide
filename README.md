@@ -39,7 +39,7 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 
 ### Debugging
 
-- The unified `android-debug` contribution provides Native, JVM, and Dual (Native and JVM) Launch/Attach configurations. Native starts a `type: "lldb"` CodeLLDB child; JVM uses the bundled JDI/JDWP adapter JAR through `type: "kotlin-jvm"`.
+- The unified `android-debug` contribution provides Native, JVM, and Dual (Native and JVM) Launch/Attach configurations. Native starts a `type: "lldb"` CodeLLDB child; JVM uses the bundled JDI/JDWP adapter JAR through `type: "android-jvm"`.
 - Native, JVM, and Dual Launch/Attach open Run and Debug without implicitly running Gradle or installing an APK. Processes can attach to the selected PID through a session-owned ADB forward. External configurations retain their original adapters.
 - The JVM adapter needs a full JDK 17+ with `jdk.jdi`. Its independent settings are `android-ide.jvmDebugger.javaHome`, `adapterJvmArgs`, `logLevel`, and `traceProtocol` under the same prefix; it does not register the upstream extension's settings.
 - Native package names come from the selected Gradle variant/APK or device process ownership. ABI resolution prefers explicit configuration and the installed app ABI, then compatible build/device candidates. Package or ABI selection appears only when automatic resolution is unavailable or ambiguous; device/build errors remain visible.
@@ -51,7 +51,7 @@ VSCode Android IDE brings Android development tools into VS Code. Manage emulato
 
 - `android-debug` 是统一的 Android 调试入口。Build Debug 优先显示 `launch.json` 中的有效配置，没有时使用六个内置项。Processes 的 Attach Debug 始终显示三个内置 Attach（Native/JVM/Dual），以及 `launch.json` 中全部有效 Launch/Attach 配置；选择后绑定当前进程 PID，以 Attach 请求连接，不安装或启动 APK。会话启动成功后才切换到 Run and Debug，避免面板隐藏取消启动。
 - Launch 与 Attach 都不会隐式执行 Gradle 构建或安装。只有配置显式填写 `apkPath` 时才安装该 APK；Build Debug 也不会因为进入调试而偷偷触发 Gradle/install。Attach 不启动应用，也不安装 APK，只连接已经运行或等待调试的进程。
-- 端口由调试会话动态分配，不需要写死 `5005`，也不需要 `preLaunchTask`。外部配置中的 `port`、任务和其它选项会按原值保留，不会被内置模板覆盖。
+- 内置 JVM/Dual 模板不写入主机、端口或任务；适配器缺省使用本机回环地址和动态 JDWP forward。仅当用户显式填写非零端口和任务时，子会话采纳用户的端口、主机和任务配置。
 - Dual 会先启动 Native 子会话，再启动 JVM 子会话；两个子会话共享同一个设备、包名和 PID 身份，由 JVM 子会话负责最终 resume。
 - Native 自动符号仅加载当前项目构建记录中、与目标 ABI 匹配且包含 ELF 调试信息的 `.so`。预编译库、外部库及打包目录中的副本不自动处理；所有无重名项目库自动加载，同名产物自动采用文件修改时间最新的一份，不再弹窗；时间相同按路径稳定排序。每次调试重新发现产物，不保存手选结果。调试信息仍须与设备上安装的 APK 对应；存在符号不等于源码路径和构建版本匹配。
 

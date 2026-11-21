@@ -27,7 +27,7 @@ function fixture(mode = 'native') {
   };
   const apiModule = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/index.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module: apiModule, exports: apiModule.exports, require: id => id === 'vscode' ? vscode : require(id) });
+    { module: apiModule, exports: apiModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : require(id) });
   const backend = { async watch(update) { f.update = update; return async () => {}; } };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync('src/processes.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
@@ -54,7 +54,7 @@ for (const mode of ['native', 'java', 'dual']) test('Processes ' + mode + ' atta
 /** 全部有效外部配置保留在菜单，选外部Launch也只能附加当前进程，不改原配置/任务/源码选项。 */
 test('Processes menu includes every launch.json request alongside three built-in attaches', async () => {
   const f = fixture();
-  const launch = { type: 'android-debug', request: 'launch', mode: 'dual', name: 'External launch', preLaunchTask: 'prepare', apkPath: 'user.apk', java: { type: 'kotlin-jvm', sourcePaths: ['sdk/src'] } };
+  const launch = { type: 'android-debug', request: 'launch', mode: 'dual', name: 'External launch', preLaunchTask: 'prepare', apkPath: 'user.apk', java: { type: 'android-jvm', sourcePaths: ['sdk/src'] } };
   const attach = { type: 'external', request: 'attach', name: 'External attach' };
   f.external = [launch, attach, attach, { type: 'bad', request: 'invalid', name: 'Invalid' }];
   f.pick = items => items.find(item => item.config === launch);

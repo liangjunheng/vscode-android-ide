@@ -23,7 +23,7 @@ function fixture() {
   };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/android-debugger/index.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module, exports: module.exports, require: id => id === 'vscode' ? vscode : require(id) });
+    { module, exports: module.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => { const result = { ...config }; for (const key of ['apkPath','packageName','launchActivity','serial','target','pid','processId','androidProjectRoot','androidAdbPath','androidJdwpPort','hostName','preLaunchTask']) if (result[key] === 'auto') delete result[key]; return result; } } : require(id) });
   f.api = module.exports; return f;
 }
 
@@ -35,12 +35,16 @@ test('six Android fallback configurations preserve modes requests and independen
     ['native', 'launch'], ['native', 'attach'], ['java', 'launch'], ['java', 'attach'], ['dual', 'launch'], ['dual', 'attach'],
   ]);
   for (const config of configurations) {
-    assert.equal(config.type, 'android-debug'); assert.equal(config.target, 'select');
+    assert.equal(config.type, 'android-debug'); assert.equal(config.target, 'auto');
+    if (config.request === 'attach') assert.equal(config.pid, 'auto');
+    if (config.request === 'launch') { assert.equal(config.apkPath, 'auto'); assert.equal(config.packageName, 'auto'); assert.equal(config.launchActivity, 'auto'); if (config.mode !== 'native') { assert.equal(config.java.type, 'android-jvm'); assert.equal(config.java.port, undefined); assert.equal(config.java.hostName, undefined); assert.equal(config.java.preLaunchTask, undefined); assert.deepEqual(Array.from(config.java.adapterJvmArgs), []); } }
+
     const mapped = f.api.createAndroidDebugConfiguration(config, { serial: 'phone' });
     assert.equal(mapped.request, config.request); assert.equal(mapped.mode, config.mode);
   }
   configurations[0].native.abi = 'x86'; configurations[2].java.name = 'changed';
-  assert.equal(f.api.getAndroidDebugConfigurations()[0].native.abi, undefined);
+  assert.equal(f.api.createAndroidDebugConfiguration(configurations[0], { serial: 'phone' }).packageName, undefined);
+  assert.equal(f.api.getAndroidDebugConfigurations()[0].native.abi, 'auto');
   assert.equal(f.api.getAndroidDebugConfigurations()[2].java.name, 'Android JVM');
   const config = await f.api.selectAndroidDebugConfiguration(); assert.equal(f.items.length, 6);
   const session = await f.api.startAndroidDebugging(undefined, config, { serial: 'phone', pid: 42 });
@@ -57,31 +61,37 @@ test('six Android fallback configurations preserve modes requests and independen
 test('Android configurations preserve original external options and never merge Kotlin into Java', async () => {
   const f = fixture();
   const config = { type: 'android-debug', request: 'launch', name: 'Mixed', custom: 17,
-    java: { type: 'java', sourcePaths: ['java-src'] }, kotlin: { type: 'kotlin-jvm', port: 5005, sourcePaths: ['kotlin-src'] }, native: { symbolSearchPaths: ['symbols'] } };
+    java: { type: 'java', sourcePaths: ['java-src'] }, kotlin: { type: 'android-jvm', port: 5005, sourcePaths: ['kotlin-src'] }, native: { symbolSearchPaths: ['symbols'] } };
   f.configs = [config, config, { type: 'external', request: 'invalid', name: 'Invalid' }];
-  f.pick = 0; assert.equal(await f.api.selectAndroidDebugConfiguration(), config); assert.equal(f.items.length, 1);
+  f.pick = 0;
+  const selected = await f.api.selectAndroidDebugConfiguration();
+  assert.notStrictEqual(selected, config); assert.equal(selected.name, 'Android: Android Native Debug Launch'); assert.equal(f.items.length, 6);
   const mapped = f.api.createAndroidDebugConfiguration(config, { serial: 'phone', processId: 77, packageName: 'com.demo' });
   assert.equal(mapped.request, 'attach'); assert.equal(mapped.pid, 77); assert.equal(mapped.custom, 17); assert.equal(mapped.packageName, 'com.demo');
   assert.notStrictEqual(mapped.java, config.java); assert.strictEqual(mapped.kotlin, config.kotlin); assert.notStrictEqual(mapped.native, config.native);
   assert.deepEqual({ ...mapped.java }, config.java); assert.deepEqual({ ...mapped.native }, config.native);
-  assert.equal(mapped.java.type, 'java'); assert.equal(mapped.kotlin.type, 'kotlin-jvm'); assert.equal(mapped.java.port, undefined);
+  assert.equal(mapped.java.type, 'java'); assert.equal(mapped.kotlin.type, 'android-jvm'); assert.equal(mapped.java.port, undefined);
   assert.equal(config.request, 'launch'); assert.equal(config.pid, undefined);
-  assert.equal(f.api.findAndroidDebugConfiguration(), config); assert.equal(f.api.findAndroidDebugConfiguration(undefined, true).mode, 'native');
+  assert.equal(f.api.findAndroidDebugConfiguration().name, 'Android: Android Native Debug Launch'); assert.equal(f.api.findAndroidDebugConfiguration(undefined, true).mode, 'native');
   assert.equal(f.api.createAndroidDebugConfiguration(config, { serial: 'phone' }).request, 'launch');
 });
 
-/** Build外部优先；Processes保留三个内置Attach和全部外部Launch/Attach，去重并保留任务和原始选项。 */
-test('launch.json exclusively wins and preserves explicit tasks paths and cancellation', async () => {
+/** Launch只有同名外部配置覆盖内置；Processes保留三个内置Attach和全部外部Launch/Attach。 */
+test('launch.json matches built-in names before replacing launch configurations', async () => {
   const f = fixture();
-  const launch = { type: 'android-debug', request: 'launch', name: 'User dual', mode: 'dual', preLaunchTask: 'prepare', apkPath: 'user.apk', java: { type: 'kotlin-jvm', sourcePaths: ['sdk/src'] }, native: { abi: 'arm64-v8a', symbolSearchPaths: ['symbols'] } };
+  const launch = { type: 'android-debug', request: 'launch', name: 'User dual', mode: 'dual', preLaunchTask: 'prepare', apkPath: 'user.apk', java: { type: 'android-jvm', sourcePaths: ['sdk/src'] }, native: { abi: 'arm64-v8a', symbolSearchPaths: ['symbols'] } };
   f.configs = [launch];
-  assert.equal(await f.api.selectAndroidDebugConfiguration(), launch); assert.equal(f.items.length, 1);
+  const fallback = await f.api.selectAndroidDebugConfiguration(); assert.equal(fallback.name, 'Android: Android Native Debug Launch'); assert.notStrictEqual(fallback, launch); assert.equal(f.items.length, 6);
+  const matching = { ...launch, name: 'Android: Android Dual(Native and JVM) Debug Launch' };
+  f.configs = [matching]; f.pick = 0;
+  assert.equal(await f.api.selectAndroidDebugConfiguration(), matching); assert.equal(f.items.length, 1);
   await f.api.selectAndroidDebugConfiguration(undefined, 'attach'); assert.equal(f.items.length, 4);
-  assert.ok(f.items.slice(0, 3).every(item => item.config.request === 'attach')); assert.equal(f.items[3].config, launch);
+  assert.deepEqual(Array.from(f.items.slice(0, 3), item => item.config.request), ['attach', 'attach', 'attach']);
+  assert.equal(f.items[3].config, matching);
   const attach = { ...launch, name: 'User attach', request: 'attach' };
   f.configs = [launch, attach, attach]; f.pick = 4;
   assert.equal(await f.api.selectAndroidDebugConfiguration(undefined, 'attach'), attach);
-  assert.equal(f.items.length, 5); assert.equal(f.items[3].config, launch);
+  assert.equal(f.items.length, 5); assert.equal(f.items[4].config, attach);
   assert.deepEqual(Array.from(f.items.slice(0, 3), item => item.config.mode), ['native', 'java', 'dual']);
   f.pick = undefined; assert.equal(await f.api.selectAndroidDebugConfiguration(), undefined);
   const mapped = f.api.createAndroidDebugConfiguration({ ...launch, packageName: 'com.explicit.app' }, { serial: 'phone', packageName: 'com.build.app' });

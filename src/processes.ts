@@ -95,7 +95,7 @@ export class ProcessesController {
       this.check(signal);
       if (!this.rows.includes(row)) throw new Error('Selected process is no longer available');
       if (!config) return;
-      const android = config.type === 'android-debug' || config.type === 'android-tools' || (config.type === 'kotlin-jvm' && config.android === true);
+      const android = config.type === 'android-debug' || config.type === 'android-tools' || (config.type === 'android-jvm' && config.android === true);
       let selected = android ? { ...config, androidProjectRoot: config.androidProjectRoot ?? folder.uri.fsPath } : config;
       // Java默认源码由工作区扫描；Native/Dual仅用真实canonical ABI补缺，不覆盖显式选择，也不查询AGP模型。
       const native = config.type === 'android-tools' || (config.type === 'android-debug' && ['native', 'dual'].includes(config.mode ?? 'native'));

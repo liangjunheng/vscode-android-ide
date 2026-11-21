@@ -14,6 +14,7 @@ import type { AndroidNativeDebugConfiguration, AndroidNativeDebugAdapterFactory 
 import { DebugAdapterDescriptorFactory } from './upstream/src/debugAdapter';
 import { nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } from './nativeToolchain';
 import { selectNativeLibraries } from './nativeSymbols';
+import { omitAuto } from '../autoConfig';
 
 /** 当前选中Gradle项目在对应工作区的只读包名来源；未知返回undefined，真实错误传播。 */
 export interface NativeProjectMetadata { packageName?: string; abiSupported?: string[]; }
@@ -164,11 +165,13 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
 
   /** 按三模式建立设备上下文：Java 仅共享 SDK，Native/Dual 保留 ABI/符号且旧类型仅 Native；同文件六组合、无 NDK 与取消回归。 */
   async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
+    config = omitAuto(config);
     if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
     if (config.type === 'android-tools' && [config.androidMode, config.mode].some(mode => mode !== undefined && mode !== 'native')) throw new Error('Only Android Native debugging is available');
     if (config.type === 'android-debug' && !['native', 'java', 'dual'].includes(config.mode ?? 'native')) throw new Error('Unsupported Android debug mode');
     if (!['launch', 'attach'].includes(config.request)) throw new Error('Android request must be launch or attach');
     const mode = config.mode ?? config.androidMode ?? 'native';
+    if (mode !== 'native') validateJavaPort(config);
     if (mode === 'java') {
       const selected = !config.packageName && config.request === 'launch' && !config.apkPath ? this.selectedPackage(folder) : undefined;
       const result: vscode.DebugConfiguration = { ...config, mode, androidProjectRoot: config.androidProjectRoot || folder?.uri.fsPath, packageName: config.packageName || (typeof selected === 'string' ? selected : selected?.packageName) };
@@ -203,7 +206,9 @@ export class NativeAndroidConfigurationProvider implements vscode.DebugConfigura
   /** 解析身份和ABI后自动加载有调试信息的项目编译库，同名自动取最新产物；清除宽泛搜索路径及旧白名单，Java不发现Native符号。
    * native-codelldb.test.js验证项目产物全集、重复选择、取消零server和精确LLDB命令；native-project-libraries.test.js验证来源及ELF信息。 */
   async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
+    config = omitAuto(config);
     const javaOnly = config.mode === 'java';
+    if (config.mode !== 'native') validateJavaPort(config);
     if (!javaOnly) await validateNativeDebugConfiguration(config, folder, true, false, false);
     const identity = await resolveAttachIdentity(config, javaOnly);
     if (!identity) return null;
@@ -237,6 +242,15 @@ function missingAttachProcess(error: unknown): boolean {
 function notifyMissingAttachProcess(packageName: string): null {
   void vscode.window.showWarningMessage('Android Attach failed: process for ' + packageName + ' is not running. Start the application and attach again.');
   return null;
+}
+
+/** 功能：校验父会话嵌套Java端口，仅接受0到65535的整数。
+ * 输入：java.port，可省略；字符串和范围外数值无效。
+ * 输出：无返回值；非法输入抛出错误并阻断设备查询。
+ * 验证：node --test tests/native-codelldb.test.js。 */
+function validateJavaPort(config: vscode.DebugConfiguration): void {
+  const port = config.java?.port;
+  if (port !== undefined && (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535)) throw new Error('Invalid Android JVM port; use 0 for a dynamic port');
 }
 
 /** attach 优先显式 PID，其次包名精确进程，最后交互选择；取消返回 null、不读 Build；同文件断言两种 PID、取消及 Java 无 NDK。 */
@@ -289,11 +303,13 @@ export function createAndroidDebugAdapterFactory(context: vscode.ExtensionContex
     report: reportCleanup,
     releaseNative: socket => lldb.release(socket),
     async resolveSession(config) {
+      config = omitAuto(config);
       if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
       if (config.type === 'android-tools' && [config.androidMode, config.mode].some(mode => mode !== undefined && mode !== 'native')) throw new Error('Only Android Native debugging is available');
       if (config.type === 'android-debug' && !['native', 'java', 'dual'].includes(config.mode ?? 'native')) throw new Error('Unsupported Android debug mode');
       const serial = targetSerial(config as AndroidNativeDebugConfiguration);
       const javaOnly = config.mode === 'java';
+      if (javaOnly) validateJavaPort(config);
       const selected = javaOnly ? { udid: serial } : typeof config.target === 'object' ? config.target : await android.getDeviceFromUDID(serial, config.androidProjectRoot, nativeToolchainOverrides(config.native));
       const target = { ...selected, udid: serial, androidProjectRoot: config.androidProjectRoot, androidNativeToolchain: (selected as Record<string, unknown>).androidNativeToolchain ?? nativeToolchainOverrides(config.native) };
       const result: vscode.DebugConfiguration = { ...config, target, native: { ...config.native } };

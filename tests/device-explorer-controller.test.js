@@ -351,7 +351,7 @@ test('Processes includes external launch and attach configurations alongside bui
     try {
       const selected = { name: 'User config', type: 'android-debug', request: scenario === 'launch-only' ? 'launch' : 'attach', mode: 'dual',
         packageName: 'com.user.explicit', apkPath: '/explicit.apk', androidProjectRoot: '/root', preLaunchTask: 'prepare',
-        sourcePaths: ['top'], java: { type: 'kotlin-jvm', sourcePaths: ['java'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
+        sourcePaths: ['top'], java: { type: 'android-jvm', sourcePaths: ['java'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
       f.config.launch.push(selected);
       await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
       f.processState.onUpdate([{ pid: 42, packageName: 'com.row.other', abi: 'arm64-v8a' }]);
@@ -380,7 +380,7 @@ test('Processes includes external launch and attach configurations alongside bui
 test('Processes Android JVM attach preserves sourcePaths without invoking the Build resolver', async () => {
   const f = await fixture({ quickPick: items => items.find(item => item.config?.name === 'JVM'), resolveDebugProject: async () => { throw new Error('No Gradle model'); } });
   try {
-    f.config.launch.push({ name: 'JVM', type: 'kotlin-jvm', request: 'attach', android: true, sourcePaths: ['user-source'] });
+    f.config.launch.push({ name: 'JVM', type: 'android-jvm', request: 'attach', android: true, sourcePaths: ['user-source'] });
     await f.controller.setContext('phone', true, 'processes'); await Promise.all([...f.controller.scope.tasks]);
     f.processState.onUpdate([{ pid: 42, packageName: 'com.example.app' }]);
     await f.controller.handle({ type: 'explorer', action: 'debug', pid: 42 });

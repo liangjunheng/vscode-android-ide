@@ -404,7 +404,7 @@ export class AndroidBuildController implements vscode.Disposable {
       return 'Running';
     }
 
-    const builtIn = config!.type === 'android-debug' || config!.type === 'android-tools' || (config!.type === 'kotlin-jvm' && config!.android === true);
+    const builtIn = config!.type === 'android-debug' || config!.type === 'android-tools' || (config!.type === 'android-jvm' && config!.android === true);
     const metadata = builtIn && !config!.packageName ? apkMetadataFor(project, target) : undefined;
     const packageName = config!.packageName ?? metadata?.applicationId;
     this.check(operation);

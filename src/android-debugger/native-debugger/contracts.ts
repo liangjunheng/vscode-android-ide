@@ -6,7 +6,7 @@ export interface AndroidNativeDebugConfiguration extends vscode.DebugConfigurati
   type: 'android-tools' | 'android-debug';
   androidMode?: 'native';
   mode?: 'native' | 'java' | 'dual';
-  java?: { type?: 'kotlin-jvm'; name?: string; sourcePaths?: string[]; [option: string]: unknown };
+  java?: { type?: 'android-jvm'; name?: string; sourcePaths?: string[]; [option: string]: unknown };
   sourcePaths?: string[];
   target?: string | (Device & { androidProjectRoot?: string });
   serial?: string;

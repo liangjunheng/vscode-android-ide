@@ -165,7 +165,7 @@ async function activateBundle(source, extensionPath) {
     debug: {
       registerDebugAdapterDescriptorFactory: (id, factory) => { state.debuggers.push(id); factories.set(id, factory); return disposable(); },
       registerDebugConfigurationProvider: (id,provider,trigger) => { state.providers.push(id); if(trigger===2) { assert.equal(typeof provider.resolveDebugConfiguration,'function'); state.dynamicNames.push(...provider.provideDebugConfigurations().map(config=>config.name)); } return disposable(); },
-      registerDebugAdapterTrackerFactory: (id, tracker) => { assert.equal(id, 'kotlin-jvm'); assert.equal(typeof tracker.createDebugAdapterTracker, 'function'); return disposable(); },
+      registerDebugAdapterTrackerFactory: (id, tracker) => { assert.equal(id, 'android-jvm'); assert.equal(typeof tracker.createDebugAdapterTracker, 'function'); return disposable(); },
       onDidStartDebugSession: disposable,
       onDidTerminateDebugSession: disposable,
     },
@@ -182,14 +182,13 @@ async function activateBundle(source, extensionPath) {
   // 通过真实 Native 描述符等待异步注册结算，再释放父适配器；不创建后端进程或连接设备。
   const descriptor = await factories.get('android-tools').createDebugAdapterDescriptor({ id: 'packaged-activation-check', configuration: {} });
   await descriptor.implementation.dispose();
-  assert.deepEqual(state.debuggers.sort(), ['android-debug', 'android-tools', 'kotlin-jvm']);
-  assert.deepEqual(state.providers.sort(), ['android-debug', 'android-debug', 'android-tools', 'kotlin-jvm', 'kotlin-jvm', 'lldb']);
+  assert.deepEqual(state.debuggers.sort(), ['android-debug', 'android-jvm', 'android-tools']);
+  assert.deepEqual(state.providers.sort(), ['android-debug', 'android-debug', 'android-jvm', 'android-jvm', 'android-tools', 'lldb']);
   assert.deepEqual(state.contexts, [['android-ide.hasAndroidProject', false]]);
   assert.deepEqual(state.dynamicNames.sort(), [
     'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
     'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',
     'Android: Android Dual(Native and JVM) Debug Launch', 'Android: Android Dual(Native and JVM) Debug Attach',
-    'Kotlin/Java: Attach to JVM',
   ].sort());
   for (const owned of context.subscriptions) await owned?.dispose?.();
   module.exports.deactivate();

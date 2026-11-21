@@ -7,14 +7,14 @@ import { findJava } from './java';
 import { adbPath, listDevices } from '../../sdk';
 import { readProjectLocalConfig } from '../../projectLocalConfig';
 import { adbExec, resolveLauncherActivity } from '../native-debugger/nativeTarget';
+import { omitAuto } from '../autoConfig';
+import { createJdwpForward } from '../jdwpForward';
 
-export const JVM_DEBUG_TYPE = 'kotlin-jvm';
+export const JVM_DEBUG_TYPE = 'android-jvm';
 type Message = { type: string; seq: number; command?: string; request_seq?: number; success?: boolean; message?: string; arguments?: Record<string, any>; [key: string]: any };
 
 /** 提供独立普通JVM端口附加配置，Android六项由父入口提供；jvm-debugger.test.js验证副本隔离。 */
-export function getJvmDebugConfigurations(): vscode.DebugConfiguration[] {
-  return [{ type: JVM_DEBUG_TYPE, request: 'attach', name: 'Kotlin/Java: Attach to JVM', hostName: 'localhost', port: 5005, sourcePaths: [] }];
-}
+export function getJvmDebugConfigurations(): vscode.DebugConfiguration[] { return []; }
 
 /** 保留上游JVM配置默认值，Android仅选择设备不分配资源；jvm-debugger.test.js覆盖选择、取消及非法端口。 */
 export class JvmConfigurationProvider implements vscode.DebugConfigurationProvider {
@@ -26,7 +26,7 @@ export class JvmConfigurationProvider implements vscode.DebugConfigurationProvid
   /** 归一化源码路径与launch/attach，Android选择取消不启动；jvm-debugger.test.js验证原配置不变与正常/异常路径。 */
   async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, input: vscode.DebugConfiguration): Promise<vscode.DebugConfiguration | undefined> {
     if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
-    const config = { ...input };
+    const config = omitAuto(input);
     if (!config.type && !config.request && !config.name) Object.assign(config, { type: JVM_DEBUG_TYPE, request: 'attach', name: 'Attach to JVM (Kotlin/Java)', port: 5005 });
     config.request ??= 'attach';
     if (!['launch', 'attach'].includes(config.request)) throw new Error('JVM request must be launch or attach');
@@ -35,7 +35,7 @@ export class JvmConfigurationProvider implements vscode.DebugConfigurationProvid
     config.sourcePaths ??= config.androidSourceRoots;
     if (config.sourcePaths !== undefined && (!Array.isArray(config.sourcePaths) || config.sourcePaths.some((value: unknown) => typeof value !== 'string'))) throw new Error('JVM sourcePaths must be a string array');
     if (Array.isArray(config.sourcePaths) && root) config.sourcePaths = config.sourcePaths.map((value: string) => path.isAbsolute(value) ? value : path.join(root, value));
-    if (config.android) {
+    if (config.android || config.type === JVM_DEBUG_TYPE) {
       if (config.pid === undefined && config.processId === undefined) config.packageName ??= this.selectedPackage(folder);
       let serial = config.serial ?? config.target;
       if (!serial || serial === 'select') {
@@ -54,15 +54,27 @@ export class JvmConfigurationProvider implements vscode.DebugConfigurationProvid
       Object.assign(config, { serial, target: serial, ...(pid !== undefined ? { pid: Number(pid), processId: Number(pid) } : {}) });
     } else if (config.request === 'attach') {
       config.hostName ??= config.host ?? 'localhost';
-      const port = Number(config.port);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('JVM attach requires a port between 1 and 65535');
-      config.port = port;
+      if (typeof config.port !== 'number' || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new Error('JVM attach requires a numeric port between 1 and 65535');
+      config.port = config.port;
     } else {
       if (!config.mainClass) throw new Error('JVM launch requires mainClass');
       config.cwd ??= config.projectRoot;
     }
     return config;
   }
+}
+
+/** Android JVM只接受明确的Android配置，不生成普通JVM模板；父Android配置负责设备/PID/动态JDWP上下文。 */
+class AndroidJvmConfigurationProvider extends JvmConfigurationProvider {
+  /** 功能：拒绝公开android-jvm类型中的普通JVM配置后，再执行Android配置归一化。
+   * 输入：VS Code传入的调试配置；android必须严格为true。
+   * 输出：合法Android配置或拒绝错误。
+   * 验证：node --test tests/jvm-debugger.test.js。 */
+  override async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, input: vscode.DebugConfiguration): Promise<vscode.DebugConfiguration | undefined> {
+    if (input.android !== true) throw new Error('android-jvm requires android: true');
+    return super.resolveDebugConfiguration(folder, input);
+  }
+  provideDebugConfigurations(): vscode.DebugConfiguration[] { return []; }
 }
 
 /** Android会话拥有JAR进程与唯一ADB转发，DAP内容仍由上游处理；jvm-debugger.test.js验证帧转发、启动失败与清理。 */
@@ -106,10 +118,25 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
     }
   }
 
-  /** 以准确PID建立临时JDWP端口，断开时取消启动命令；jvm-debugger.test.js覆盖launch/attach、多PID拒绝和forward失败。 */
+  /** 功能：校验直接Android JVM配置的端口，仅接受0到65535的整数。
+   * 输入：用户或父会话提供的port字段，缺省表示动态端口0。
+   * 输出：可用于ADB forward的数值端口；非法输入抛出错误。
+   * 验证：node --test tests/jvm-debugger.test.js。 */
+  private androidJdwpPort(value: unknown): number {
+    if (value === undefined) return 0;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 65535) throw new Error('Invalid Android JVM port; use 0 for a dynamic port');
+    return value;
+  }
+
+  /** 功能：根据父会话标记或用户显式任务决定JDWP端口与forward所有权，并将Android请求转为后端Attach。
+   * 输入：DAP启动请求、已解析的Android设备/进程配置；显式非零port加preLaunchTask由用户管理。
+   * 输出：向JVM后端发送Attach请求；仅自建forward写入本适配器清理状态。
+   * 验证：node --test tests/jvm-debugger.test.js 覆盖动态、父会话和用户管理端口的Attach/Launch路径。 */
   private async start(message: Message): Promise<void> {
     const signal = this.controller.signal;
     const config = { ...this.config, ...message.arguments };
+    const requestedPort = this.androidJdwpPort(config.port);
+    if (config.androidJdwpPort !== undefined) this.androidJdwpPort(config.androidJdwpPort);
     const serial = config.serial as string;
     if (!serial || !/^[\w.:-]+$/.test(serial)) throw new Error('Invalid Android device serial');
     if (message.command === 'launch' && !/^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+$/.test(config.packageName ?? '')) throw new Error('Invalid Android package name');
@@ -124,6 +151,8 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
       pid = Number(pids);
     }
     if (message.command === 'launch') {
+      await adbExec(adb, serial, ['shell', 'am', 'force-stop', config.packageName], signal);
+      signal.throwIfAborted();
       if (config.apkPath && !config.androidApkInstalled) await adbExec(adb, serial, ['install', '-r', config.apkPath], signal);
       const activity = config.launchActivity ?? await resolveLauncherActivity(adb, serial, config.packageName, signal);
       const component = `${config.packageName}/${activity}`;
@@ -135,12 +164,24 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
       pid = Number(pids);
     }
     signal.throwIfAborted();
-    const port = Number((await adbExec(adb, serial, ['forward', 'tcp:0', `jdwp:${pid}`])).trim());
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('ADB returned an invalid JDWP forwarding port');
-    this.forwarding = { adb, serial, port };
+    let port: number;
+    const externalTask = typeof config.preLaunchTask === 'string' && config.preLaunchTask !== 'auto' && config.preLaunchTask.trim();
+    const userManagedForward = !!externalTask && requestedPort > 0;
+    if (config.androidJdwpExternal === true || userManagedForward) {
+      port = requestedPort;
+      if (port < 1) throw new Error('Invalid external Android JVM JDWP port');
+    } else if (config.androidJdwpPort !== undefined) {
+      port = this.androidJdwpPort(config.androidJdwpPort);
+      if (port < 1) throw new Error('Invalid parent Android JVM JDWP port');
+    } else {
+      const forward = await createJdwpForward(adb, serial, Number(pid), requestedPort, signal);
+      port = forward.port;
+      this.forwarding = { adb, serial, port };
+    }
     signal.throwIfAborted();
     this.requests.set(message.seq, message.command!);
-    this.send({ ...message, command: 'attach', arguments: { ...config, hostName: '127.0.0.1', port, projectRoot: config.projectRoot ?? config.androidProjectRoot } });
+    const hostName = typeof config.hostName === 'string' && config.hostName !== 'auto' ? config.hostName : '127.0.0.1';
+    this.send({ ...message, command: 'attach', arguments: { ...config, hostName, port, projectRoot: config.projectRoot ?? config.androidProjectRoot } });
   }
 
   /** 写入Content-Length帧，不自行实现断点或求值；jvm-debugger.test.js断言UTF8字节长度和请求正文。 */
@@ -226,8 +267,9 @@ export class JvmAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
     const runtime = await findJava(settings.get<string>('javaHome') || undefined);
     const logFile = path.join(os.tmpdir(), 'android-kotlin-debugger', session.id + '.log');
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    const args = [...settings.get<string[]>('adapterJvmArgs', ['-Xmx512m']), '-jar', jar, '--log-level', session.configuration.logLevel ?? settings.get<string>('logLevel', 'INFO'), '--log-file', logFile];
-    if (!session.configuration.android) return new vscode.DebugAdapterExecutable(runtime.java, args);
+    const configuredJvmArgs = session.configuration.adapterJvmArgs as string[] | undefined;
+    const args = [...(configuredJvmArgs?.length ? configuredJvmArgs : settings.get<string[]>('adapterJvmArgs', ['-Xmx512m'])), '-jar', jar, '--log-level', session.configuration.logLevel ?? settings.get<string>('logLevel', 'INFO'), '--log-file', logFile];
+    if (!session.configuration.android && session.configuration.type !== JVM_DEBUG_TYPE) return new vscode.DebugAdapterExecutable(runtime.java, args);
     const adapter = new AndroidJvmAdapter(spawn(runtime.java, args, { windowsHide: true, stdio: 'pipe' }), session.configuration, error => { void vscode.window.showErrorMessage('JVM debugger: ' + String(error)); });
     this.active.add(adapter);
     adapter.onDidSendMessage(message => { if (message.event === 'terminated') this.active.delete(adapter); });
@@ -261,10 +303,10 @@ export class JvmTrackerFactory implements vscode.DebugAdapterTrackerFactory {
 
 /** 注册独立JVM类型及initial/dynamic内置项，保留Native唯一工厂；jvm-debugger.test.js验证注册表。 */
 export function registerJvmDebugger(context: vscode.ExtensionContext, selectedPackage?: (folder?: vscode.WorkspaceFolder) => string | undefined): void {
-  const provider = new JvmConfigurationProvider(selectedPackage);
   const factory = new JvmAdapterFactory(context);
   const output = vscode.window.createOutputChannel('Android Kotlin/Java Debugger');
-  context.subscriptions.push(output, vscode.debug.registerDebugAdapterTrackerFactory(JVM_DEBUG_TYPE, new JvmTrackerFactory(output)), factory, vscode.debug.registerDebugAdapterDescriptorFactory(JVM_DEBUG_TYPE, factory),
-    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, provider),
-    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, provider, vscode.DebugConfigurationProviderTriggerKind.Dynamic));
+  context.subscriptions.push(output, vscode.debug.registerDebugAdapterTrackerFactory(JVM_DEBUG_TYPE, new JvmTrackerFactory(output)), factory,
+    vscode.debug.registerDebugAdapterDescriptorFactory(JVM_DEBUG_TYPE, factory),
+    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, new AndroidJvmConfigurationProvider(selectedPackage)),
+    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, new AndroidJvmConfigurationProvider(selectedPackage), vscode.DebugConfigurationProviderTriggerKind.Dynamic));
 }
