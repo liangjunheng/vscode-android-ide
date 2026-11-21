@@ -39,7 +39,7 @@ test('skill bootstrap configures a fresh non-Rust project automatically', async 
     const receipt=JSON.parse(injected.split('\n')[1]);
     assert.equal(receipt.sessionId,'generic-project');
     assert.equal(receipt.turn,12);
-    assert.equal(receipt.files.length,3);
+    assert.equal(receipt.files.length,2);
     assert.ok(injected.includes(rules));
     const second=spawnSync(process.execPath,[entry],{cwd:project,env,encoding:'utf8'});
     assert.equal(second.status,0,second.stderr);
