@@ -8,7 +8,13 @@ const { transformSync } = require('esbuild');
 
 const root = path.resolve(__dirname, '..');
 
-// 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言加载真实生产模块与边界fixture，不替换待验证函数。
+// 功能点：Native lldb-server 启动就绪与生命周期回归。
+// 受影响对象：android.ts 的 startLldbServer 部署、socket-file 事件就绪、earlyExit、隔离 stop；本测试的 ADB/SubProcess mock。
+// 复现路径：在同一设备和包名连续启动服务，模拟 socket-file 原子写入事件、启动失败和提前退出，再分别停止服务。
+// 测试范围：正常真实启动信号、无假 echo、同 PID 重附加隔离、启动异常清理、earlyExit、幂等 stop 和旧接口回归。
+// 执行入口：Node.js >= 22 执行 node --test tests/native-runtime.test.js。
+// 预期结果：只有设备启动器确认监听后输出匹配socket身份才完成启动；异常只清理自有进程和部署目录。
+// 判据：测试 mock 必须拒绝 ANDROID_NATIVE_STARTED，并断言匹配事件、事件前退出、路径隔离和精确 stop；未执行不视为通过。
 function loadJdwp() {
   const source = fs.readFileSync(path.join(root, 'src/android-debugger/native-debugger/upstream/src/jdwp.ts'), 'utf8');
   const module = { exports: {} };
@@ -44,26 +50,28 @@ test('runtime sources retain strict toolchain and cleanup contracts', () => {
   const target = fs.readFileSync(path.join(root, 'src/android-debugger/native-debugger/upstream/src/targetCommand.ts'), 'utf8');
   assert.match(android, /resolveNativeToolchain/); assert.match(android, /executable:\s*\{path: toolchain\.adb/);
   const lldb = android.slice(android.indexOf('// LLDB server'), android.indexOf('// Simpleperf'));
-  assert.doesNotMatch(android, /catch \{\s*\}/); assert.match(lldb, /subprocess\.start\(\);/); assert.doesNotMatch(lldb, /await subprocess\.start\(\)/);
+  assert.doesNotMatch(android, /catch \{\s*\}/); assert.match(lldb, /await Promise\.race\(\[started, earlyExit\]\)/); assert.match(lldb, /compileServerLauncher/); assert.match(lldb, /ANDROID_NATIVE_LISTENING/); assert.doesNotMatch(lldb, /ANDROID_NATIVE_STARTED/);
   assert.match(paths, /export async function activate/); assert.doesNotMatch(paths, /await updatePaths/);
   assert.match(target, /throw error;/); assert.match(target, /async function lldbServerCleanup/);
 });
 
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言加载真实生产模块与边界fixture，不替换待验证函数。
 async function loadAndroidRuntime(options = {}) {
-  const state = { timerCallbacks: [], creates: [], calls: [], failCopy: false, failStart: false, stopCalls: 0, stopResolved: false, subprocesses: [], jdwpConnectFail: false, jdwpResumeFail: false, failRemoveForward: false, jdwp: [], processLines: [], processError: null, processStopError: null, processName: 'demo', packageOutput: '', packageError: false, processNameError: false, avdProperties: null, connectedDevices: [{udid:'serial',state:'device'}], deviceError: null, apkInfo: {name:'com.example.app'}, apkError: null, stopGate: undefined, installError: null, shellResult: '', avdId: 'serial', emulatorResult: {code:0,stdout:'Pixel\nINFO    | ignored\n'}, emulatorError: null };
+  const state = { timerCallbacks: [], creates: [], calls: [], failCopy: false, failStart: false, nativeExitBeforeReady: false, nativeReadyEvents: [], stopCalls: 0, stopResolved: false, subprocesses: [], jdwpConnectFail: false, jdwpResumeFail: false, failRemoveForward: false, jdwp: [], processLines: [], processError: null, processStopError: null, processName: 'demo', packageOutput: '', packageError: false, processNameError: false, avdProperties: null, connectedDevices: [{udid:'serial',state:'device'}], deviceError: null, apkInfo: {name:'com.example.app'}, apkError: null, stopGate: undefined, installError: null, shellResult: '', avdId: 'serial', emulatorResult: {code:0,stdout:'Pixel\nINFO    | ignored\n'}, emulatorError: null };
   globalThis.__nativeRuntimeState = state;
   const { build } = require('esbuild');
   const entry = path.join(root, 'src/android-debugger/native-debugger/upstream/src/android.ts');
   const result = await build({ entryPoints: [entry], bundle: true, write: false, platform: 'node', format: 'cjs', absWorkingDir: root, plugins: [{ name: 'runtime-adb-mocks', setup(build) {
     build.onResolve({ filter: /^appium-adb$/ }, () => ({ path: 'appium-adb', namespace: 'runtime-adb-mock' }));
     build.onResolve({ filter: /(?:^|\/)jdwp$/ }, () => ({ path: 'jdwp', namespace: 'runtime-adb-mock' }));
+    build.onResolve({ filter: /serverLauncher$/ }, () => ({ path: 'serverLauncher', namespace: 'runtime-adb-mock' }));
     build.onResolve({ filter: /nativeToolchain|androidPaths|\.\/logger|\.\/utils|^ini$|^teen_process$/ }, args => ({ path: args.path, namespace: 'runtime-adb-mock' }));
     build.onLoad({ filter: /.*/, namespace: 'runtime-adb-mock' }, args => {
       if (args.path === 'jdwp') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState; class JDWP { constructor(){ this.closed=false; } async connect(){ s.jdwp.push('connect'); if(s.jdwpConnectFail) throw new Error('connect failed'); } async resume(){ s.jdwp.push('resume'); if(s.jdwpResumeFail) throw new Error('resume failed'); } async disconnect(){ s.jdwp.push('disconnect'); this.closed=true; } } module.exports={JDWP};" };
-      if (args.path === 'appium-adb') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState; class ADB { constructor(opts){ s.creates.push(opts); this.opts=opts; this.EXEC_OUTPUT_FORMAT={FULL:'full'}; } clone(){ return this; } setDevice(d){ this.device=d; } async getConnectedDevices(options){ s.calls.push(['devices',options,this.opts.sdkRoot]); if(s.deviceError) throw s.deviceError; return s.connectedDevices; } async getApkInfo(apk){ s.calls.push(['apk',apk,this.opts.sdkRoot]); if(s.apkError) throw s.apkError; return s.apkInfo; } async getBinaryFromSdkRoot(name){s.calls.push(['binary',name]);return 'emulator';} async launchAVD(name){s.calls.push(['avd',name]);this.curDeviceId=s.avdId;} async getDeviceProperty(){ return 'arm64-v8a'; } async getNameByPid(){ if(s.processNameError) throw new Error('name failed'); return s.processName; } async getEmuImageProperties(){ return s.avdProperties; } async push(a,b){ s.calls.push(['push',a,b]); } async shell(cmd){ s.calls.push(['shell',cmd]); if(s.failCopy && cmd.includes('cat ')) throw new Error('copy failed'); if(cmd.includes('package list packages')) { if(s.packageError) throw new Error('package permission failed'); return s.packageOutput; } return s.shellResult; } createSubProcess(args){ const listeners={}; const p={args, on(name,fn){ (listeners[name] ||= []).push(fn); return p; }, off(name,fn){ listeners[name]=(listeners[name]||[]).filter(x=>x!==fn); return p; }, listenerCount(name){return (listeners[name]||[]).length;}, emit(name,...values){ for(const fn of listeners[name]||[]) fn(...values); }, async start(){ s.calls.push(['start']); if(s.failStart) throw new Error('start failed'); if(args[0]==='jdwp') queueMicrotask(()=>{ if(s.processError) p.emit('error',s.processError); else if(s.processLines.length) p.emit('lines-stdout',s.processLines); }); }, async stop(){ s.stopCalls++; await s.stopGate; if(s.processStopError) throw s.processStopError; s.stopResolved=true; }}; s.subprocesses.push(p); return p; } async adbExec(args){ s.calls.push(['adbExec',args]); if(args[0]==='install' && s.installError) throw s.installError; return '12345'; } async removePortForward(p){ s.calls.push(['removeForward',p]); if(s.failRemoveForward) throw new Error('remove forward failed'); } } module.exports={ADB};" };
+      if (args.path === 'appium-adb') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState; class ADB { constructor(opts){ s.creates.push(opts); this.opts=opts; this.EXEC_OUTPUT_FORMAT={FULL:'full'}; } clone(){ return this; } setDevice(d){ this.device=d; } async getConnectedDevices(options){ s.calls.push(['devices',options,this.opts.sdkRoot]); if(s.deviceError) throw s.deviceError; return s.connectedDevices; } async getApkInfo(apk){ s.calls.push(['apk',apk,this.opts.sdkRoot]); if(s.apkError) throw s.apkError; return s.apkInfo; } async getBinaryFromSdkRoot(name){s.calls.push(['binary',name]);return 'emulator';} async launchAVD(name){s.calls.push(['avd',name]);this.curDeviceId=s.avdId;} async getDeviceProperty(){ return 'arm64-v8a'; } async getNameByPid(){ if(s.processNameError) throw new Error('name failed'); return s.processName; } async getEmuImageProperties(){ return s.avdProperties; } async push(a,b){ s.calls.push(['push',a,b]); } async shell(cmd){ s.calls.push(['shell',cmd]); if(s.failCopy && cmd.includes('cat ')) throw new Error('copy failed'); if(cmd.includes('package list packages')) { if(s.packageError) throw new Error('package permission failed'); return s.packageOutput; } return s.shellResult; } createSubProcess(args){ const listeners={}; const p={args, on(name,fn){ (listeners[name] ||= []).push(fn); return p; }, off(name,fn){ listeners[name]=(listeners[name]||[]).filter(x=>x!==fn); return p; }, listenerCount(name){return (listeners[name]||[]).length;}, emit(name,...values){ for(const fn of listeners[name]||[]) fn(...values); }, async start(detector){ s.calls.push(['start']); if(s.failStart) throw new Error('start failed'); if(args[0]==='shell' && detector){ const command=args[1]; const socket=command.split(' ').find(value=>value.startsWith('unix-abstract://'))?.slice('unix-abstract://'.length); const event=s.nativeReadyEvent ?? `ANDROID_NATIVE_LISTENING\\t${socket}\\n`; if(s.nativeExitBeforeReady){ await new Promise(()=>{ queueMicrotask(()=>{ if(s.nativeReadyEvent) detector(event,''); p.emit('exit',1,null); }); }); } else { s.nativeReadyEvents.push(event); await new Promise((resolve,reject)=>queueMicrotask(()=>{try{if(detector(event,''))resolve();else reject(new Error('unexpected readiness output'));}catch(error){reject(error);}})); } } if(args[0]==='jdwp') queueMicrotask(()=>{ if(s.processError) p.emit('error',s.processError); else if(s.processLines.length) p.emit('lines-stdout',s.processLines); }); }, async stop(){ s.stopCalls++; await s.stopGate; if(s.processStopError) throw s.processStopError; s.stopResolved=true; }}; s.subprocesses.push(p); return p; } async adbExec(args){ s.calls.push(['adbExec',args]); if(args[0]==='install' && s.installError) throw s.installError; return '12345'; } async removePortForward(p){ s.calls.push(['removeForward',p]); if(s.failRemoveForward) throw new Error('remove forward failed'); } } module.exports={ADB};" };
+      if (args.path === 'serverLauncher') return { loader: 'js', contents: "module.exports={async compileServerLauncher(){return {file:'launcher',async close(){}};}}" };
       if (args.path.includes('nativeToolchain')) return { loader: 'js', contents: "module.exports={resolveNativeToolchain(root){return {adb:'adb-'+(root||'default'),sdkRoot:'sdk-'+(root||'default'),ndkRoot:'ndk-'+(root||'default')};},findLldbServer(ndk,abi){return 'lldb-'+ndk+'-'+abi;}}" };
-      if (args.path.includes('utils')) return { loader: 'js', contents: "module.exports={randomString(){return 'fixedsocket';}}" };
+      if (args.path.includes('utils')) return { loader: 'js', contents: "let sequence=0;module.exports={randomString(){return 'session'+(++sequence);}}" };
       if (args.path.includes('logger')) return { loader: 'js', contents: "module.exports={logger:{log(){},warn(){}}}" };
       if (args.path === 'teen_process') return { loader:'js', contents:"const s=globalThis.__nativeRuntimeState;module.exports={async exec(command,args,opts){s.calls.push(['exec',command,args,opts]);if(s.emulatorError)throw s.emulatorError;return s.emulatorResult;}}" };
       if (args.path === 'ini') return { loader: 'js', contents: "module.exports={parse(s){ const m=s.match(/avd\.ini\.displayname\s*=\s*(.*)/); return m ? {'avd.ini.displayname': m[1].trim()} : {}; }}" };
@@ -77,6 +85,52 @@ async function loadAndroidRuntime(options = {}) {
   return { api: module.exports, state, fireTimers(ms) { for (const timer of state.timerCallbacks) { if (timer.active && timer.ms === ms) { timer.active = false; timer.fn(); } } } };
 }
 
+test('Native deployment rejects shell metacharacters before device operations', async () => {
+  const loaded = await loadAndroidRuntime();
+  for (const name of ['com.app;id', 'com.app\nother', '', 'com.app/other']) await assert.rejects(loaded.api.startLldbServer({ udid: 'serial' }, name, 'arm64-v8a'), /valid package/);
+  assert.equal(loaded.state.calls.length, 0);
+});
+
+test('Native startup rejection is observed and rolls back the owned subprocess', async () => {
+  const loaded = await loadAndroidRuntime(); loaded.state.failStart = true;
+  await assert.rejects(loaded.api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a'), /start failed/);
+  assert.equal(loaded.state.stopCalls, 1);
+  assert.ok(loaded.state.calls.some(call => call[0] === 'shell' && call[1].includes('rm -rf')));
+});
+
+/** 功能点：Native server 在真实 socket-file 事件前退出时拒绝启动；受影响对象：startLldbServer 的 earlyExit、stop 和部署清理；复现路径：部署成功后让 SubProcess 在就绪事件前发出 exit；测试范围：提前退出异常、一次 stop、部署目录清理；执行入口：node --test tests/native-runtime.test.js；预期结果：不把进程退出误报为就绪，且等待立即拒绝并清理；判据：断言 Native server exited、已退出进程不重复stop且存在 rm -rf 调用。 */
+test('Native startup rejects an early server exit before socket-file readiness', async () => {
+  const loaded = await loadAndroidRuntime(); loaded.state.nativeExitBeforeReady = true;
+  await assert.rejects(loaded.api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a'), /Native server exited before startup/);
+  assert.equal(loaded.state.stopCalls, 0);
+  assert.ok(loaded.state.calls.some(call => call[0] === 'shell' && call[1].includes('rm -rf')));
+});
+
+/** 功能点：忽略不匹配的目录事件；受影响对象：startLldbServer 的 socket-file 事件过滤和 earlyExit；复现路径：先输出错误文件名事件，再让服务退出；测试范围：错误事件不就绪、提前退出和清理；执行入口：node --test tests/native-runtime.test.js；预期结果：错误事件不能完成启动；判据：断言仍收到 earlyExit，而不是返回服务句柄。 */
+test('Native startup ignores unrelated inotify directory events', async () => {
+  const loaded = await loadAndroidRuntime(); loaded.state.nativeReadyEvent = 'mn\t/data/data/com.example.app/android-debug/session1\tother-file\n'; loaded.state.nativeExitBeforeReady = true;
+  await assert.rejects(loaded.api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a'), /Native server exited before startup/);
+  assert.equal(loaded.state.stopCalls, 0);
+});
+
+/** 功能点：同包名Attach后Launch不覆盖忙碌服务；受影响对象：startLldbServer部署/启动/stop；复现路径：第一个服务未停止时启动第二个；测试范围：暂存、包内二进制、socket隔离及单独停止；执行入口：npm test；预期结果：路径不重用且仅停止自身；判据：两组真实生产调用路径不同、stop次数准确。 */
+test('Attach then Launch keeps both Native deployments isolated while the first server is alive', async () => {
+  const loaded = await loadAndroidRuntime(), device = { udid: 'serial', androidProjectRoot: 'project-one' };
+  const first = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
+  const firstCalls = loaded.state.calls.filter(call => call[0] === 'shell').map(call => call[1]);
+  const second = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
+  const pushes = loaded.state.calls.filter(call => call[0] === 'push');
+  const copies = loaded.state.calls.filter(call => call[0] === 'shell' && call[1].includes('cat '));
+  assert.notEqual(pushes[0][2], pushes[2][2]); assert.notEqual(copies[0][1], copies[2][1]);
+  assert.notEqual(first.socket, second.socket); assert.equal(loaded.state.stopCalls, 0);
+  assert.match(firstCalls[0], /android-debug\/session1/); assert.match(copies[2][1], /android-debug\/session3/);
+  assert.doesNotMatch(copies.map(call => call[1]).join('\n'), /android-debug\/lldb\/bin/);
+  await second.stop(); assert.equal(loaded.state.stopCalls, 1);
+  const removed = loaded.state.calls.filter(call => call[0] === 'shell' && call[1].includes('rm -rf'));
+  assert.equal(removed.length, 1); assert.match(removed[0][1], /android-debug\/session3/); assert.doesNotMatch(removed[0][1], /android-debug\/session1/);
+  await first.stop(); assert.equal(loaded.state.stopCalls, 2);
+});
+
 test('Android runtime uses project toolchains and preserves ABI selection', async () => {
   const loaded = await loadAndroidRuntime();
   const one = await loaded.api.getAdb('project-one'); const two = await loaded.api.getAdb('project-two'); const again = await loaded.api.getAdb('project-one');
@@ -84,10 +138,10 @@ test('Android runtime uses project toolchains and preserves ABI selection', asyn
   assert.equal(await loaded.api.getBestAbi({ androidProjectRoot: 'project-one' }, ['arm64-v8a']), 'arm64-v8a');
 });
 
-test('LLDB deployment follows upstream nonblocking startup and awaits stop', async () => {
+test('LLDB deployment waits for startup acknowledgement and awaits stop', async () => {
   const loaded = await loadAndroidRuntime(); const device = { androidProjectRoot: 'project-one', udid: 'serial' };
   const result = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
-  assert.deepEqual(loaded.state.calls.slice(1, 4).map(x => x[0]), ['push', 'shell', 'shell']); assert.equal(loaded.state.calls[3][1].includes('chmod 700'), true); assert.equal(result.socket, '/com.example.app/platform-fixedsocket.sock');
+  assert.deepEqual(loaded.state.calls.slice(1, 4).map(x => x[0]), ['push', 'shell', 'shell']); assert.equal(loaded.state.calls[3][1].includes('chmod 700'), true); assert.equal(result.socket, '/com.example.app/platform-session2.sock');
   await result.stop(); await result.stop(); assert.equal(loaded.state.stopCalls, 1); assert.equal(loaded.state.stopResolved, true);
   loaded.state.failCopy = true; await assert.rejects(() => loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a'), /copy failed/); loaded.state.failCopy = false;
 });
@@ -132,13 +186,10 @@ test('targetCommand propagates LLDB startup errors and awaits cleanup', async ()
 });
 
 
-/** 验证 resumeJavaDebugger 的 setup/cleanup 时序、forward 失败及双错聚合。 */
-test('resumeJavaDebugger awaits disconnect and forward cleanup, including setup and double failures', async () => {
-  const loaded = await loadAndroidRuntime(); const device = { androidProjectRoot: 'project-one', udid: 'serial' };
-  const cleanup = await loaded.api.resumeJavaDebugger(device, '42'); await cleanup();
-  assert.deepEqual(loaded.state.jdwp, ['connect', 'resume', 'disconnect']); assert.equal(loaded.state.calls.at(-1)[0], 'removeForward');
-  const setup = await loadAndroidRuntime(); setup.state.jdwpConnectFail = true; await assert.rejects(() => setup.api.resumeJavaDebugger(device, '42'), /connect failed/); assert.equal(setup.state.jdwp.includes('disconnect'), true); assert.equal(setup.state.calls.at(-1)[0], 'removeForward');
-  const both = await loadAndroidRuntime(); both.state.jdwpResumeFail = true; both.state.failRemoveForward = true; await assert.rejects(() => both.api.resumeJavaDebugger(device, '42'), error => /setup and cleanup failed|cleanup failed/.test(error.message) && error.errors?.length >= 2);
+/** 功能：确认旧恢复及forward接口已退出；输入真实模块；输出无旧API；验证：npm test，恢复协议由Coordinator Java测试覆盖。 */
+test('retired Android forward and resume APIs are absent', async () => {
+  const loaded = await loadAndroidRuntime();
+  for (const name of ['resumeJavaDebugger', 'forwardJdwpPort', 'removeTcpForward']) assert.equal(loaded.api[name], undefined);
 });
 
 /** 验证 androidPaths 激活只注册监听，requireRoot 懒解析并透传工具链错误。 */
@@ -156,13 +207,11 @@ test('androidPaths activation is lazy and require roots delegate shared toolchai
 });
 
 
-/** 验证 resumeWaitingProcess 直接等待 cleanup 门闩，并传播 cleanup 错误。 */
-test('resumeWaitingProcess awaits cleanup and rejects cleanup failures', async () => {
-  const loaded = await loadTargetCommandRuntime(); loaded.state.cleanupPending = true;
-  const pending = loaded.api.resumeWaitingProcess({ device: {}, pid: '42' });
-  await new Promise(resolve => setImmediate(resolve)); assert.equal(loaded.state.resumeCalls, 1); assert.equal(loaded.state.cleanupCalls, 1);
-  let settled = false; pending.then(() => { settled = true; }, () => { settled = true; }); await Promise.resolve(); assert.equal(settled, false); loaded.state.release(); await pending; assert.equal(settled, true);
-  const failed = await loadTargetCommandRuntime(); failed.state.cleanupError = true; await assert.rejects(() => failed.api.resumeWaitingProcess({ device: {}, pid: '42' }), /cleanup failed/);
+/** 功能：拒绝旧手动恢复路径；输入旧命令参数；输出明确迁移错误且无旧资源副作用；验证：npm test。 */
+test('retired manual resume cannot allocate another JDWP path', async () => {
+  const loaded = await loadTargetCommandRuntime();
+  await assert.rejects(loaded.api.resumeWaitingProcess({ device: {}, pid: '42' }), /Coordinator/);
+  assert.equal(loaded.state.resumeCalls, 0);
 });
 
 

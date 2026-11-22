@@ -27,7 +27,7 @@ function fixture(initializeError) {
     constructor(ext, action, preference) { this.preference = preference; f.instances.push(this); }
     async applyDeviceViewMode(visible) { if (f.rejectApply) throw new Error('stream failed'); f.applied.push(visible); }
   }
-  const deps = { './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class {
+  const deps = { './android-debugger/coordinator/androidCoordinator': { AndroidCoordinator: class { async dispose() {} } }, './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class {
     // 保存只读provider但激活时不取值，wiring回归验证Build尚未创建时无访问。
     constructor(post, currentApplicationId, resolveDebugProject) { this.currentApplicationId = currentApplicationId; this.resolveDebugProject = resolveDebugProject; f.explorer = this; }
     async dispose() {}

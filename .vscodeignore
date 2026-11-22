@@ -11,5 +11,6 @@
 !dist/THIRD_PARTY_NOTICES.txt
 !media/*.*
 !media/!(screenshots)/**
-!resources/**
+!resources/*.*
+!resources/!(lldb)/**
 !schemas/**

@@ -134,8 +134,8 @@ test('command wrappers preserve APK root PID ownership current device and forwar
   assert.equal(await api.getPackageNameFromApk('app.apk','project'),'com.example.apk');
   assert.equal(await api.getPackageNameForPid({device:{udid:'serial'},pid:'42'}),'com.example.app');
   assert.equal(await api.resolvePackageName({packageName:'com.explicit'}),'com.explicit');
-  assert.equal(await api.forwardJdwpPort({pid:'42'}),'123');
-  assert.equal(await api.removeTcpForward({udid:'serial'},'123'),'removed');
-  assert.equal(JSON.stringify(state.calls),JSON.stringify([['apk','app.apk','project'],['process','42'],['forward',{udid:'serial'},'42'],['remove',{udid:'serial'},'123']]));
+  assert.equal(api.forwardJdwpPort, undefined);
+  assert.equal(api.removeTcpForward, undefined);
+  assert.equal(JSON.stringify(state.calls),JSON.stringify([['apk','app.apk','project'],['process','42']]));
   state.error=new Error('APK failed'); await assert.rejects(api.getPackageNameFromApk('bad.apk','project'),error=>error===state.error);
 });

@@ -1,0 +1,178 @@
+Android Debug Coordinator 运行时依赖通知
+本文件是原始 NOTICE/COPYRIGHT 汇编，不替代上游 Kotlin 适配器 LICENSE。
+
+===== at/yawk/lz4/lz4-java/1.11.4/lz4-java-1.11.4.jar =====
+JAR SHA-256: 58c8e0b813960d2a248e050c353baea73139b48a2ffc55382d42c69707e17325
+此依赖的已检查原始 JAR 和已登记官方来源中未发现独立 NOTICE/COPYRIGHT；本行仅记录收集结果。
+
+===== com/android/tools/adblib/adblib-tools/9.5.2/adblib-tools-9.5.2.jar =====
+JAR SHA-256: e966ab0241256d517562bb35520c52e8329c2e54e4ea4135a594d888c7af3330
+此依赖的已检查原始 JAR 和已登记官方来源中未发现独立 NOTICE/COPYRIGHT；本行仅记录收集结果。
+
+===== com/android/tools/adblib/adblib/9.5.2/adblib-9.5.2.jar =====
+JAR SHA-256: f574683423bf3683a836e2222cb33e863fcc85c5e4cd5503506edfbd1f6b7dc1
+此依赖的已检查原始 JAR 和已登记官方来源中未发现独立 NOTICE/COPYRIGHT；本行仅记录收集结果。
+
+===== com/google/protobuf/protobuf-java/3.25.5/protobuf-java-3.25.5.jar =====
+JAR SHA-256: 8540247fad9e06baefa8fb45eb313802d019f485f14300e0f9d6b556ed88e753
+此依赖的已检查原始 JAR 和已登记官方来源中未发现独立 NOTICE/COPYRIGHT；本行仅记录收集结果。
+
+===== org/jetbrains/annotations/13.0/annotations-13.0.jar =====
+JAR SHA-256: ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478
+此依赖的已检查原始 JAR 和已登记官方来源中未发现独立 NOTICE/COPYRIGHT；本行仅记录收集结果。
+
+===== org/jetbrains/kotlin/kotlin-stdlib-jdk7/2.2.10/kotlin-stdlib-jdk7-2.2.10.jar =====
+JAR SHA-256: cf95eccc6cc784dff479dee0b8834f3584b93292cc5d91972e82f5d7b9e13e3b
+
+--- license/NOTICE.txt
+来源: https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/NOTICE.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.pom
+原文字节: 482
+---
+   =========================================================================
+   ==  NOTICE file corresponding to the section 4 d of                    ==
+   ==  the Apache License, Version 2.0,                                   ==
+   ==  in this case for the Kotlin Compiler distribution.                 ==
+   =========================================================================
+
+   Kotlin Compiler
+   Copyright 2010-2024 JetBrains s.r.o and respective authors and developers
+
+
+--- license/COPYRIGHT.txt
+来源: https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/COPYRIGHT.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.pom
+原文字节: 647
+---
+/*
+ * Copyright 2010-2024 JetBrains s.r.o. and Kotlin Programming Language contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+===== org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.jar =====
+JAR SHA-256: 8974bfdd08b1d81843fe8d11f0729ab6e5b3c1f88d671ebe0c006358129ce149
+
+--- license/NOTICE.txt
+来源: https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/NOTICE.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.pom
+原文字节: 482
+---
+   =========================================================================
+   ==  NOTICE file corresponding to the section 4 d of                    ==
+   ==  the Apache License, Version 2.0,                                   ==
+   ==  in this case for the Kotlin Compiler distribution.                 ==
+   =========================================================================
+
+   Kotlin Compiler
+   Copyright 2010-2024 JetBrains s.r.o and respective authors and developers
+
+
+--- license/COPYRIGHT.txt
+来源: https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/COPYRIGHT.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.pom
+原文字节: 647
+---
+/*
+ * Copyright 2010-2024 JetBrains s.r.o. and Kotlin Programming Language contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+===== org/jetbrains/kotlin/kotlin-stdlib/2.4.0/kotlin-stdlib-2.4.0.jar =====
+JAR SHA-256: ccb14ff83fabcb11458b798dbc9824748ccdffeec79c9aba789e6ed1cda86b1c
+
+--- license/NOTICE.txt
+来源: https://raw.githubusercontent.com/JetBrains/kotlin/v2.4.0/license/NOTICE.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.4.0/kotlin-stdlib-2.4.0.pom
+原文字节: 482
+---
+   =========================================================================
+   ==  NOTICE file corresponding to the section 4 d of                    ==
+   ==  the Apache License, Version 2.0,                                   ==
+   ==  in this case for the Kotlin Compiler distribution.                 ==
+   =========================================================================
+
+   Kotlin Compiler
+   Copyright 2010-2024 JetBrains s.r.o and respective authors and developers
+
+
+--- license/COPYRIGHT.txt
+来源: https://raw.githubusercontent.com/JetBrains/kotlin/v2.4.0/license/COPYRIGHT.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.4.0/kotlin-stdlib-2.4.0.pom
+原文字节: 647
+---
+/*
+ * Copyright 2010-2024 JetBrains s.r.o. and Kotlin Programming Language contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+===== org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.10.2/kotlinx-coroutines-core-jvm-1.10.2.jar =====
+JAR SHA-256: 5ca175b38df331fd64155b35cd8cae1251fa9ee369709b36d42e0a288ccce3fd
+
+--- license/NOTICE.txt
+来源: https://raw.githubusercontent.com/Kotlin/kotlinx.coroutines/1.10.2/license/NOTICE.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.10.2/kotlinx-coroutines-core-jvm-1.10.2.pom
+原文字节: 452
+---
+=========================================================================
+==  NOTICE file corresponding to the section 4 d of                    ==
+==  the Apache License, Version 2.0,                                   ==
+==  in this case for the kotlinx.coroutines library.                   ==
+=========================================================================
+
+kotlinx.coroutines library.
+Copyright 2016-2025 JetBrains s.r.o and contributors
+
+
+===== org/jetbrains/kotlinx/kotlinx-coroutines-core/1.9.0/kotlinx-coroutines-core-1.9.0.jar =====
+JAR SHA-256: 7089c33c145865020760d3dbca5e4634133cc3dd7feb926e830f6de6ede28ac6
+
+--- license/NOTICE.txt
+来源: https://raw.githubusercontent.com/Kotlin/kotlinx.coroutines/1.9.0/license/NOTICE.txt
+发布 POM: https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core/1.9.0/kotlinx-coroutines-core-1.9.0.pom
+原文字节: 452
+---
+=========================================================================
+==  NOTICE file corresponding to the section 4 d of                    ==
+==  the Apache License, Version 2.0,                                   ==
+==  in this case for the kotlinx.coroutines library.                   ==
+=========================================================================
+
+kotlinx.coroutines library.
+Copyright 2016-2024 JetBrains s.r.o and contributors
+

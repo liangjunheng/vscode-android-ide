@@ -8,7 +8,6 @@ export interface RuntimeDependencies {
   emulator?: string;
   sdkmanager?: string;
   avdmanager?: string;
-  lldbDap?: string;
   lldbServer: (abi: string) => string | undefined;
   ndkRoot?: string;
   jdkRoot?: string;
@@ -124,7 +123,6 @@ export function createRuntimeContext(extensionRoot: string): RuntimeContext {
     emulator: resolveBundledPath(extensionRoot, ['emulator', executable('emulator')]),
     sdkmanager: resolveBundledPath(extensionRoot, ['cmdline-tools', 'latest', 'bin', commandScript('sdkmanager')]),
     avdmanager: resolveBundledPath(extensionRoot, ['cmdline-tools', 'latest', 'bin', commandScript('avdmanager')]),
-    lldbDap: resolveBundledPath(extensionRoot, ['lldb', 'bin', executable('lldb-dap')]),
     lldbServer: abi => resolveBundledLldbServer(extensionRoot, abi),
     ndkRoot: resolveBundledPath(extensionRoot, ['ndk'], 'directory'),
     jdkRoot: resolveBundledPath(extensionRoot, ['jdk'], 'directory'),

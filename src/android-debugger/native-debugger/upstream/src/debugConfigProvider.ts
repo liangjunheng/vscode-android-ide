@@ -139,18 +139,7 @@ export class JavaDebugConfigurationProvider implements vscode.DebugConfiguration
 
         targetPicker.resetCurrentTarget();
 
-        let port = await targetCommand.forwardJdwpPort({
-            device: target,
-            pid: dbgConfig.androidPid,
-        });
-        if (!port) { return null; }
-
-        dbgConfig.androidJdwpPort = port;
-
-        dbgConfig.hostName = "localhost";
-        dbgConfig.port = port;
-
-        logger.log("java resolved debug configuration", dbgConfig);
+        logger.log("java configuration resolved; JDWP lease is owned by the Android debug Coordinator", dbgConfig);
         return dbgConfig;
     }
 }

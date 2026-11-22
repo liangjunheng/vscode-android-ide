@@ -9,7 +9,6 @@ export interface ProjectLocalConfig {
   downloadDirectory?: string;
   debugger?: {
     adbPath?: string;
-    lldbDapPath?: string;
     ndkPath?: string;
     symbolSearchPaths?: string[];
   };
@@ -80,9 +79,9 @@ export function readProjectLocalConfig(projectRoot?: string): ProjectLocalConfig
     }
   }
   if (Object.hasOwn(config, 'debugger')) {
-    const debuggerConfig = configObject(config.debugger, ['adbPath', 'lldbDapPath', 'ndkPath', 'symbolSearchPaths'], filename, 'debugger');
+    const debuggerConfig = configObject(config.debugger, ['adbPath', 'ndkPath', 'symbolSearchPaths'], filename, 'debugger');
     const debuggerPaths: NonNullable<ProjectLocalConfig['debugger']> = {};
-    for (const key of ['adbPath', 'lldbDapPath', 'ndkPath'] as const) {
+    for (const key of ['adbPath', 'ndkPath'] as const) {
       if (Object.hasOwn(debuggerConfig, key)) {
         const value = configPath(debuggerConfig[key], root, filename, `debugger.${key}`);
         if (value !== undefined) debuggerPaths[key] = value;

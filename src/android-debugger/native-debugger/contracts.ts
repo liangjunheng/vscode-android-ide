@@ -30,8 +30,3 @@ export interface NativeChildConfiguration extends vscode.DebugConfiguration {
   androidLldbServerSocket?: string;
   platform?: string;
 }
-
-/** Native provider/factory 暴露给 index 的公开契约。 */
-export interface AndroidNativeDebugAdapterFactory extends vscode.DebugAdapterDescriptorFactory {
-  readonly nativeOnly: true;
-}

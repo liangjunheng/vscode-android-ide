@@ -12,10 +12,6 @@ function onDidTerminateDebugSession(debugSession: vscode.DebugSession) {
     if (debugSession.type === 'lldb' && debugSession.configuration?.androidLldbServerSocket) {
         targetCommand.lldbServerCleanup(debugSession.configuration.androidLldbServerSocket);
     }
-
-    if (debugSession.type === "java" && debugSession.configuration?.androidTarget && debugSession.configuration?.androidJdwpPort) {
-        targetCommand.removeTcpForward(debugSession.configuration.androidTarget, debugSession.configuration.androidJdwpPort);
-    }
 }
 
 export function activate(context: vscode.ExtensionContext) {

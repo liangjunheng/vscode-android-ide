@@ -53,7 +53,7 @@ test('machine specific paths are absent from VSCode settings', () => {
   const schema = require('../schemas/android-ide.local.schema.json');
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(Object.keys(schema.properties).sort(), ['debugger', 'downloadDirectory', 'scrcpyPath', 'sdkPath']);
-  assert.deepEqual(Object.keys(schema.properties.debugger.properties).sort(), ['adbPath', 'lldbDapPath', 'ndkPath', 'symbolSearchPaths']);
+  assert.deepEqual(Object.keys(schema.properties.debugger.properties).sort(), ['adbPath', 'ndkPath', 'symbolSearchPaths']);
   for (const document of ['README.md', 'CONTRIBUTING.md']) {
     const text = fs.readFileSync(path.join(__dirname, '..', document), 'utf8');
     assert.equal(text.includes('android-ide.sdkPath'), false, document);
@@ -91,13 +91,13 @@ test('runtime registers only android-ide commands and views', () => {
       { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : Object.hasOwn(deps, id) ? deps[id] : require(id) });
     return module.exports;
   }
-  class Provider {}
+  class Provider { async initialize() {} }
   const deviceManager = load('deviceManager.ts', { vscode, './sdk': {} });
   const extension = load('extension.ts', {
-    vscode, './deviceManager': deviceManager,
+    vscode, './android-debugger/coordinator/androidCoordinator': { AndroidCoordinator: class { async dispose() {} } }, './deviceManager': deviceManager,
     './runningDevices': { RunningDeviceView: Provider }, './deviceExplorer': { DeviceExplorerController: Provider },
     './androidBuild': { AndroidBuildController: Provider }, './logcat': { LogcatView: Provider },
-    './extendedControls': {}, './android-debugger/native-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} },
+    './extendedControls': {}, './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} },
   });
   extension.activate({ extensionPath: '', subscriptions: [] });
   const p = require('../package.json');

@@ -6,6 +6,7 @@ import { adbPath } from './sdk';
 import { getAndroidDebugConfigurations, selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
 import { discoverVariantSources, NativeSourceModule } from './androidProjectModel';
 import { GradleToolingClient } from './gradleTooling';
+import { omitAuto } from './android-debugger/autoConfig';
 
 interface Project { id: string; label: string; root: string; wrapper: string; tasks: string[]; }
 interface ApkMetadata { applicationId: string; elements?: unknown; }
@@ -388,7 +389,8 @@ export class AndroidBuildController implements vscode.Disposable {
     if (!serial || !/^[\w.:-]+$/.test(serial)) throw new Error('Select an online device serial first.');
     const selectedMode = action === 'run' ? this.selectedRunMode() : undefined;
     const effectiveAction = selectedMode?.action ?? action;
-    const config = effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project) : undefined;
+    const selectedConfig = effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project) : undefined;
+    const config = selectedConfig ? omitAuto(selectedConfig) : undefined;
     this.check(operation);
     if (effectiveAction === 'debug' && !config) return 'Debug cancelled';
     const online = await this.run(operation, adbPath(), ['-s', serial, 'get-state'], project.root);

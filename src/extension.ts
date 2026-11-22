@@ -5,9 +5,12 @@ import { DeviceExplorerController } from './deviceExplorer';
 import { LogcatView } from './logcat';
 import { openExtendedControls } from './extendedControls';
 import { AndroidBuildController } from './androidBuild';
-import { createAndroidDebugAdapterFactory } from './android-debugger/native-debugger/adapter';
+import { createAndroidDebugAdapterFactory } from './android-debugger/adapter';
 import { initializeRuntimeContext, resetRuntimeContext } from './runtimeContext';
 import { registerJvmDebugger } from './android-debugger/jvm-debugger/adapter';
+import { AndroidCoordinator } from './android-debugger/coordinator/androidCoordinator';
+
+let closeDebuggers: (() => Promise<void>) | undefined;
 
 /** 检测工作区是否包含 Android 项目入口，并同步控制设备视图的工作台可见性。 */
 async function refreshGradleProjectContext(): Promise<void> {
@@ -61,14 +64,21 @@ export function activate(ctx: vscode.ExtensionContext) {
   const nativeMirror = vscode.workspace.getConfiguration('android-ide').get<boolean>('nativeMirror', false);
   const running = new RunningDeviceView(ctx.extensionPath, (message, serial) => build.handle(message, serial), preference, serial => logcat.select(serial), explorer, nativeMirror);
   const build = new AndroidBuildController(message => { running.publishBuildState(message); logcat.publishBuildState(message); }, ctx.extensionPath, ctx.workspaceState);
-  registerJvmDebugger(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath)?.packageName : undefined);
+  const coordinator = new AndroidCoordinator(ctx.extensionPath);
+  const jvmFactory = registerJvmDebugger(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath)?.packageName : undefined, coordinator);
   const logcat = new LogcatView(ctx.extensionPath, serial => running.select(serial ? { serial } : undefined), (message, serial) => build.handle(message, serial));
   // Device Tools刷新同时刷新设备列表和Gradle项目/Android variants；任一刷新失败都交给命令入口显示真实错误。
   const refresh = () => Promise.all([
     running.refresh(),
     build.handle({ type: 'buildPanel', action: 'refresh' }),
   ]).catch(error => vscode.window.showErrorMessage(String(error)));
-  const androidFactory = createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined);
+  const androidFactory = createAndroidDebugAdapterFactory(ctx, folder => folder ? build.currentNativeDebugMetadata(folder.uri.fsPath) : undefined, coordinator);
+  closeDebuggers = async () => {
+    const results = await Promise.allSettled([Promise.resolve(androidFactory.dispose()), jvmFactory.dispose()]);
+    try { await coordinator.dispose(); } catch (error) { results.push({ status: 'rejected', reason: error }); }
+    const errors = results.filter((value): value is PromiseRejectedResult => value.status === 'rejected').map(value => value.reason);
+    if (errors.length) throw new AggregateError(errors, 'Android debugger shutdown failed');
+  };
   ctx.subscriptions.push(
     vscode.debug.registerDebugAdapterDescriptorFactory('android-tools', androidFactory),
     vscode.debug.registerDebugAdapterDescriptorFactory('android-debug', androidFactory),
@@ -96,5 +106,7 @@ export function activate(ctx: vscode.ExtensionContext) {
   build.initialize().catch(error => vscode.window.showErrorMessage(String(error)));
 }
 
-// 停用时释放唯一依赖上下文；runtime-context回归验证下一次激活不会保留旧根目录。
-export function deactivate() { resetRuntimeContext(); }
+/** 功能：停用时等待调试引擎和控制面清理；输入扩展生命周期通知；输出完整关闭结果；验证：android-coordinator.test.js、vsix-content.test.js。 */
+export async function deactivate(): Promise<void> {
+  try { await closeDebuggers?.(); } finally { closeDebuggers = undefined; resetRuntimeContext(); }
+}

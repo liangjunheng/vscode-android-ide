@@ -1,0 +1,71 @@
+{
+  "description": "仅补充已核对发布 POM 官方来源且归档缺失的原文；实际依赖集合由 Maven runtime 解析决定，不以本表筛选依赖。摘要对应官方版本原始字节，未知无许可依赖必须阻断发布。",
+  "sources": [
+    {
+      "artifacts": ["org/jetbrains/kotlin/kotlin-stdlib/2.4.0/kotlin-stdlib-2.4.0.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.4.0/kotlin-stdlib-2.4.0.pom",
+      "files": [
+        { "path": "license/LICENSE.txt", "url": "https://raw.githubusercontent.com/JetBrains/kotlin/v2.4.0/license/LICENSE.txt", "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+        { "path": "license/NOTICE.txt", "url": "https://raw.githubusercontent.com/JetBrains/kotlin/v2.4.0/license/NOTICE.txt", "sha256": "0b09a83d3ef7795c7dec65e815866597c066c53898f2852a76599b8f5552941a" },
+        { "path": "license/COPYRIGHT.txt", "url": "https://raw.githubusercontent.com/JetBrains/kotlin/v2.4.0/license/COPYRIGHT.txt", "sha256": "8f1a1700adb5490604c6094fb137bf73f6c28d3ee554b58f3ff8ef975a79672d" }
+      ]
+    },
+    {
+      "artifacts": ["org/jetbrains/kotlin/kotlin-stdlib-jdk7/2.2.10/kotlin-stdlib-jdk7-2.2.10.jar", "org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.10/kotlin-stdlib-jdk8-2.2.10.pom",
+      "files": [
+        { "path": "license/LICENSE.txt", "url": "https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/LICENSE.txt", "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+        { "path": "license/NOTICE.txt", "url": "https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/NOTICE.txt", "sha256": "0b09a83d3ef7795c7dec65e815866597c066c53898f2852a76599b8f5552941a" },
+        { "path": "license/COPYRIGHT.txt", "url": "https://raw.githubusercontent.com/JetBrains/kotlin/v2.2.10/license/COPYRIGHT.txt", "sha256": "8f1a1700adb5490604c6094fb137bf73f6c28d3ee554b58f3ff8ef975a79672d" }
+      ]
+    },
+    {
+      "artifacts": ["org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.10.2/kotlinx-coroutines-core-jvm-1.10.2.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.10.2/kotlinx-coroutines-core-jvm-1.10.2.pom",
+      "files": [
+        { "path": "LICENSE.txt", "url": "https://raw.githubusercontent.com/Kotlin/kotlinx.coroutines/1.10.2/LICENSE.txt", "sha256": "b1febe6399dffb10d19d35e7663ab16300c93cb0476a94115df1cc0097a8ffd8" },
+        { "path": "license/NOTICE.txt", "url": "https://raw.githubusercontent.com/Kotlin/kotlinx.coroutines/1.10.2/license/NOTICE.txt", "sha256": "1ab6de67ef738bffae63f9aa6a8798a35e87341c83ea28d09c8dc8ca6993232a" }
+      ]
+    },
+    {
+      "artifacts": ["org/jetbrains/kotlinx/kotlinx-coroutines-core/1.9.0/kotlinx-coroutines-core-1.9.0.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core/1.9.0/kotlinx-coroutines-core-1.9.0.pom",
+      "files": [
+        { "path": "LICENSE.txt", "url": "https://raw.githubusercontent.com/Kotlin/kotlinx.coroutines/1.9.0/LICENSE.txt", "sha256": "b1febe6399dffb10d19d35e7663ab16300c93cb0476a94115df1cc0097a8ffd8" },
+        { "path": "license/NOTICE.txt", "url": "https://raw.githubusercontent.com/Kotlin/kotlinx.coroutines/1.9.0/license/NOTICE.txt", "sha256": "421d45acbd92670b4131621a28fcbb41ba0b747d3a336cb13fca38c0685426c4" }
+      ]
+    },
+    {
+      "artifacts": ["com/google/protobuf/protobuf-java/3.25.5/protobuf-java-3.25.5.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/com/google/protobuf/protobuf-parent/3.25.5/protobuf-parent-3.25.5.pom",
+      "files": [
+        { "path": "LICENSE", "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.5/LICENSE", "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d" }
+      ]
+    },
+    {
+      "artifacts": ["at/yawk/lz4/lz4-java/1.11.4/lz4-java-1.11.4.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/at/yawk/lz4/lz4-java/1.11.4/lz4-java-1.11.4.pom",
+      "files": [
+        { "path": "LICENSE.txt", "url": "https://raw.githubusercontent.com/yawkat/lz4-java/v1.11.4/LICENSE.txt", "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+        { "path": "src/lz4/lib/LICENSE", "url": "https://raw.githubusercontent.com/lz4/lz4/ebb370ca83af193212df4dcbadcc5d87bc0de2f0/lib/LICENSE", "sha256": "8b58c446121a109ccf32edc094bba3010a3d85e4ee3702950db55e4d3e87736c" },
+        { "path": "src/lz4/lib/xxhash.h", "kind": "license", "byteRange": [0, 1585], "url": "https://raw.githubusercontent.com/lz4/lz4/ebb370ca83af193212df4dcbadcc5d87bc0de2f0/lib/xxhash.h", "sha256": "aefdd236f35130495c18764cabed3f7b216906855fc5e6a9025cd2040bc84444" }
+      ],
+      "provenance": "发布 POM 的 SCM 指向 yawkat/lz4-java；v1.11.4 的 src/lz4 子模块精确指向 ebb370ca83af193212df4dcbadcc5d87bc0de2f0。xxhash.h 仅取首个完整原始许可注释 [0,1585)，整份来源仍校验 SHA-256。",
+      "sourceTree": "https://github.com/yawkat/lz4-java/tree/v1.11.4/src"
+    },
+    {
+      "artifacts": ["org/jetbrains/annotations/23.0.0/annotations-23.0.0.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/org/jetbrains/annotations/23.0.0/annotations-23.0.0.pom",
+      "files": [
+        { "path": "LICENSE.txt", "url": "https://raw.githubusercontent.com/JetBrains/java-annotations/23.0.0/LICENSE.txt", "sha256": "8c1e966c7855fb54027bcaf6ebe7a43abe4785791e8cf9148c363761d493d097" }
+      ]
+    },
+    {
+      "artifacts": ["org/jetbrains/annotations/13.0/annotations-13.0.jar"],
+      "pom": "https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0.pom",
+      "files": [
+        { "path": "LICENSE-2.0.txt", "url": "https://www.apache.org/licenses/LICENSE-2.0.txt", "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" }
+      ]
+    }
+  ]
+}

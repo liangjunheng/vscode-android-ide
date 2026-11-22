@@ -8,6 +8,9 @@ const { EventEmitter } = require('node:events');
 const { transformSync } = require('esbuild');
 const source = fs.readFileSync(path.join(__dirname, '../src/androidBuild.ts'), 'utf8');
 const debuggerSource = fs.readFileSync(path.join(__dirname, '../src/android-debugger/index.ts'), 'utf8');
+const autoModule = { exports: {} };
+vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/android-debugger/autoConfig.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module: autoModule, exports: autoModule.exports });
+const autoApi = autoModule.exports;
 const tasks = 'app:assembleDebug - APK\n:app:installDebug - install\napp:assembleRelease\napp:installRelease\nassemble - aggregate\napp:test - tests\n';
 
 // 创建临时工程及真实 EventEmitter 子进程替身；可配置tasks供current application ID多模块回归，npm test断言关闭、失败、取消和选择隔离，不执行用户Gradle。
@@ -77,7 +80,7 @@ function fixture(t, platform = 'linux') {
     return { moduleRoot: path.join(selection.projectRoot, ...selection.modulePath.slice(1).split(':')), roots: [], ...f.sourceModel };
   } };
   const debuggerModule = { exports: {} };
-  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : require(id), Promise });
+  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : require(id), Promise });
   const debugApi = { ...debuggerModule.exports, startAndroidDebugging: async (folder, config, target) => {
     (f.debugRequests ??= []).push({ folder, config, target });
     return debuggerModule.exports.startAndroidDebugging(folder, config, target);
@@ -86,7 +89,7 @@ function fixture(t, platform = 'linux') {
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, AbortController, console,
     process: { platform, env: {}, kill: pid => { assert.equal(pid, -f.held.pid); if (f.closeOnKill) f.held.finish(null, 'SIGTERM'); } },
-    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
+    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
       async query(root, signal) { if (f.toolingTasks) return f.toolingTasks; return f.parse(await f.controller.run({ controller: { signal } }, 'tooling-api', ['tasks'], root)); }
       async dispose() {}
     } } : require(id),
@@ -411,7 +414,7 @@ test('android-build actual Tooling API discovers the selected project variants',
   };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController,
-    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(state => states.push(state), path.resolve(__dirname, '..'));
   t.after(() => controller.dispose());
   const times = [];
@@ -619,8 +622,8 @@ test('android-build all six built-in configurations debug without Gradle install
     assert.equal(config.apkPath, undefined); assert.equal(config.androidApkInstalled, undefined);
     assert.equal(config.androidSourceRoots, undefined); assert.equal(config.sourcePaths, undefined);
     assert.equal(config.java?.sourcePaths, undefined);
-    assert.equal(config.native?.abi, 'auto');
-    assert.deepEqual(JSON.parse(JSON.stringify(config.native?.symbolSearchPaths)), []);
+    assert.equal(config.native?.abi, undefined);
+    if (config.native) assert.deepEqual(JSON.parse(JSON.stringify(config.native.symbolSearchPaths ?? [])), []);
     assert.equal(f.calls.length, before + 1);
     assert.ok(f.calls.at(-1).args.includes('get-state'));
     assert.equal(f.modelCalls.length, 0);
@@ -634,7 +637,7 @@ test('android-build all six built-in configurations debug without Gradle install
 test('android-build preserves explicit Android and external options without model discovery', async t => {
   const f = fixture(t); await f.action('refresh');
   for (const type of ['android-debug', 'android-tools', 'android-jvm', 'third-party']) {
-    const selected = { name: 'Explicit ' + type, type, request: 'launch', ...(type === 'android-jvm' ? { android: true } : {}),
+    const selected = { name: 'Android: Native Debug Launch', type, request: 'launch', ...(type === 'android-jvm' ? { android: true } : {}),
       mode: type === 'android-tools' ? 'native' : 'dual', packageName: 'com.user.chosen', target: 'explicit-target', serial: 'explicit-serial',
       apkPath: '/explicit/app.apk', androidProjectRoot: '/explicit/root', preLaunchTask: 'user task', sourcePaths: ['top-src'],
       java: { type: 'android-jvm', sourcePaths: ['java-src'] }, native: { abi: 'x86', symbolSearchPaths: ['symbols'] } };
@@ -720,7 +723,7 @@ test('android-build debug starts built-in sessions with source roots and preserv
     assert.equal(requested.request, 'launch');
     assert.equal(requested.androidMode, undefined);
     assert.equal(requested.mode, 'native');
-    assert.deepEqual(JSON.parse(JSON.stringify(requested.native)), {});
+    assert.deepEqual(JSON.parse(JSON.stringify(requested.native)), { symbolSearchPaths: [] });
     assert.equal(requested.androidAbiSupported, undefined);
     assert.equal(requested.serial, 'phone');
     assert.equal(requested.packageName, 'com.example.app');
@@ -734,7 +737,7 @@ test('android-build debug starts built-in sessions with source roots and preserv
     await f.action('stop');
     assert.equal(f.last().running, false);
   }
-  f.configs = [{ name: 'One', type: 'adapter', request: 'launch' }, { name: 'Two', type: 'adapter', request: 'attach' }];
+  f.configs = [{ name: 'Android: Native Debug Launch', type: 'adapter', request: 'launch' }, { name: 'Android: Native Debug Attach', type: 'adapter', request: 'attach' }];
   f.pickIndex = undefined;
   const callsBeforeCancel = f.calls.length, debugBeforeCancel = f.debugCalls.length;
   f.choose = false; await f.action('debug', undefined, 'phone'); assert.equal(f.last().status, 'Debug cancelled');
@@ -743,7 +746,7 @@ test('android-build debug starts built-in sessions with source roots and preserv
   f.choose = true; await f.action('debug', undefined, 'phone');
   assert.equal(f.modelCalls.length, modelCount);
   assert.equal(f.commands.length, 1);
-  assert.equal(f.debugCalls.at(-1)[1].name, 'Two');
+  assert.equal(f.debugCalls.at(-1)[1].name, 'Android: Native Debug Attach');
   assert.equal(f.debugCalls.at(-1)[1].request, 'attach');
   assert.equal(f.debugCalls.at(-1)[1].androidProjectRoot, undefined);
   assert.equal(f.debugCalls.at(-1)[1].androidModuleRoot, undefined);
@@ -945,7 +948,7 @@ test('android-build real Windows source runner preserves generated init path wit
   const script = path.join(root, 'generated ! init.gradle'); fs.writeFileSync(script, '// fixture');
   fs.writeFileSync(path.join(root, 'gradlew.bat'), '@echo off\r\necho FIRST=%1\r\necho SECOND=%~2\r\nif not exist "%~2" exit /b 91\r\nif not "%~3"==":app:__dshSourceIndex" exit /b 92\r\n');
   const module = { exports: {} }, channel = { replace() {}, show() {}, dispose() {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(() => {});
   const text = await controller.run({ controller: new AbortController() }, path.join(root, 'gradlew.bat'), ['--init-script', script, ':app:__dshSourceIndex'], root, process.env, script);
   assert.ok(text.includes('FIRST=--init-script')); assert.ok(text.includes('SECOND=' + script), JSON.stringify({ text, script })); await controller.dispose();
@@ -1002,7 +1005,7 @@ test('android-build real Windows wrapper executes in a path with spaces', { skip
   const channel = { text: '', replace(s) { this.text = s; }, show() {}, dispose() {} };
   const vscode = { workspace: { isTrusted: true, findFiles: async () => [{ fsPath: path.join(root, 'gradlew.bat') }] }, window: { createOutputChannel: () => channel } };
   const module = { exports: {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
   const states = [], controller = new module.exports.AndroidBuildController(m => states.push(m));
   await controller.handle({ type: 'buildPanel', action: 'refresh' });
   assert.equal(states.at(-1).target, ':app:Debug');

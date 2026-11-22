@@ -46,7 +46,7 @@ test('reports missing bundled dependencies and preserves initialized context', t
   assert.strictEqual(first, second);
   assert.equal(first.dependencies.adb, undefined);
   assert.equal(fs.existsSync(legacyAdb), true);
-  assert.equal(first.dependencies.lldbDap, undefined);
+  assert.equal(Object.hasOwn(first.dependencies, 'lldbDap'), false);
   assert.equal(first.dependencies.lldbServer('arm64-v8a'), undefined);
   assert.equal(first.dependencies.ndkRoot, undefined);
   assert.throws(() => runtime.initializeRuntimeContext(path.join(f.root, 'another')), /already initialized/);
@@ -62,7 +62,6 @@ test('resolves every bundled dependency and platform naming convention', t => {
     emulator: ['emulator', f.host, runtime.executable('emulator')],
     sdkmanager: ['cmdline-tools', f.host, 'latest', 'bin', runtime.commandScript('sdkmanager')],
     avdmanager: ['cmdline-tools', f.host, 'latest', 'bin', runtime.commandScript('avdmanager')],
-    lldbDap: ['lldb', f.host, 'bin', runtime.executable('lldb-dap')],
   };
   for (const parts of Object.values(candidates)) { const filename = path.join(base, ...parts); fs.mkdirSync(path.dirname(filename), { recursive: true }); fs.writeFileSync(filename, 'fixture'); }
   for (const name of ['ndk', 'jdk', 'system-images']) fs.mkdirSync(path.join(base, name, f.host), { recursive: true });

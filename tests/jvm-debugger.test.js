@@ -7,7 +7,13 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { transformSync } = require('esbuild');
 
-/** 隔离VS Code/ADB/进程边界加载真实适配层；所有用例执行生产函数并断言可见结果。 */
+/** 功能点：Android JVM 会话接入 Coordinator。
+ * 受影响对象：JvmConfigurationProvider、AndroidJvmAdapter、JvmAdapterFactory。
+ * 复现路径：Node>=22，使用可控 stdio 子进程和真实 Coordinator facade，发送 Attach/Launch/关闭请求。
+ * 测试范围：设备选择、动态/外部/父端口、取消、异常、DAP 帧及资源回收。
+ * 执行入口：npm test；定向 node --test tests/jvm-debugger.test.js。
+ * 预期结果：只申请自有租约、取消不启动后端、先关闭 JAR 再释放租约。
+ * 判据：真实函数的协议输出、错误及释放顺序与断言全部一致。 */
 function fixture() {
   const f = { calls: [], errors: [], registrations: [], devices: [{ serial: 'phone', state: 'device' }], exists: true };
   class Emitter {
@@ -34,7 +40,26 @@ function fixture() {
   vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/index.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
     { module: configModule, exports: configModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : require(id) });
   const module = { exports: {} };
+  const coordinatorModule = { exports: {} };
+  class CoordinatorClient {
+    onEvent(listener) { (f.listeners ??= new Set()).add(listener); return { dispose: () => f.listeners.delete(listener) }; }
+    async command(operation, args, signal) {
+      signal?.throwIfAborted();
+      f.calls.push({ operation, args: Array.from(args), signal });
+      if (f.command) return f.command(operation, args, signal);
+      if (operation === 'devices') return f.devices.map(d => d.serial + '\t' + d.state).join('\n');
+      if (operation === 'clients') return '42\tcom.example.app';
+      if (operation === 'launch') return '42';
+      if (operation === 'claim') return '19\t4567';
+      return '';
+    }
+    async dispose() {}
+  }
+  vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/coordinator/androidCoordinator.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
+    { module: coordinatorModule, exports: coordinatorModule.exports, require: () => ({ AndroidDebugCoordinatorClient: CoordinatorClient }), AbortController, AggregateError });
+  f.coordinator = new coordinatorModule.exports.AndroidCoordinator('/extension');
   const dependencies = {
+    '../coordinator/androidCoordinator': coordinatorModule.exports,
     vscode,
     './autoConfig': { omitAuto: config => ({ ...config }) },
     '../jdwpForward': { createJdwpForward: async (adb, serial, pid, requestedPort, signal) => {
@@ -53,6 +78,8 @@ function fixture() {
       async adbExec(adb, serial, args, signal) {
         f.calls.push({ adb, serial, args: Array.from(args), signal });
         if (f.adb) return f.adb(args, signal);
+        if (args[0] === 'jdwp') return '42\n';
+        if (args[0] === 'shell' && args[1]?.includes('__ANDROID_DEBUG_PID__')) return 'Starting: Intent { cmp=com.example.app/.MainActivity }\n__ANDROID_DEBUG_PID__\n42\n';
         return args[0] === 'forward' ? args[1] === '--remove' ? '' : '4567' : args.includes('pidof') ? '42' : 'Status: ok';
       },
     },
@@ -70,7 +97,7 @@ function childFixture(f, config = { android: true, request: 'launch', serial: 'p
   const child = new EventEmitter();
   Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
   child.kill = () => { f.kills = (f.kills ?? 0) + 1; child.emit('close', 0); return true; };
-  const adapter = new f.api.AndroidJvmAdapter(child, config, error => f.errors.push(error));
+  const adapter = new f.api.AndroidJvmAdapter(child, config, error => f.errors.push(error), f.coordinator);
   const output = [], writes = [];
   adapter.onDidSendMessage(message => output.push(message));
   child.stdin.on('data', chunk => writes.push(Buffer.from(chunk)));
@@ -101,7 +128,7 @@ test('JVM settings use an extension-owned namespace without upstream collisions'
 test('JVM built-in providers are isolated and registered as initial plus dynamic', async () => {
   const f = fixture();
   const context = { subscriptions: [] };
-  f.api.registerJvmDebugger(context);
+  f.api.registerJvmDebugger(context, undefined, f.coordinator);
   assert.ok(f.registrations.filter(row => row[0] === 'factory' && row[1] === 'android-jvm').length === 1); assert.ok(f.registrations.filter(row => row[0] === 'provider' && row[1] === 'android-jvm').length >= 2);
   assert.ok(f.registrations.some(row => row[0] === 'provider' && row[3] === 2));
   const provider = f.registrations.find(row => row[0] === 'provider' && row[1] === 'android-jvm')[2];
@@ -131,7 +158,7 @@ test('JVM provider supports upstream launch attach defaults and rejects invalid 
 
 test('Android provider selects devices validates identity and resolves Build package lazily', async () => {
   const f = fixture(); let reads = 0;
-  const provider = new f.api.JvmConfigurationProvider(() => { reads++; return 'com.example.app'; });
+  const provider = new f.api.JvmConfigurationProvider(() => { reads++; return 'com.example.app'; }, f.coordinator);
   const input = { type: 'android-jvm', request: 'attach', name: 'Android child', android: true, target: 'select' };
   const config = await provider.resolveDebugConfiguration(undefined, input);
   assert.equal(config.serial, 'phone'); assert.equal(config.packageName, 'com.example.app'); assert.equal(input.serial, undefined);
@@ -168,9 +195,7 @@ test('Android explicit task and port remain user-managed for attach and launch',
     assert.equal(f.calls.some(call => call.args[0] === 'forward'), false, command);
     const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
     assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 5005); assert.equal(sent.arguments.hostName, 'remote.example');
-    if (command === 'launch') assert.deepEqual(f.calls.map(call => call.args), [
-      ['shell', 'am', 'force-stop', 'com.example.app'], ['shell', 'am', 'start', '-D', '-n', 'com.example.app/.MainActivity'], ['shell', 'pidof', 'com.example.app'],
-    ]);
+    if (command === 'launch') assert.deepEqual(f.calls.map(call => [call.operation, ...call.args]), [['launch', 'phone', 'com.example.app', '']]);
     await x.adapter.close();
     assert.equal(f.calls.some(call => call.args[0] === 'forward'), false, command);
   }
@@ -207,24 +232,18 @@ test('Android attach and launch reject nonnumeric port values before ADB', async
 /** Attach-only内置模式只查询现有进程，不安装/启动APK，并使用动态forward端口。 */
 test('Android attach-only resolves an existing package PID without installing or launching', async () => {
   const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', packageName: 'com.example.app' });
-  f.adb = async args => args.includes('pidof') ? '42' : args[1] === 'tcp:0' ? '4567' : '';
   x.adapter.handleMessage({ type: 'request', seq: 7, command: 'attach', arguments: {} }); await started(x.adapter);
-  assert.deepEqual(f.calls.map(call => call.args), [['shell', 'pidof', '-s', 'com.example.app'], ['forward', 'tcp:0', 'jdwp:42']]);
+  assert.deepEqual(f.calls.map(call => [call.operation, ...call.args]), [['clients', 'phone'], ['claim', 'phone', '42']]);
   const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
   assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 4567);
-  await x.adapter.close(); assert.deepEqual(f.calls.at(-1).args, ['forward', '--remove', 'tcp:4567']);
+  await x.adapter.close(); assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']);
 });
 
 test('Android launch forwards exact PID and preserves backend DAP response and UTF8 frames', async () => {
   const f = fixture(), x = childFixture(f);
   x.adapter.handleMessage({ type: 'request', seq: 7, command: 'launch', arguments: {} });
   await started(x.adapter);
-  assert.equal(f.calls[0].args.includes('-W'), false);
-  assert.deepEqual(f.calls.map(call => call.args), [
-    ['shell', 'am', 'force-stop', 'com.example.app'],
-    ['shell', 'am', 'start', '-D', '-n', 'com.example.app/.MainActivity'],
-    ['shell', 'pidof', 'com.example.app'], ['forward', 'tcp:0', 'jdwp:42'],
-  ]);
+  assert.deepEqual(f.calls.map(call => [call.operation, ...call.args]), [['launch', 'phone', 'com.example.app', ''], ['claim', 'phone', '42']]);
   const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
   assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 4567);
   const response = frame({ type: 'response', seq: 1, request_seq: 7, command: 'attach', success: true });
@@ -234,16 +253,16 @@ test('Android launch forwards exact PID and preserves backend DAP response and U
   x.child.stdout.write(Buffer.concat([frame(event), frame({ type: 'event', seq: 3, event: 'initialized' })]));
   assert.equal(x.output[1].body.output, '中文'); assert.equal(x.output[2].event, 'initialized');
   const close = x.adapter.close(); assert.equal(close, x.adapter.close()); await close;
-  assert.deepEqual(f.calls.at(-1).args, ['forward', '--remove', 'tcp:4567']); assert.equal(f.kills, 1);
+  assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']); assert.equal(f.kills, 1);
 });
 
 test('Android attach owns forward and refuses ambiguous launch process or ADB failures', async () => {
   const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 52 });
   x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-  assert.deepEqual(f.calls[0].args, ['forward', 'tcp:0', 'jdwp:52']); await x.adapter.close();
+  assert.equal(f.calls[0].operation, 'claim'); assert.deepEqual(f.calls[0].args, ['phone', '52']); await x.adapter.close();
   for (const failure of ['ambiguous', 'adb']) {
     const g = fixture(), y = childFixture(g);
-    g.adb = async args => { if (failure === 'adb') throw new Error('ADB denied'); return args.includes('pidof') ? '42 43' : 'Status: ok'; };
+    g.command = async () => { throw new Error(failure === 'adb' ? 'ADB denied' : 'Expected exactly one Android Client'); };
     y.adapter.handleMessage({ type: 'request', seq: 2, command: 'launch', arguments: {} }); await started(y.adapter);
     assert.equal(y.output[0].success, false); assert.match(y.output[0].message, failure === 'adb' ? /ADB denied/ : /exactly one/);
     assert.equal(y.writes.length, 0); await y.adapter.close();
@@ -253,11 +272,11 @@ test('Android attach owns forward and refuses ambiguous launch process or ADB fa
 test('Android startup cancellation after forward awaits ownership and removes only allocated port', async () => {
   const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
   let resolveForward;
-  f.adb = async args => args[1] === 'tcp:0' ? new Promise(resolve => { resolveForward = resolve; }) : '';
+  f.command = async operation => operation === 'claim' ? new Promise(resolve => { resolveForward = resolve; }) : '';
   x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} });
-  const closing = x.adapter.close(); resolveForward('4567'); await closing;
+  const closing = x.adapter.close(); resolveForward('19\t4567'); await closing;
   assert.equal(x.output.find(message => message.request_seq === 1).success, false);
-  assert.deepEqual(f.calls.at(-1).args, ['forward', '--remove', 'tcp:4567']); assert.equal(x.writes.length, 0);
+  assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']); assert.equal(x.writes.length, 0);
 });
 
 /** 后端终止/断开都必须释放forward，终止事件只发一次且保留原body。 */
@@ -268,17 +287,34 @@ test('Android backend termination and disconnect response close the owned JAR an
     if (!event) x.adapter.handleMessage({ type: 'request', seq: 2, command: 'disconnect', arguments: {} });
     x.child.stdout.write(frame(event ? { type: 'event', seq: 3, event: 'terminated', body: { restart: false } } : { type: 'response', seq: 3, request_seq: 2, command: 'disconnect', success: true }));
     await x.adapter.close(); await new Promise(resolve => setImmediate(resolve));
-    assert.equal(f.kills, 1); assert.deepEqual(f.calls.at(-1).args, ['forward', '--remove', 'tcp:4567']);
+    assert.equal(f.kills, 1); assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']);
     assert.equal(x.output.filter(message => message.event === 'terminated').length, 1);
     if (event) assert.equal(x.output.find(message => message.event === 'terminated').body.restart, false);
     else assert.equal(x.output.find(message => message.request_seq === 2).success, true);
   }
 });
 
+test('owned JDWP lease always connects to loopback even when hostName is supplied', async () => {
+  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42, hostName: 'remote.example' });
+  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
+  const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
+  assert.equal(sent.arguments.hostName, '127.0.0.1'); await x.adapter.close();
+});
+
+test('JVM child termination is delivered even if lease cleanup fails', async () => {
+  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
+  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
+  f.command = async operation => { if (operation === 'release') throw new Error('release denied'); return ''; };
+  const terminated = Promise.withResolvers();
+  x.adapter.onDidSendMessage(message => { if (message.event === 'terminated') terminated.resolve(); });
+  x.child.emit('close', 0); await terminated.promise;
+  assert.equal(x.output.filter(message => message.event === 'terminated').length, 1); assert.ok(f.errors.length > 0);
+});
+
 test('Android cleanup and malformed transport errors remain visible', async () => {
   const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
   x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-  f.adb = async args => { if (args[1] === '--remove') throw new Error('remove denied'); return '4567'; };
+  f.command = async operation => { if (operation === 'release') throw new Error('remove denied'); return ''; };
   await assert.rejects(x.adapter.close(), /cleanup/);
   const g = fixture(), y = childFixture(g);
   y.child.stdout.write(Buffer.from('Broken: 1\r\n\r\nx')); await y.adapter.close();

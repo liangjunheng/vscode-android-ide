@@ -13,7 +13,7 @@ function load(name, dependencies) {
   const module = { exports: {} };
   vm.runInNewContext(transformSync(src, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, console, process, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
-    require: (id) => id.endsWith('/runtimeContext') ? require('./runtime-context-loader.cjs')(dependencies) : Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
+    require: (id) => id.endsWith('/coordinator/androidCoordinator') ? { AndroidCoordinator: class { async dispose() {} } } : id === './autoConfig' || id === '../autoConfig' ? require('./auto-config-loader.cjs')() : id.endsWith('/runtimeContext') ? require('./runtime-context-loader.cjs')(dependencies) : Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
   });
   return module.exports;
 }
@@ -84,7 +84,8 @@ test('title selector replaces device list and registers only the mirror view', a
   const vscode = { DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2}, workspace: { findFiles: async () => [], getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }), onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; }, executeCommand: async () => undefined }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { debugRegistrations.push([type, factory]); return { dispose() {} }; }, registerDebugConfigurationProvider: (type, provider, trigger) => { debugProviders.push([type, provider, trigger]); return { dispose() {} }; }, onDidStartDebugSession: () => ({ dispose() {} }), onDidTerminateDebugSession: () => ({ dispose() {} }) } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
   // 通过真实 Native adapter 转译加载；仅隔离其直接上游/工具链边界，本用例不启动后端或设备命令。
-  const adapter = load('android-debugger/native-debugger/adapter', {
+  const adapter = { createAndroidDebugAdapterFactory(context, selectedPackage, coordinator) { nativeApi.registerNativeProviders(context, selectedPackage, coordinator); return { createDebugAdapterDescriptor() {} }; } };
+  const nativeApi = load('android-debugger/native-debugger/adapter', {
     vscode,
     '@vscode/debugadapter': { LoggingDebugSession: class {}, TerminatedEvent: class {}, OutputEvent: class {} },
     '@vscode/debugprotocol': {},
@@ -92,16 +93,17 @@ test('title selector replaces device list and registers only the mirror view', a
     './upstream/src/android': {},
     './upstream/src/targetPicker': { activate() {}, pickTarget: async () => ({ udid: 'phone' }), getLastOrPickTarget: async () => ({ udid: 'phone' }), getTargetFromUDID: async udid => ({ udid }), setCurrentTarget() {}, resetCurrentTarget() {} },
     './upstream/src/debugConfigProvider': { AndroidDebugConfigurationProvider: class {}, LLDBDebugConfigurationProvider: class {} },
-    './upstream/src/debugAdapter': { DebugAdapterDescriptorFactory: class { createDebugAdapterDescriptor() {} } },
+    '../sessionAdapter': {},
     './upstream/src/targetCommand': { activate() {}, pickAndroidProcess() {}, getBestAbi() {}, getBestMappedAbi() {}, getPackageNameForPid: async () => 'app', resumeWaitingProcess() {}, setAbiResolutionInfo() {}, setProcessPickerInfo() {}, resetAbiResolutionInfo() {}, resetProcessPickerInfo() {} },
     './nativeToolchain': { resolveNativeToolchain: () => ({ adb: 'adb', sdkRoot: '', ndkRoot: '' }) },
     './nativeTarget': { resolveLauncherActivity: async () => 'MainActivity', adbExec: async () => '' },
     '../../sdk': { adbPath: () => 'adb', listDevices: async () => [] },
     '../../projectLocalConfig': { readProjectLocalConfig: () => ({}) },
     './nativeSymbols': { selectNativeLibraries: async () => [] },
+    './forwardLease': load('android-debugger/native-debugger/forwardLease', {}),
   });
   // UI 回归只验证设备视图接线；JVM debugger 的外部注册边界由独立测试覆盖，因此在这里隔离整个注册模块。
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { constructor() { this.refreshes = 0; } async initialize() {} async handle(message) { buildActions.push(message.action); if (message.action === 'refresh') this.refreshes++; } dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/native-debugger/adapter': adapter, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { constructor() { this.refreshes = 0; } async initialize() {} async handle(message) { buildActions.push(message.action); if (message.action === 'refresh') this.refreshes++; } dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/adapter': adapter, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
   assert.deepEqual(views, ['android-ide.runningDevice', 'android-ide.logcat']);
   // extension 同一工厂注册两种外部入口；android-tools仅保留resolver，android-debug提供六项动态内置配置。
   assert.deepEqual(debugRegistrations.map(item => item[0]).sort(), ['android-debug', 'android-tools'].sort());
@@ -109,9 +111,9 @@ test('title selector replaces device list and registers only the mirror view', a
   const dynamic = debugProviders.find(item => item[0] === 'android-debug' && item[2] === 2);
   assert.equal(dynamic[1].provideDebugConfigurations().length, 6);
   assert.deepEqual(JSON.stringify(Array.from(dynamic[1].provideDebugConfigurations(), config => config.name).sort()), JSON.stringify([
-    'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
-    'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',
-    'Android: Android Dual(Native and JVM) Debug Launch', 'Android: Android Dual(Native and JVM) Debug Attach',
+    'Android: Native Debug Launch', 'Android: Native Debug Attach',
+    'Android: JVM Debug Launch', 'Android: JVM Debug Attach',
+    'Android: Dual(Native and JVM) Debug Launch', 'Android: Dual(Native and JVM) Debug Attach',
   ].sort()));
   assert.equal(typeof dynamic[1].resolveDebugConfiguration,'function');
   assert.equal(typeof debugRegistrations.find(item => item[0] === 'android-debug')[1].createDebugAdapterDescriptor, 'function');

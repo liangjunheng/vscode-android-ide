@@ -94,9 +94,9 @@ test('manifest exposes the unified Android debug fallback and real extension ent
   assert.equal(jvm.initialConfigurations, undefined);
   const parent = p.contributes.debuggers.find(debuggerContribution => debuggerContribution.type === 'android-debug');
   const names = [
-    'Android: Android Native Debug Launch', 'Android: Android Native Debug Attach',
-    'Android: Android JVM Debug Launch', 'Android: Android JVM Debug Attach',
-    'Android: Android Dual(Native and JVM) Debug Launch', 'Android: Android Dual(Native and JVM) Debug Attach',
+    'Android: Native Debug Launch', 'Android: Native Debug Attach',
+    'Android: JVM Debug Launch', 'Android: JVM Debug Attach',
+    'Android: Dual(Native and JVM) Debug Launch', 'Android: Dual(Native and JVM) Debug Attach',
   ];
   assert.deepEqual(parent.initialConfigurations.map(config => config.name), names);
   assert.deepEqual(parent.configurationSnippets.map(snippet => snippet.label), names);

@@ -247,36 +247,9 @@ export async function getBestMappedAbi(args: {device: Device, packageName?: stri
     return getMappedAbi(abi) ?? abi;
 }
 
-/** 按所选设备/PID转发JDWP端口；native-autodetect.test.js的command wrappers用例断言参数和返回值。 */
-export async function forwardJdwpPort(args: {device: Device, pid: string}) {
-    let {device, pid} = await resolveArgs(args);
-
-    return await android.forwardJdwpPort(device, pid);
-}
-
-/** 移除所选设备的转发，保留返回值/错误；native-autodetect.test.js的command wrappers用例断言设备及端口。 */
-export async function removeTcpForward(device: Device, port: string) {
-    return await android.removeTcpForward(device, port);
-}
-
-/** 恢复所选等待进程并等待临时JDWP清理，不延时丢弃释放错误；native-runtime.test.js验证cleanup门闩和失败传播。 */
-// 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言server启动失败/停止等待/手动恢复与清理。
-export async function resumeWaitingProcess(args: {device: Device, pid?: string}) {
-    let {device, pid} = await resolveArgs(args);
-
-    if (device && !pid) {
-        pid = await pickAndroidProcess({device});
-    }
-
-    if (!pid) {
-        return;
-    }
-
-    logger.log(`Resuming process ${pid}`);
-
-    const jdwpCleanup = await android.resumeJavaDebugger(device, pid);
-
-    await jdwpCleanup();
+/** 旧Native等待进程恢复入口已由统一Coordinator会话接管，不再直接创建或清理JDWP转发。 */
+export async function resumeWaitingProcess(_args: {device: Device, pid?: string}) {
+    throw new Error('Waiting-process resume is managed by the Android debug Coordinator session.');
 }
 
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言server启动失败/停止等待/手动恢复与清理。

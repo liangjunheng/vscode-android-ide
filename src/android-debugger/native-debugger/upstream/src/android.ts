@@ -13,7 +13,7 @@ import * as androidPaths from './androidPaths';
 
 import { resolveNativeToolchain, findLldbServer } from '../../nativeToolchain';
 import type { NativeToolchainOverrides } from '../../nativeToolchain';
-import { JDWP } from './jdwp';
+import { compileServerLauncher } from '../../serverLauncher';
 
 const adbByToolchain = new Map<string, ADB>();
 
@@ -136,9 +136,14 @@ async function getLldbServer(abi: string, projectRoot?: string, overrides?: Nati
 }
 
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
-/** 按原部署步骤启动设备server并返回自有stop；native-runtime.test.js断言copy/start错误、部署顺序和停止await。 */
+/**
+ * 功能：隔离部署lldb-server及设备事件启动器，先注册inotify再exec，监听后核对socket文件身份并发布就绪。
+ * 输入：设备、合法包名和设备 ABI；前置条件是共享工具链已解析且设备可执行 run-as。
+ * 输出：返回 socket、子进程和幂等 stop；启动异常会先停止自有进程并清理自有部署目录。
+ * 验证：tests/native-runtime.test.js 的 socket-file 事件、earlyExit、隔离部署和精确 stop 回归。
+ */
 export async function startLldbServer(device: Device, packageName: string, abi: string) {
-    if (!packageName) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(packageName)) {
         throw new Error("A valid package name is required.");
     }
 
@@ -149,25 +154,61 @@ export async function startLldbServer(device: Device, packageName: string, abi: 
 
     logger.log(`Using lldb-server at ${lldbServerLocalPath}`);
 
-    const lldbServerTmpPath = `/data/local/tmp/android-debug/lldb-server`;
-    const lldbServerDir = `/data/data/${packageName}/android-debug/lldb/bin`;
+    const identity = utils.randomString(16);
+    const lldbServerTmpPath = `/data/local/tmp/android-debug-${identity}`;
+    const lldbServerDir = `/data/data/${packageName}/android-debug/${identity}`;
     const lldbServerPath = `${lldbServerDir}/lldb-server`;
+    const launcherPath = `${lldbServerDir}/server-launcher`;
+    const launcherTmpPath = `${lldbServerTmpPath}-launcher`;
+    const toolchain = resolveNativeToolchain(projectRoot, nativeDevice.androidNativeToolchain);
+    const launcher = await compileServerLauncher(toolchain.ndkRoot, abi);
 
-    await deviceAdb.push(lldbServerLocalPath, lldbServerTmpPath);
-    await deviceAdb.shell(`run-as ${packageName} mkdir -p ${lldbServerDir}`);
+    const removeDeployment = async (): Promise<void> => {
+        await deviceAdb.shell(`run-as ${packageName} rm -rf ${lldbServerDir} && rm -f ${lldbServerTmpPath} ${launcherTmpPath}`);
+    };
+    try {
+        await deviceAdb.push(lldbServerLocalPath, lldbServerTmpPath);
+        await deviceAdb.shell(`run-as ${packageName} mkdir -p ${lldbServerDir}`);
+        await deviceAdb.shell(`cat ${lldbServerTmpPath} | run-as ${packageName} sh -c 'cat > ${lldbServerPath} && chmod 700 ${lldbServerPath}'`);
+        await deviceAdb.push(launcher.file, launcherTmpPath);
+        await deviceAdb.shell(`cat ${launcherTmpPath} | run-as ${packageName} sh -c 'cat > ${launcherPath} && chmod 700 ${launcherPath}'`);
+    } catch (error) {
+        try { await removeDeployment(); } catch (cleanup) { throw new AggregateError([error, cleanup], 'Native deployment and cleanup failed'); }
+        throw error;
+    } finally { await launcher.close(); }
 
-    await deviceAdb.shell(`cat ${lldbServerTmpPath} | run-as ${packageName} sh -c 'cat > ${lldbServerPath} && chmod 700 ${lldbServerPath}'`);
-
-    let socket = `/${packageName}/platform-${utils.randomString(16)}.sock`;
-    let subprocess = deviceAdb.createSubProcess(['shell', `run-as ${packageName} ${lldbServerPath} platform --listen unix-abstract://${socket}`]);
+    const socket = `/${packageName}/platform-${utils.randomString(16)}.sock`;
+    const socketFile = `${lldbServerDir}/socket-id`;
+    const serverCommand = `run-as ${packageName} ${launcherPath} ${lldbServerPath} ${lldbServerDir} unix-abstract://${socket} ${socketFile}`;
+    let subprocess = deviceAdb.createSubProcess(['shell', serverCommand]);
+    let exited = false;
+    let rejectExit!: (error: Error) => void;
+    const earlyExit = new Promise<never>((_resolve, reject) => { rejectExit = reject; });
+    const onExit = (code: number | null, signal: string | null) => {
+        exited = true;
+        rejectExit(new Error(`Native server exited before startup: ${code ?? signal}`));
+    };
+    subprocess.on('exit', onExit);
     let stopPromise: Promise<void> | undefined;
     const stop = async (): Promise<void> => {
-        if (!stopPromise) {
-            stopPromise = subprocess.stop().then(() => undefined);
-        }
+        if (!stopPromise) stopPromise = (async () => {
+            if (!exited) await subprocess.stop();
+            await removeDeployment();
+        })();
         await stopPromise;
     };
-    subprocess.start();
+    let startupOutput = '';
+    const started = subprocess.start((stdout, stderr) => {
+        if (stderr.trim()) throw new Error('Native server startup failed: ' + stderr.trim());
+        startupOutput += stdout;
+        return startupOutput.split(/\r?\n/).some(line => line === `ANDROID_NATIVE_LISTENING\t${socket}`);
+    }, 30000);
+    try { await Promise.race([started, earlyExit]); }
+    catch (error) {
+        try { await stop(); } catch (cleanup) { throw new AggregateError([error, cleanup], 'Native startup and cleanup failed'); }
+        throw error;
+    } finally { subprocess.off('exit', onExit); }
+    subprocess.on('exit', () => { exited = true; });
 
     subprocess.on('output', (stdout, stderr) => {
         if (stdout.trim()) { logger.log(`lldb-server out ${stdout.trim()}`); }
@@ -328,47 +369,6 @@ export async function getPackageNameFromApk(apkPath: string, projectRoot?: strin
     let appInfo = await adb.getApkInfo(apkPath);
 
     return "name" in appInfo ? appInfo.name : "";
-}
-
-// JDWP Port forwarding
-/** 为指定设备PID分配JDWP转发端口；native-runtime.test.js的resumeJavaDebugger用例断言转发及失败清理。 */
-export async function forwardJdwpPort(device: Device, pid: string) {
-    let deviceAdb = await getDeviceAdb(device);
-    return await deviceAdb.adbExec(["forward", `tcp:0`, `jdwp:${pid}`]) as any as string;
-}
-
-/** 移除所选设备的自有端口转发，失败传播；native-runtime.test.js的resumeJavaDebugger用例断言实际remove调用与错误。 */
-export async function removeTcpForward(device: Device, port: string) {
-    let deviceAdb = await getDeviceAdb(device);
-    return await deviceAdb.removePortForward(port);
-}
-
-// 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
-/** 连接并恢复VM，返回需等待的断开/转发清理；native-runtime.test.js断言setup/cleanup及双错聚合。 */
-export async function resumeJavaDebugger(device: Device, pid: string): Promise<() => Promise<void>>  {
-    let port = await forwardJdwpPort(device, pid);
-    let jdwp = new JDWP(Number(port), "localhost");
-
-    const cleanup = async () => {
-        const errors: unknown[] = [];
-        try { await jdwp.disconnect(); } catch (error) { errors.push(error); }
-        try { await removeTcpForward(device, port); } catch (error) { errors.push(error); }
-        if (errors.length === 1) throw errors[0];
-        if (errors.length > 1) throw new AggregateError(errors, "JDWP cleanup failed");
-    };
-
-    try {
-        await jdwp.connect();
-        await jdwp.resume();
-
-        return cleanup;
-    }
-    catch (e) {
-        try { await cleanup(); } catch (cleanupError) {
-            throw new AggregateError([e, cleanupError], "JDWP setup and cleanup failed");
-        }
-        throw e;
-    }
 }
 
 // AVD helpers

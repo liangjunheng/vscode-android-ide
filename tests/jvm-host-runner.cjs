@@ -20,7 +20,7 @@ exports.run = async function run() {
     const launchEditor = await vscode.window.showTextDocument(launchDocument);
     const position = new vscode.Position(3, 4);
     const completions = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', launchFile, position);
-    const names = ['Native', 'JVM', 'Dual(Native and JVM)'].flatMap(mode => ['Launch', 'Attach'].map(request => 'Android: Android ' + mode + ' Debug ' + request));
+    const names = ['Native', 'JVM', 'Dual(Native and JVM)'].flatMap(mode => ['Launch', 'Attach'].map(request => 'Android: ' + mode + ' Debug ' + request));
     for (const name of names) {
       const completion = completions.items.find(item => (typeof item.label === 'string' ? item.label : item.label.label) === name);
       if (!completion || !(completion.insertText instanceof vscode.SnippetString)) throw new Error('Android Add Configuration template is absent: ' + name);

@@ -107,7 +107,7 @@ test('invalid objects and non-string path fields are rejected with field diagnos
   const reader = loadReader();
   const invalid = [null, [], 'sdk', 42, true].map(value => [value, 'config']);
   for (const value of [null, [], 'debugger', 42, false]) invalid.push([{ debugger: value }, 'debugger']);
-  for (const key of ['sdkPath', 'scrcpyPath', 'downloadDirectory', 'adbPath', 'lldbDapPath', 'ndkPath']) {
+  for (const key of ['sdkPath', 'scrcpyPath', 'downloadDirectory', 'adbPath', 'ndkPath']) {
     for (const value of [null, false, 1, [], {}]) {
       invalid.push([['sdkPath', 'scrcpyPath', 'downloadDirectory'].includes(key) ? { [key]: value } : { debugger: { [key]: value } }, key]);
     }
@@ -131,6 +131,7 @@ test('unknown top-level and debugger keys fail clearly rather than being ignored
     [{ sdkpath: 'sdk' }, 'sdkpath'],
     [{ adbPath: 'adb' }, 'adbPath'],
     [{ debugger: { lldbDAPPath: 'lldb' } }, 'debugger.lldbDAPPath'],
+    [{ debugger: { lldbDapPath: 'lldb' } }, 'debugger.lldbDapPath'],
     [JSON.parse('{"__proto__":{}}'), '__proto__'],
     [{ debugger: { constructor: 'adb' } }, 'debugger.constructor'],
   ]) {
@@ -151,9 +152,9 @@ test('relative and absolute paths preserve Unicode and spaces for every supporte
   const relative = '本机 工具/工具 路径';
   const absolute = path.join(p.root, '绝对 工具', '..', '保留 路径');
   for (const value of [relative, absolute, '../共享 工具']) {
-    writeConfig(p, { sdkPath: value, scrcpyPath: value, downloadDirectory: value, debugger: { adbPath: value, lldbDapPath: value, ndkPath: value } });
+    writeConfig(p, { sdkPath: value, scrcpyPath: value, downloadDirectory: value, debugger: { adbPath: value, ndkPath: value } });
     const expected = path.isAbsolute(value) ? value : path.resolve(p.root, value);
-    assert.deepEqual(reader.read(p.root), { sdkPath: expected, scrcpyPath: expected, downloadDirectory: expected, debugger: { adbPath: expected, lldbDapPath: expected, ndkPath: expected } });
+    assert.deepEqual(reader.read(p.root), { sdkPath: expected, scrcpyPath: expected, downloadDirectory: expected, debugger: { adbPath: expected, ndkPath: expected } });
   }
   // 不规范化绝对路径中的点段，也不去掉非空路径首尾可能有意义的空格。
   const preserved = p.root + path.sep + '工具' + path.sep + '..' + path.sep + 'adb';
@@ -175,7 +176,7 @@ test('empty values are unspecified without losing non-empty debugger fields', t 
   const p = projectFixture(t);
   const reader = loadReader();
   for (const value of ['', '  ', '\t\r\n']) {
-    writeConfig(p, { sdkPath: value, downloadDirectory: value, debugger: { adbPath: value, lldbDapPath: value, ndkPath: value } });
+    writeConfig(p, { sdkPath: value, downloadDirectory: value, debugger: { adbPath: value, ndkPath: value } });
     assert.deepEqual(reader.read(p.root), {});
   }
   writeConfig(p, { debugger: {} });

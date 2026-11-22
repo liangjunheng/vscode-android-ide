@@ -6,7 +6,13 @@ const vm = require('node:vm');
 const { build } = require('esbuild');
 const root = path.resolve(__dirname, '..');
 
-/** Node>=22 的 npm test 加载真实父 adapter、两阶段 provider 和 DAP；隔离设备/工具链边界并记录项目库发现输入，验证自动加载、冲突选择、旧记录清理及无外部库输入。 */
+/** 功能点：Native/JVM/Dual 六组合的统一 Coordinator 调试入口。
+ * 受影响对象：统一会话工厂、NativeSessionCapability、prepareJvmChild、attachDual、Native提供方和AndroidDebugSession。
+ * 复现路径：Node>=22，以真实父 DAP 和两阶段 provider 执行三模式 Launch/Attach，替换设备通信和 VS Code 边界。
+ * 测试范围：六组合、设备状态、分配后取消仅回滚一次、在途部署关闭屏障、新准备拒绝、并发释放/失败保留登记、迟到终止、JDWP和符号回归。
+ * 执行入口：npm test；定向 node --test tests/native-codelldb.test.js。
+ * 预期结果：设备身份/JDWP走Coordinator，Native服务由原Native模块持有且CodeLLDB提供宿主引擎；失败只回收自有资源。
+ * 判据：DAP 结果、资源次数、信号传播和监听释放全部与断言一致；不替代宿主或设备实测。 */
 async function fixture(t) {
   const f = { codeLldb: { isActive: true, activated: false, async activate() { this.isActive = true; this.activated = true; } }, input: undefined, inputCalls: 0, projectLibraries: [], projectLibraryCalls: [], symbolCalls: [], symbolPicks: [], dialogCalls: 0, symbolStore: new Map(), symbolUpdates: [], toolchainFailure: undefined, seq: 0, trusted: true, starts: new Set(), ends: new Set(), providers: new Map(), commands: new Map(), children: [], servers: [], cleaned: [], stopped: [], notices: [], calls: [], selected: { udid: 'picked' }, accept: true, report: true, currentAbi: undefined, processes: [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }] };
   const disposable = set => listener => { set.add(listener); return { dispose: () => set.delete(listener) }; };
@@ -16,7 +22,7 @@ async function fixture(t) {
     DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
     workspace: { get isTrusted() { return f.trusted; }, getConfiguration: () => ({ get: key => key === 'abiSupported' ? ['arm64-v8a', 'x86_64'] : key === 'abiMap' ? {} : undefined }) },
     extensions: { getExtension() { return f.codeLldb; } },
-    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showWarningMessage: async message => { f.notices.push(message); }, showInputBox: async options => { f.inputCalls++; f.inputPrompt = options.prompt; return f.input; }, showQuickPick: async (items, options) => { f.symbolPicks.push({ items, options }); if (f.symbolPickHook) return f.symbolPickHook(items, options); return undefined; }, showOpenDialog: async options => { f.dialogCalls++; f.dialogOptions = options; return f.dialogPaths?.map(fsPath => ({ fsPath })); } }, commands: { executeCommand: async () => undefined },
+    window: { createOutputChannel: () => ({ appendLine() {} }), showErrorMessage: async message => { f.notices.push(message); f.noticeHook?.(message); }, showWarningMessage: async message => { f.notices.push(message); }, showInputBox: async options => { f.inputCalls++; f.inputPrompt = options.prompt; return f.input; }, showQuickPick: async (items, options) => { f.symbolPicks.push({ items, options }); if (f.symbolPickHook) return f.symbolPickHook(items, options); if (options.placeHolder === 'Select Android device') return f.selected ? items[0] : undefined; if (options.placeHolder === 'Pick Android Process') return f.cancelProcess ? undefined : items[0]; return undefined; }, showOpenDialog: async options => { f.dialogCalls++; f.dialogOptions = options; return f.dialogPaths?.map(fsPath => ({ fsPath })); } }, commands: { executeCommand: async () => undefined },
     commands: { registerCommand(name, action) { assert.equal(f.commands.has(name), false); f.commands.set(name, action); return { dispose() {} }; } },
     debug: {
       registerDebugAdapterDescriptorFactory() { throw new Error('Descriptor belongs to extension activation'); },
@@ -39,7 +45,7 @@ async function fixture(t) {
         if (f.terminateOnStart === config.type) for (const listener of [...f.ends]) listener(session);
         return true;
       },
-      async stopDebugging(session) { f.stopped.push(session); f.stopHook?.(session); if (f.stopFailure) throw f.stopFailure; if (f.stopGate) await f.stopGate.promise; for (const listener of [...f.ends]) listener(session); },
+      async stopDebugging(session) { f.stopped.push(session); f.stopHook?.(session); if (f.stopFailure) throw f.stopFailure; if (f.stopGate) await f.stopGate.promise; if (f.deferTermination) { f.pendingTerminations ??= []; f.pendingTerminations.push(session); return; } for (const listener of [...f.ends]) listener(session); },
     },
   };
   const android = {
@@ -47,6 +53,14 @@ async function fixture(t) {
     async installApp(device, apk) { f.calls.push(['install', device, apk]); },
     async launchApp(device, pkg, activity) { f.calls.push(['launch', device, pkg, activity]); },
     async getPackageNameFromApk(apk, projectRoot) { f.calls.push(['apk', apk, projectRoot]); return 'com.example.app'; },
+    async getDeviceAdb() { return { async getForwardList() { return []; }, async removePortForward() { throw new Error('No mocked forward is owned'); } }; },
+    async startLldbServer(device, packageName, abi) {
+      const socket = await targetCommand.lldbServer({ device, packageName, abi });
+      f.prepareEntered?.resolve();
+      if (f.prepareGate) await f.prepareGate.promise;
+      f.serverCreatedHook?.(socket);
+      return { socket, stop: () => targetCommand.lldbServerCleanup(socket) };
+    },
     async getProcessList(device, populatePackageNames) { f.calls.push(['process-list',populatePackageNames]); return f.processes; },
     async resumeJavaDebugger() { if (f.resumeFailure) throw f.resumeFailure; f.calls.push(['resume']); return async () => { f.calls.push(['jdwp-cleanup']); if (f.jdwpGate) await f.jdwpGate.promise; }; },
   };
@@ -61,10 +75,39 @@ async function fixture(t) {
     async lldbServerCleanup(socket) { f.cleaned.push(socket); f.serverEntered?.resolve(); if (f.serverGate) await f.serverGate.promise; if (f.cleanupFailure) throw f.cleanupFailure; },
   };
   const targetPicker = { activate() {}, setCurrentTarget() {}, resetCurrentTarget() {}, async pickTarget() { return f.selected; }, async getLastOrPickTarget() { return f.selected; }, async getTargetFromUDID(udid) { return { udid }; } };
-  const mocks = { vscode, autoConfig: { omitAuto: config => ({ ...config }) }, jdwpForward: { createJdwpForward: async (...args) => { (f.jdwps ??= []).push(args); return { port: 41873, cleanup: async () => {} }; } }, android, targetCommand, targetPicker,
+  class CoordinatorClient {
+    constructor() { f.coordinatorClient = this; this.listeners = new Set(); }
+    onEvent(listener) { this.listeners.add(listener); return { dispose: () => this.listeners.delete(listener) }; }
+    async command(operation, args, signal) {
+      signal?.throwIfAborted();
+      if (operation === 'shell') {
+        if (args[1].startsWith('dumpsys package')) return `Package [${args[1].split(' ').at(-1)}]\n primaryCpuAbi=${f.bestAbi || 'arm64-v8a'}`;
+        throw new Error('Unexpected shell ' + args[1]);
+      }
+      if (operation === 'devices') { f.calls.push(['coordinator-devices']); return f.deviceSnapshot ?? 'picked\tdevice\nserial\tdevice'; }
+      if (operation === 'clients') {
+        if (f.clientFailure) throw f.clientFailure;
+        return f.processes.map(p => `${p.pid}\t${p.name}`).join('\n');
+      }
+      if (operation === 'claim') { (f.jdwps ??= []).push([args[0], Number(args[1])]); return '19\t41873'; }
+      if (operation === 'release') { f.calls.push(['jdwp-cleanup']); if (f.jdwpGate) await f.jdwpGate.promise; return ''; }
+      if (operation === 'resume') { if (f.resumeFailure) throw f.resumeFailure; f.calls.push(['resume']); return ''; }
+      if (operation === 'install') { f.calls.push(['install', ...args]); return ''; }
+      if (operation === 'launch') {
+        f.calls.push(['launch', args[0], args[1], args[2]]);
+        if (f.launchHook) return f.launchHook(args, signal);
+        if (f.launchOutput) throw new Error(f.launchOutput);
+        if (f.pidOutput !== undefined && !/^\d+$/.test(f.pidOutput)) throw new Error('Expected exactly one Android Client');
+        return f.pidOutput ?? '42';
+      }
+      throw new Error('Unexpected Coordinator operation: ' + operation);
+    }
+    async dispose() {}
+  }
+  const mocks = { vscode, coordinatorClient: { AndroidDebugCoordinatorClient: CoordinatorClient }, autoConfig: { omitAuto: config => ({ ...config }) }, android, targetCommand, targetPicker,
     sdk: { adbPath: () => 'sdk-adb', listDevices: async () => { f.calls.push(['sdk-devices']); return [{ serial: 'picked', state: 'device' }]; } },
     projectLocalConfig: { readProjectLocalConfig: () => ({ debugger: { adbPath: 'session-adb' } }) },
-    nativeToolchain: { findNativeSymbolSearchPaths: (projectRoot, native) => { f.symbolCalls.push({ projectRoot, paths: native?.symbolSearchPaths }); throw new Error('Legacy Native directory discovery must not be called'); }, resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
+    nativeToolchain: { findLldbServer: () => '/ndk/lldb-server', findNativeSymbolSearchPaths: (projectRoot, native) => { f.symbolCalls.push({ projectRoot, paths: native?.symbolSearchPaths }); throw new Error('Legacy Native directory discovery must not be called'); }, resolveNativeToolchain: (projectRoot, overrides) => { if (f.toolchainFailure) { const error = f.toolchainFailure; f.toolchainFailure = undefined; throw error; } return { adb: 'adb', ndkRoot: overrides?.ndkRoot || 'ndk', sdkRoot: overrides?.sdkRoot || 'sdk', projectRoot }; }, nativeToolchainOverrides: native => ({ sdkRoot: native?.sdkRoot, ndkRoot: native?.ndkRoot }), validateNativeAbis() {} },
     projectLibraries: { discoverProjectLibraries: async (projectRoot, abi) => { f.projectLibraryCalls.push({ projectRoot, abi }); return f.projectLibraries; } },
     nativeTarget: {
       resolveLauncherActivity: async (adb, serial, pkg, signal) => { signal?.throwIfAborted(); f.calls.push(['activity', adb, serial, pkg]); return 'MainActivity'; },
@@ -72,6 +115,8 @@ async function fixture(t) {
         signal?.throwIfAborted(); f.calls.push(['adb', adb, serial, args, signal]);
         if (f.adbHook) return f.adbHook(adb, serial, args, signal);
         if (args[0] === 'install') { f.calls.push(['install']); return ''; }
+        if (args[0] === 'jdwp') return f.jdwpOutput ?? '42\n';
+        if (args[0] === 'shell' && args[1]?.includes('__ANDROID_DEBUG_PID__')) return 'Starting: Intent { cmp=com.example.app/.MainActivity }\n__ANDROID_DEBUG_PID__\n42\n';
         if (args.includes('am')) { f.calls.push([args.includes('force-stop') ? 'force-stop' : 'launch', serial, undefined, args.at(-1).split('/')[1]]); return f.launchOutput || ''; }
         if (args.includes('pidof')) return f.pidOutput ?? f.processes.filter(p => p.name === args.at(-1)).map(p => p.pid).join(' ');
         if (args[0] === 'forward') return args[1] === 'tcp:0' ? '41873' : '';
@@ -81,15 +126,26 @@ async function fixture(t) {
       },
     },
   };
-  const result = await build({ entryPoints: [path.join(root, 'src/android-debugger/native-debugger/adapter.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['@vscode/debugadapter'], plugins: [{ name: 'native-boundaries', setup(builder) {
+  const result = await build({ stdin: { contents: "export * from './src/android-debugger/adapter'; export * from './src/android-debugger/native-debugger/adapter'; export { AndroidCoordinator } from './src/android-debugger/coordinator/androidCoordinator';", resolveDir: root, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', external: ['@vscode/debugadapter'], plugins: [{ name: 'native-boundaries', setup(builder) {
     builder.onResolve({ filter: /^vscode$/ }, () => ({ path: 'mock:vscode', external: true }));
-    builder.onResolve({ filter: /(?:^|[\/])(?:android|autoConfig|jdwpForward|targetCommand|targetPicker|nativeToolchain|nativeTarget|sdk|projectLocalConfig|projectLibraries)$/ }, args => ({ path: 'mock:' + args.path.split(/[\/]/).at(-1), external: true }));
+    builder.onResolve({ filter: /^\.\/client$/ }, () => ({ path: 'mock:coordinatorClient', external: true }));
+    builder.onResolve({ filter: /(?:^|[\/])(?:android|autoConfig|jdwpForward|jvmReadiness|targetCommand|targetPicker|nativeToolchain|nativeTarget|sdk|projectLocalConfig|projectLibraries)$/ }, args => ({ path: 'mock:' + args.path.split(/[\/]/).at(-1), external: true }));
   } }] });
   const module = { exports: {} };
   vm.runInNewContext(result.outputFiles[0].text, { module, exports: module.exports, require: id => id.startsWith('mock:') ? mocks[id.slice(5)] : require(id), process, console, Buffer, structuredClone, AbortController });
-  f.api = module.exports; f.context = { subscriptions: [], workspaceState: { get: key => structuredClone(f.symbolStore.get(key)), async update(key, value) { f.symbolUpdates.push({ key, value: structuredClone(value) }); if (value === undefined) f.symbolStore.delete(key); else f.symbolStore.set(key, structuredClone(value)); } } }; f.factory = f.api.createAndroidDebugAdapterFactory(f.context, folder => { f.calls.push(['gradle-package', folder?.uri.fsPath]); if (f.gradleFailure) throw f.gradleFailure; return f.gradlePackage; });
+  f.api = module.exports; f.context = { subscriptions: [], workspaceState: { get: key => structuredClone(f.symbolStore.get(key)), async update(key, value) { f.symbolUpdates.push({ key, value: structuredClone(value) }); if (value === undefined) f.symbolStore.delete(key); else f.symbolStore.set(key, structuredClone(value)); } } }; f.factory = f.api.createAndroidDebugAdapterFactory(f.context, folder => { f.calls.push(['gradle-package', folder?.uri.fsPath]); if (f.gradleFailure) throw f.gradleFailure; return f.gradlePackage; }, new f.api.AndroidCoordinator(root));
   f.baseEnds = f.ends.size;
-  t.after(async () => { for (const owned of [...f.context.subscriptions].reverse()) await owned.dispose?.(); });
+  t.after(async () => {
+    const failures = [];
+    for (const owned of [...f.context.subscriptions].reverse()) {
+      try { await owned.dispose?.(); } catch (error) { failures.push(error); }
+    }
+    if (f.expectedDisposalFailure) {
+      assert.ok(failures.length > 0, 'injected cleanup failure must remain visible during disposal');
+      const describe = error => [String(error), ...(error.errors ?? []).map(describe)].join('; ');
+      for (const failure of failures) assert.match(describe(failure), f.expectedDisposalFailure);
+    } else if (failures.length) throw new AggregateError(failures, 'Unexpected fixture disposal failure');
+  });
   f.parent = async (overrides = {}, resolve = false) => {
     const folder = { uri: { fsPath: root } };
     let config = { type: 'android-tools', name: 'Built-in Native', request: 'attach', androidMode: 'native', mode: 'native', target: 'serial', pid: 42, packageName: 'com.example.app', native: {}, ...overrides };
@@ -110,8 +166,8 @@ function gate() { return Promise.withResolvers(); }
 
 test('Native factory registers only Native providers once without probing the NDK', async t => {
   const f = await fixture(t); f.api.registerNativeProviders(f.context);
-  assert.deepEqual([...f.providers.keys()], ['android-tools', 'android-debug', 'lldb']); assert.equal(f.factory.nativeOnly, true);
-  assert.deepEqual([...f.commands.keys()], ['android-tools.pickAndroidProcess', 'android-tools.getBestAbi', 'android-tools.getBestMappedAbi', 'android-tools.resumeWaitingProcess']);
+  assert.deepEqual([...f.providers.keys()], ['android-tools', 'android-debug', 'lldb']); assert.equal(typeof f.factory.createDebugAdapterDescriptor, 'function');
+  assert.deepEqual([...f.commands.keys()], ['android-tools.pickAndroidProcess', 'android-tools.getBestAbi', 'android-tools.getBestMappedAbi']);
   assert.equal(f.calls.length, 0); assert.equal(f.servers.length, 0);
   assert.equal(f.dynamicType,'android-debug');
   assert.equal(f.dynamicProvider, f.providers.get('android-debug'));
@@ -124,6 +180,20 @@ test('Native factory registers only Native providers once without probing the ND
   initial[0].native.abi='x86'; assert.equal(dynamic[0].native.abi,'auto');
   assert.equal(f.calls.length,0); assert.equal(f.servers.length,0);
   assert.equal(await f.providers.get('lldb').resolveDebugConfiguration(undefined, { type: 'lldb', request: 'launch', name: 'Desktop' }).then(c => c.name), 'Desktop');
+});
+
+test('Native server receives actual device state and rejects unavailable targets before allocation', async t => {
+  const online = await fixture(t), adapter = await online.parent();
+  assert.equal((await request(online, adapter, 'attach')).success, true);
+  assert.equal(online.servers[0].args.device.udid, 'serial');
+  assert.equal(online.servers[0].args.device.state, 'device');
+  await adapter.dispose();
+  for (const snapshot of ['serial\toffline', 'serial\tunauthorized', 'other\tdevice']) {
+    const f = await fixture(t); f.deviceSnapshot = snapshot;
+    const parent = await f.parent(); const response = await request(f, parent, 'attach');
+    assert.equal(response.success, false); assert.match(response.message, /not online: serial/);
+    assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0);
+  }
 });
 
 test('CodeLLDB dependency activation is awaited and missing/failed dependencies are visible', async t => {
@@ -139,7 +209,7 @@ test('CodeLLDB dependency activation is awaited and missing/failed dependencies 
 
 test('built-in Native real DAP attach loads project-built libraries and owns one CodeLLDB child', async t => {
   const f = await fixture(t); const app = path.join(root, 'build', 'libapp.so'), engine = path.join(root, 'build', 'libengine.so'); f.projectLibraries = [app, engine, app];
-  const options = { abi: 'arm64-v8a', initCommands: ['settings set target.foo true'], preRunCommands: ['settings set target.user true'], symbolSearchPaths: ['external/unverified'], pid: 1, androidTarget: 'evil', platform: 'host' };
+  const options = { abi: 'arm64-v8a', exitCommands: ['settings show target.foo'], initCommands: ['settings set target.foo true'], preRunCommands: ['settings set target.user true'], symbolSearchPaths: ['external/unverified'], pid: 1, androidTarget: 'evil', platform: 'host' };
   const adapter = await f.parent({ native: options }, true);
   assert.equal((await request(f, adapter, 'initialize')).success, true);
   assert.equal((await request(f, adapter, 'attach')).success, true);
@@ -147,8 +217,11 @@ test('built-in Native real DAP attach loads project-built libraries and owns one
   const config = f.children[0].configuration;
   assert.equal(config.type, 'lldb'); assert.equal(config.pid, 42); assert.equal(config.androidTarget.udid, 'serial'); assert.equal(config.androidPackageName, 'com.example.app');
   assert.equal(f.servers[0].args.device.androidProjectRoot, root); assert.equal(f.servers[0].args.abi, 'arm64-v8a');
-  assert.deepEqual(Array.from(config.initCommands), ['platform select remote-android', 'platform connect unix-abstract-connect://[serial]/platform-0', 'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'settings set target.foo true']);
+  assert.match(config.initCommands[0], /^log enable -f .* lldb platform$/);
+  assert.deepEqual(Array.from(config.initCommands).slice(1), ['platform select remote-android', 'platform connect unix-abstract-connect://[serial]/platform-0', 'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'settings set target.foo true']);
   assert.deepEqual(options.initCommands, ['settings set target.foo true']);
+  assert.deepEqual(Array.from(config.exitCommands), ['settings show target.foo', 'platform disconnect', 'log disable lldb platform']);
+  assert.deepEqual(options.exitCommands, ['settings show target.foo']);
   assert.deepEqual(options.symbolSearchPaths, ['external/unverified']);
   assert.deepEqual(Array.from(config.symbolSearchPaths), []);
   assert.deepEqual(Array.from(config.preRunCommands), ['settings set target.user true']);
@@ -310,12 +383,9 @@ test('Native real DAP launch installs explicit APK once and queries the exact pa
   const f = await fixture(t); f.processes = [{ pid: '42', name: 'com.example.app', packages: ['com.example.app'] }, { pid: '77', name: 'com.unrelated', packages: ['com.unrelated'] }]; const adapter = await f.parent({ request: 'launch', pid: undefined, packageName: undefined, apkPath }, true);
   assert.equal((await request(f, adapter, 'launch')).success, true);
   assert.equal(f.children[0].configuration.pid, 42); assert.equal(f.children[0].configuration.androidPackageName, 'com.example.app');
-  for (const name of ['install', 'activity', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
-  assert.equal(f.calls.filter(call => call[0] === 'adb' && call[3].includes('force-stop')).length, 1);
-  assert.equal(f.calls.some(call => call[0] === 'process-list'), false);
-  assert.deepEqual(Array.from(f.calls.find(call => call[0] === 'adb' && call[3].includes('pidof'))[3]), ['shell', 'pidof', 'com.example.app']);
-  assert.equal(f.calls.find(call => call[0] === 'adb' && call[3].includes('am'))[3].includes('-W'), false);
-  assert.equal(f.calls.find(call => call[0] === 'launch')[3], 'MainActivity');
+  for (const name of ['install', 'launch', 'resume']) assert.equal(f.calls.filter(call => call[0] === name).length, 1, name);
+  assert.equal(f.calls.some(call => call[0] === 'adb' || call[0] === 'process-list'), false);
+  assert.deepEqual(f.calls.find(call => call[0] === 'launch'), ['launch', 'serial', 'com.example.app', '']);
   assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.calls.filter(call => call[0] === 'jdwp-cleanup').length, 1);
 });
 
@@ -342,14 +412,14 @@ test('Native start refusal exception absent child event and resume failure roll 
 });
 
 test('Native attach cancels quietly when the package process is absent', async t => {
-  const f = await fixture(t); f.adbHook = (adb, serial, args) => args.includes('pidof') ? '' : undefined;
+  const f = await fixture(t); f.processes = [];
   const result = await f.parent({ type: 'android-debug', mode: 'native', pid: undefined, processId: undefined, packageName: 'com.example.app' }, true);
   assert.equal(result, undefined);
   assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0); assert.match(f.notices[0], /process for com\.example\.app is not running/);
 });
 
 test('Native attach preserves actual ADB device errors during pid lookup', async t => {
-  const f = await fixture(t); f.adbHook = (adb, serial, args) => args.includes('pidof') ? Promise.reject(new Error('Command failed: adb -s serial shell pidof com.example.app\nerror: device unauthorized')) : undefined;
+  const f = await fixture(t); f.clientFailure = new Error('Android device unauthorized');
   await assert.rejects(f.parent({ type: 'android-debug', mode: 'native', pid: undefined, processId: undefined, packageName: 'com.example.app' }, true), /unauthorized/);
 });
 test('Native server errors invalid PIDs and invalid options become DAP failures without fake children', async t => {
@@ -372,6 +442,63 @@ test('Native disconnect awaits child then server and JDWP cleanup and duplicate 
   await adapter.dispose(); assert.equal(f.cleaned.length, 1); assert.equal(f.stopped.length, 1);
 });
 
+test('parent waits for the exact child termination event before releasing Native resources', async t => {
+  const f = await fixture(t), adapter = await f.parent();
+  assert.equal((await request(f, adapter, 'attach')).success, true);
+  f.deferTermination = true; const stopped = gate(); f.stopHook = stopped.resolve;
+  let finished = false; const closing = adapter.dispose().then(() => { finished = true; });
+  await stopped.promise; await Promise.resolve();
+  assert.equal(finished, false); assert.equal(f.cleaned.length, 0);
+  for (const listener of [...f.ends]) listener({ id: 'foreign-child', type: 'lldb', configuration: {} });
+  assert.equal(finished, false); assert.equal(f.cleaned.length, 0);
+  for (const listener of [...f.ends]) listener(f.children[0]);
+  await closing; assert.equal(finished, true); assert.equal(f.cleaned.length, 1); assert.equal(f.ends.size, f.baseEnds);
+});
+
+test('Native cancellation after allocation rolls back once without recreating released ownership', async t => {
+  const f = await fixture(t), controller = new AbortController();
+  f.serverCreatedHook = () => controller.abort(new Error('cancelled during allocation'));
+  const provider = f.providers.get('lldb');
+  const config = { type: 'lldb', name: 'cancelled-native', request: 'attach', pid: 42, androidTarget: 'serial', androidPackageName: 'com.example.app', androidAbi: 'arm64-v8a', signal: controller.signal };
+  const resolved = await provider.resolveDebugConfiguration(undefined, config);
+  await assert.rejects(provider.resolveDebugConfigurationWithSubstitutedVariables(undefined, resolved), error => /startup cancelled/.test(String(error)) && !/is not a function/.test(String(error)));
+  await provider.release(config.androidLldbServerSocket);
+  assert.equal(f.cleaned.length, 1); assert.equal(provider.servers.size, 0);
+});
+
+/** 功能：验证在途部署与provider关闭的真实等待链；输入延迟server和stop边界；输出新准备拒绝且迟到server只清一次；验证：本文件定向入口。 */
+test('Native provider disposal waits for pending deployment and its exact cleanup', async t => {
+  const f = await fixture(t), provider = f.providers.get('lldb');
+  f.prepareEntered = gate(); f.prepareGate = gate(); f.serverEntered = gate(); f.serverGate = gate();
+  const config = { type: 'lldb', name: 'pending-native', request: 'attach', pid: 42, androidTarget: 'serial', androidPackageName: 'com.example.app', androidAbi: 'arm64-v8a' };
+  const preparing = provider.resolveDebugConfigurationWithSubstitutedVariables(undefined, config);
+  const rejected = assert.rejects(preparing, /startup cancelled/);
+  await f.prepareEntered.promise;
+  let finished = false;
+  const closing = provider.dispose().then(() => { finished = true; });
+  assert.equal(provider.dispose(), provider.closing);
+  await assert.rejects(provider.resolveDebugConfigurationWithSubstitutedVariables(undefined, { ...config }), /provider is closing/);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(finished, false);
+  f.prepareGate.resolve(); await f.serverEntered.promise;
+  assert.equal(finished, false); assert.equal(f.cleaned.length, 1);
+  f.serverGate.resolve(); await rejected; await closing;
+  assert.equal(finished, true); assert.equal(provider.servers.size, 0); assert.equal(f.cleaned.length, 1);
+});
+
+/** 功能：验证扩展显式关闭等待Native部署；输入没有父会话的在途provider准备；输出工厂在回收前不完成；验证：本文件定向入口。 */
+test('Android factory disposal awaits Native preparation even without an active parent', async t => {
+  const f = await fixture(t), provider = f.providers.get('lldb');
+  f.prepareEntered = gate(); f.prepareGate = gate();
+  const preparing = provider.resolveDebugConfigurationWithSubstitutedVariables(undefined, { type: 'lldb', name: 'standalone-native', request: 'attach', pid: 42, androidTarget: 'serial', androidPackageName: 'com.example.app', androidAbi: 'arm64-v8a' });
+  const rejected = assert.rejects(preparing, /startup cancelled/);
+  await f.prepareEntered.promise;
+  let finished = false;
+  const closing = f.factory.dispose().then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(finished, false);
+  f.prepareGate.resolve(); await rejected; await closing;
+  assert.equal(finished, true); assert.equal(f.cleaned.length, 1); assert.equal(provider.servers.size, 0);
+});
+
 test('Native dispose during child startup prevents VM resume and settles startup resources', async t => {
   const f = await fixture(t); f.startGate = gate(); f.startEntered = gate(); const adapter = await f.parent({ resumeProcess: true });
   const starting = request(f, adapter, 'attach'); await f.startEntered.promise; const closing = adapter.dispose(); f.startGate.resolve();
@@ -379,14 +506,23 @@ test('Native dispose during child startup prevents VM resume and settles startup
 });
 
 test('Native startup and cleanup failures retain every diagnostic and background failures are visible', async t => {
-  const f = await fixture(t); f.accept = false; f.cleanupFailure = new Error('server stop refused'); const failed = await f.parent();
+  const f = await fixture(t); f.expectedDisposalFailure = /server stop refused/; f.accept = false; f.cleanupFailure = new Error('server stop refused'); const failed = await f.parent();
   const start = await request(f, failed, 'attach'); assert.equal(start.success, false); assert.match(start.message, /CodeLLDB rejected/); assert.match(start.message, /server stop refused/);
   const g = await fixture(t); const adapter = await g.parent(); assert.equal((await request(g, adapter, 'attach')).success, true);
+  g.expectedDisposalFailure = /server stop refused/;
   g.stopFailure = new Error('child stop refused'); g.cleanupFailure = new Error('server stop refused');
   const stop = await request(g, adapter, 'disconnect'); assert.equal(stop.success, false); assert.match(stop.message, /child stop refused/); assert.match(stop.message, /server stop refused/);
   const h = await fixture(t); const background = await h.parent(); assert.equal((await request(h, background, 'attach')).success, true);
+  h.expectedDisposalFailure = /external server cleanup failed/;
   h.cleanupFailure = new Error('external server cleanup failed'); const noticed = gate(); h.noticeHook = noticed.resolve;
   for (const listener of [...h.ends]) listener(h.children[0]); assert.match(await noticed.promise, /external server cleanup failed/);
+});
+
+test('JVM startup failure reaches the parent before attach success', async t => {
+  const f = await fixture(t); f.childStartHook = config => { if (config.type === 'android-jvm') throw new Error('JVM handshake failed'); };
+  const adapter = await f.parent({ type: 'android-debug', mode: 'java' }, true);
+  const response = await request(f, adapter, 'attach');
+  assert.equal(response.success, false); assert.match(response.message, /JVM handshake failed/); assert.equal(f.children.length, 0); assert.equal(f.cleaned.length, 0); assert.equal(f.calls.filter(call => call[0] === 'jdwp-cleanup').length, 1);
 });
 
 // 六组合必须经真实父 DAP、配置两阶段及 child start；Java 工具链失败保持未消费，证明不读取 NDK/ABI/符号。
@@ -398,7 +534,7 @@ test('unified Android three modes times launch and attach wire real children wit
     const java = { type: 'android-jvm', name: 'Nested JVM', sourcePaths: ['nested/src'], port: 5005, request: 'launch', android: false, serial: 'evil', pid: 1, processId: 2, packageName: 'com.evil.app', projectRoot: 'evil', options: { enabled: true } };
     const adapter = await f.parent({ type: 'android-debug', mode, request: command, pid: command === 'attach' ? 42 : undefined, java, sourcePaths: ['fallback/src'], resumeProcess: true }, true);
     assert.equal((await request(f, adapter, command)).success, true, mode + ':' + command);
-    assert.deepEqual(f.children.map(child => child.type), mode === 'native' ? ['lldb'] : mode === 'java' ? ['android-jvm'] : ['lldb', 'android-jvm']);
+    assert.deepEqual(f.children.map(child => child.type).sort(), mode === 'native' ? ['lldb'] : mode === 'java' ? ['android-jvm'] : ['android-jvm', 'lldb']);
     assert.equal(f.calls.filter(call => call[0] === 'resume').length, mode === 'native' ? 1 : 0);
     assert.equal(f.calls.filter(call => call[0] === 'install').length, 0);
     if (command === 'attach') assert.equal(f.calls.filter(call => call[0] === 'launch').length, 0);
@@ -409,11 +545,11 @@ test('unified Android three modes times launch and attach wire real children wit
       assert.equal(f.projectLibraryCalls.length, 1); assert.equal(f.projectLibraryCalls[0].abi, 'arm64-v8a');
     }
     if (mode !== 'native') {
-      const child = f.children.at(-1).configuration;
+      const child = f.children.find(child => child.type === 'android-jvm').configuration;
       assert.equal(child.request, 'attach'); assert.equal(child.android, true); assert.equal(child.serial, 'serial'); assert.equal(child.target, 'serial');
       assert.equal(child.pid, 42); assert.equal(child.processId, 42); assert.equal(child.packageName, 'com.example.app'); assert.equal(child.projectRoot, 'evil');
-      assert.deepEqual(Array.from(child.sourcePaths), ['nested/src']); assert.equal(child.port, undefined); assert.equal(child.hostName, '127.0.0.1'); assert.equal(child.androidJdwpPort, 41873); assert.equal(child.preLaunchTask, undefined); assert.equal(child.postLaunchTask, undefined); assert.equal(child.name, 'Nested JVM');
-      assert.deepEqual(f.jdwps.at(-1).slice(1, 4), ['serial', 42, 5005]);
+      assert.deepEqual(Array.from(child.sourcePaths), ['nested/src']); assert.equal(child.port, 41873); assert.equal(child.hostName, '127.0.0.1'); assert.equal(child.androidJdwpPort, 41873); assert.equal(child.preLaunchTask, undefined); assert.equal(child.postLaunchTask, undefined); assert.equal(child.name, 'Nested JVM');
+      assert.deepEqual(f.jdwps.at(-1), ['serial', 42]);
       child.options.enabled = false; assert.equal(java.options.enabled, true);
     }
     assert.equal((await request(f, adapter, 'disconnect')).success, true); assert.equal(f.stopped.length, f.children.length); assert.equal(f.starts.size, 0);
@@ -430,14 +566,15 @@ test('attach accepts processId exact package lookup and process picker cancellat
     const pkg = await fixture(t);
     const byPackage = await pkg.parent({ type: 'android-debug', mode, pid: undefined }, true);
     assert.equal((await request(pkg, byPackage, 'attach')).success, true);
-    assert.equal(pkg.children[0].configuration.pid, 42);
+    assert.ok(pkg.children.every(child => child.configuration.pid === 42));
     assert.equal(pkg.calls.some(call => call[0] === 'pick-process'), false);
   }
   const cancelled = await fixture(t); cancelled.cancelProcess = true;
   assert.equal(await cancelled.parent({ pid: undefined, packageName: undefined }, true), undefined); assert.equal(cancelled.servers.length, 0);
-  const java = await fixture(t); java.symbolPickHook = () => undefined;
+  const java = await fixture(t); java.cancelProcess = true; java.symbolPickHook = () => undefined;
   assert.equal(await java.parent({ type: 'android-debug', mode: 'java', target: 'select' }, true), undefined);
-  assert.equal(java.calls.some(call => call[0] === 'sdk-devices'), true); assert.equal(java.symbolCalls.length, 0); assert.equal(java.projectLibraryCalls.length, 0);
+  assert.equal(java.calls.some(call => call[0] === 'coordinator-devices'), true); assert.equal(java.symbolCalls.length, 0); assert.equal(java.projectLibraryCalls.length, 0);
+  java.symbolPickHook = undefined;
   assert.equal(await java.parent({ type: 'android-debug', mode: 'java', pid: undefined, packageName: undefined }, true), undefined);
   const picked = await fixture(t);
   picked.symbolPickHook = (items, options) => options.placeHolder === 'Pick Android Process' ? items[0] : undefined;
@@ -450,19 +587,29 @@ test('attach accepts processId exact package lookup and process picker cancellat
 // 启动失败、假 child 或 child 在 start 内退出必须 rollback 两边且不能死锁；生命周期只响应所属父。
 test('dual child startup failure absent JVM event and early exits roll back every owned resource', async t => {
   for (const failure of ['refuse', 'throw', 'missing', 'lldb-exit', 'jvm-exit']) {
+    t.diagnostic('Dual rollback scenario: ' + failure);
     const f = await fixture(t);
     if (failure === 'missing') f.reportType = 'android-jvm';
     if (failure === 'lldb-exit') f.terminateOnStart = 'lldb';
     if (failure === 'jvm-exit') f.terminateOnStart = 'android-jvm';
-    f.childStartHook = config => {
-      if (config.type !== 'android-jvm') return;
-      assert.equal(f.children[0].type, 'lldb');
+    const nativeEntered = gate();
+    f.childStartHook = async config => {
+      if (config.type === 'lldb') { nativeEntered.resolve(); return; }
+      await nativeEntered.promise;
       if (failure === 'refuse') f.accept = false;
       if (failure === 'throw') throw new Error('JVM start failed');
     };
     const adapter = await f.parent({ type: 'android-debug', mode: 'dual' }, true);
-    const response = await request(f, adapter, 'attach');
+    assert.equal((await request(f, adapter, 'initialize')).success, true, failure);
+    const events = [], terminated = gate(), attached = gate();
+    const seq = ++f.seq;
+    const eventSubscription = adapter.onDidSendMessage(message => { events.push(message); if (message.event === 'terminated') terminated.resolve(); if (message.type === 'response' && message.request_seq === seq) attached.resolve(message); });
+    adapter.handleMessage({ type: 'request', seq, command: 'attach', arguments: {} });
+    const response = await attached.promise;
+    await terminated.promise;
+    eventSubscription.dispose();
     assert.equal(response.success, false, failure); assert.match(response.message, /JVM|child session terminated/);
+    assert.ok(events.some(event => event.event === 'terminated'), failure + ': ' + JSON.stringify(events));
     assert.equal(f.cleaned.length, 1); assert.equal(f.calls.some(call => call[0] === 'resume'), false);
     await adapter.dispose(); assert.equal(f.starts.size, 0); assert.equal(f.ends.size, f.baseEnds);
   }
@@ -476,7 +623,7 @@ test('either dual child exit terminates the parent and closes the sibling with a
     for (const listener of [...f.ends]) listener({ id: 'foreign', type, parentSession: { id: 'foreign-parent' }, configuration: {} });
     assert.equal(f.stopped.length, 0);
     const terminated = gate(); const subscription = adapter.onDidSendMessage(message => { if (message.event === 'terminated') terminated.resolve(); });
-    if (type === 'android-jvm') { f.stopFailure = new Error('sibling stop failed'); f.cleanupFailure = new Error('server stop failed'); }
+    if (type === 'android-jvm') { f.expectedDisposalFailure = /server stop failed/; f.stopFailure = new Error('sibling stop failed'); f.cleanupFailure = new Error('server stop failed'); }
     for (const listener of [...f.ends]) listener(f.children.find(child => child.type === type));
     await terminated.promise; subscription.dispose(); assert.equal(f.stopped.length, 1); assert.equal(f.cleaned.length, 1);
     if (type === 'android-jvm') assert.ok(f.notices.some(message => /sibling stop failed/.test(message) && /server stop failed/.test(message)));
@@ -501,15 +648,15 @@ test('launch rejects ambiguous PID and activity errors and JVM sourcePaths fall 
 // 关闭取消的 signal 必须是本次父会话所有，ADB 中断后不得创建 child；另一会话仍能正常启动。
 test('closing aborts only this parent launch ADB command and never starts a late child', async t => {
   const f = await fixture(t); const entered = gate();
-  f.adbHook = async (_adb, _serial, args, signal) => {
-    assert.equal(args.includes('am'), true); entered.resolve(signal);
+  f.launchHook = async (args, signal) => {
+    assert.equal(args[1], 'com.example.app'); entered.resolve(signal);
     return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
   };
   const adapter = await f.parent({ type: 'android-debug', mode: 'java', request: 'launch', launchActivity: '.MainActivity', pid: undefined }, true);
   const starting = request(f, adapter, 'launch'); const signal = await entered.promise;
   const closing = adapter.dispose(); assert.equal(signal.aborted, true); assert.equal((await starting).success, false); await closing;
   assert.equal(f.children.length, 0); assert.equal(f.starts.size, 0);
-  f.adbHook = undefined;
+  f.launchHook = undefined;
   const other = await f.parent({ type: 'android-debug', mode: 'java' }, true); assert.equal((await request(f, other, 'attach')).success, true);
 });
 
@@ -517,11 +664,14 @@ test('parent JVM child uses dynamic forwarding for port zero', async t => {
   const f = await fixture(t);
   const parent = await f.parent({ type: 'android-debug', mode: 'dual', java: { port: 0, hostName: '127.0.0.1' } }, true);
   assert.equal((await request(f, parent, 'attach')).success, true);
-  const config = f.children.at(-1).configuration;
-  assert.equal(config.hostName, '127.0.0.1'); assert.equal(config.port, undefined); assert.equal(config.androidJdwpPort, 41873);
+  const config = f.children.find(child => child.type === 'android-jvm').configuration;
+  assert.equal(config.hostName, '127.0.0.1'); assert.equal(config.port, 41873); assert.equal(config.androidJdwpPort, 41873);
   assert.equal(config.preLaunchTask, undefined); assert.equal(config.androidJdwpExternal, undefined);
-  assert.deepEqual(f.jdwps.at(-1).slice(0, 4), ['session-adb', 'serial', 42, 0]);
+  assert.deepEqual(f.jdwps.at(-1), ['serial', 42]);
   assert.equal((await request(f, parent, 'disconnect')).success, true);
+  const retry = await f.parent({ type: 'android-debug', mode: 'java', java: { port: 0 } }, true);
+  assert.equal((await request(f, retry, 'attach')).success, true);
+  assert.equal((await request(f, retry, 'disconnect')).success, true);
 });
 
 test('parent Java and Dual sessions reject nonnumeric port values before ADB identity resolution', async t => {
@@ -536,8 +686,8 @@ test('parent JVM child preserves explicit task port and host without owning a fo
   const f = await fixture(t);
   const parent = await f.parent({ type: 'android-debug', mode: 'dual', java: { port: 5005, hostName: 'remote.example', preLaunchTask: 'prepare-jdwp', postLaunchTask: 'after-jdwp', postDebugTask: 'cleanup-jdwp', serverReadyAction: { action: 'openExternally' } } }, true);
   assert.equal((await request(f, parent, 'attach')).success, true);
-  const config = f.children.at(-1).configuration;
-  assert.equal(config.hostName, 'remote.example'); assert.equal(config.port, 5005); assert.equal(config.androidJdwpPort, undefined); assert.equal(config.androidJdwpExternal, true);
+  const config = f.children.find(child => child.type === 'android-jvm').configuration;
+  assert.equal(config.hostName, 'remote.example'); assert.equal(config.port, 5005); assert.equal(config.androidJdwpPort, 5005); assert.equal(config.androidJdwpExternal, true);
   assert.equal(config.preLaunchTask, 'prepare-jdwp'); assert.equal(config.postLaunchTask, 'after-jdwp'); assert.equal(config.postDebugTask, 'cleanup-jdwp'); assert.deepEqual(config.serverReadyAction, { action: 'openExternally' });
   assert.equal(f.jdwps, undefined);
 });
@@ -546,7 +696,7 @@ test('parent JVM child preserves explicit task port and host without owning a fo
 test('parent JVM child uses bundled dynamic JDWP forwarding and removes its exact allocated port', async t => {
   const f = await fixture(t); const parent = await f.parent({ type: 'android-debug', mode: 'dual', java: { port: 5005 } }, true);
   assert.equal((await request(f, parent, 'attach')).success, true);
-  const config = f.children.at(-1).configuration;
+  const config = f.children.find(child => child.type === 'android-jvm').configuration;
   const { EventEmitter } = require('node:events'); const { PassThrough } = require('node:stream');
   class Emitter {
     listeners = new Set();
@@ -557,16 +707,16 @@ test('parent JVM child uses bundled dynamic JDWP forwarding and removes its exac
   const calls = [], errors = [], writes = [];
   const module = { exports: {} };
   const dependencies = {
-    vscode: { EventEmitter: Emitter }, '../autoConfig': { omitAuto: config => ({ ...config }) }, './java': {}, '../index': {},
+    vscode: { EventEmitter: Emitter }, '../coordinator/androidCoordinator': {}, '../autoConfig': { omitAuto: config => ({ ...config }) }, './java': {}, '../index': {},
     '../../sdk': { adbPath: () => 'sdk-adb' }, '../../projectLocalConfig': { readProjectLocalConfig: () => ({ debugger: { adbPath: 'session-adb' } }) },
-    '../native-debugger/nativeTarget': { adbExec: async (adb, serial, args) => { calls.push([adb, serial, Array.from(args)]); return args[1] === 'tcp:0' ? '41873' : ''; } },
+    '../native-debugger/nativeTarget': { adbExec: async (adb, serial, args) => { calls.push([adb, serial, Array.from(args)]); return args[0] === 'jdwp' ? '42\n' : args[1] === 'tcp:0' ? '41873' : ''; } },
     '../jdwpForward': { createJdwpForward: async () => ({ port: 41873, cleanup: async () => {} }) },
   };
   vm.runInNewContext(require('esbuild').transformSync(fs.readFileSync(path.join(root, 'src/android-debugger/jvm-debugger/adapter.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
     { module, exports: module.exports, require: id => dependencies[id] ?? require(id), Buffer, AbortController, AggregateError });
   const child = new EventEmitter(); Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() { this.emit('close', 0); return true; } });
   child.stdin.on('data', value => writes.push(Buffer.from(value)));
-  const adapter = new module.exports.AndroidJvmAdapter(child, config, error => errors.push(error));
+  const adapter = new module.exports.AndroidJvmAdapter(child, config, error => errors.push(error), { session() { const controller = new AbortController(); return { signal: controller.signal, cancel(reason) { controller.abort(reason); }, async close() {} }; } });
   adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} });
   await adapter.startup;
   assert.deepEqual(calls, []);
@@ -591,6 +741,21 @@ test('dispose releases a reported child while startDebugging is still waiting fo
   const closing = adapter.dispose();
   assert.equal((await starting).success, false); await closing;
   assert.equal(f.stopped.length, 1); assert.equal(f.cleaned.length, 1); assert.equal(f.starts.size, 0);
+});
+
+test('late owned child after cancellation is stopped before startup can settle', async t => {
+  const f = await fixture(t), entered = gate(), report = gate(), stopped = gate();
+  f.childStartHook = async (config, options) => {
+    entered.resolve(); await report.promise;
+    const child = { id: 'late-owned', type: config.type, configuration: config, parentSession: options.parentSession };
+    for (const listener of [...f.starts]) listener(child);
+    await stopped.promise; f.accept = false;
+  };
+  f.stopHook = () => stopped.resolve();
+  const adapter = await f.parent(), starting = request(f, adapter, 'attach');
+  await entered.promise; const closing = adapter.dispose(); report.resolve();
+  assert.equal((await starting).success, false); await closing;
+  assert.equal(f.stopped.length, 1); assert.equal(f.cleaned.length, 1);
 });
 
 test('source lock preserves unmodified original snapshot hashes and Native provenance', () => {

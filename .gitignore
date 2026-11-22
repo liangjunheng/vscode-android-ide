@@ -14,6 +14,7 @@ dist
 tests/fixtures/
 tools/
 src/android-debugger/jvm-debugger/upstream/**/target/
+src/android-debugger/coordinator/target/
 resources/jvm-debugger/kotlin-debug-adapter.jar
 src/gradle-tooling/target/
 resources/gradle-tooling-server.jar

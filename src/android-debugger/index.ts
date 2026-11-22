@@ -15,12 +15,12 @@ export interface AndroidDebugTarget {
 export function getAndroidDebugConfigurations(): vscode.DebugConfiguration[] {
   const java = { type: 'android-jvm', name: 'Android JVM', adapterJvmArgs: [] };
   return [
-    { type: 'android-debug', request: 'launch', name: 'Android: Android Native Debug Launch', mode: 'native', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', native: { abi: 'auto', symbolSearchPaths: [] } },
-    { type: 'android-debug', request: 'attach', name: 'Android: Android Native Debug Attach', mode: 'native', target: 'auto', pid: 'auto', native: {} },
-    { type: 'android-debug', request: 'launch', name: 'Android: Android JVM Debug Launch', mode: 'java', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', java: { ...java, sourcePaths: 'auto' } },
-    { type: 'android-debug', request: 'attach', name: 'Android: Android JVM Debug Attach', mode: 'java', target: 'auto', pid: 'auto', java: { ...java } },
-    { type: 'android-debug', request: 'launch', name: 'Android: Android Dual(Native and JVM) Debug Launch', mode: 'dual', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', native: { abi: 'auto', symbolSearchPaths: [] }, java: { ...java, sourcePaths: 'auto' } },
-    { type: 'android-debug', request: 'attach', name: 'Android: Android Dual(Native and JVM) Debug Attach', mode: 'dual', target: 'auto', pid: 'auto', native: {}, java: { ...java } },
+    { type: 'android-debug', request: 'launch', name: 'Android: Native Debug Launch', mode: 'native', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', native: { abi: 'auto', symbolSearchPaths: [] } },
+    { type: 'android-debug', request: 'attach', name: 'Android: Native Debug Attach', mode: 'native', target: 'auto', pid: 'auto', native: {} },
+    { type: 'android-debug', request: 'launch', name: 'Android: JVM Debug Launch', mode: 'java', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', java: { ...java, sourcePaths: 'auto' } },
+    { type: 'android-debug', request: 'attach', name: 'Android: JVM Debug Attach', mode: 'java', target: 'auto', pid: 'auto', java: { ...java } },
+    { type: 'android-debug', request: 'launch', name: 'Android: Dual(Native and JVM) Debug Launch', mode: 'dual', target: 'auto', apkPath: 'auto', packageName: 'auto', launchActivity: 'auto', native: { abi: 'auto', symbolSearchPaths: [] }, java: { ...java, sourcePaths: 'auto' } },
+    { type: 'android-debug', request: 'attach', name: 'Android: Dual(Native and JVM) Debug Attach', mode: 'dual', target: 'auto', pid: 'auto', native: {}, java: { ...java } },
   ];
 }
 

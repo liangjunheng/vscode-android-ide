@@ -21,7 +21,7 @@ function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{reso
 // 执行真实TS模块，时钟及设备传输仅在宿主依赖边界替换。
 function load(file,deps,clock,extra={}){
   const module={exports:{}};
-  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname,'../src',file),'utf8'),{loader:'ts',format:'cjs'}).code,{module,exports:module.exports,require:id=>id==='./runtimeContext'?require('./runtime-context-loader.cjs')(deps,extra.process||process):Object.hasOwn(deps,id)?deps[id]:require(id),Buffer,process,console,AbortController,Uint8Array,setTimeout:(fn,ms)=>clock.set(fn,ms),clearTimeout:handle=>clock.clear(handle),setInterval:(fn,ms)=>clock.set(fn,ms,true),clearInterval:handle=>clock.clear(handle),...extra});
+  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname,'../src',file),'utf8'),{loader:'ts',format:'cjs'}).code,{module,exports:module.exports,require:id=>id==='./runtimeContext'?require('./runtime-context-loader.cjs')(deps,extra.process||process):id==='./autoConfig'?require('./auto-config-loader.cjs')():Object.hasOwn(deps,id)?deps[id]:require(id),Buffer,process,console,AbortController,Uint8Array,setTimeout:(fn,ms)=>clock.set(fn,ms),clearTimeout:handle=>clock.clear(handle),setInterval:(fn,ms)=>clock.set(fn,ms,true),clearInterval:handle=>clock.clear(handle),...extra});
   return module.exports;
 }
 // 真正运行DeviceExplorerController/ProcessesController及调试器配置模块，宿主边界只替换设备/时钟；Node>=22运行node --test tests/view-idle.test.js验证连接归属、60秒期限和取消回收，不以空调试器stub绕过依赖。

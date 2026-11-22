@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-/** 加载真实Android导出，仅替换Appium/工具链边界；不模拟待验证设备元数据函数。npm test发现本文件。 */
+/** 功能点：Native设备元数据查询；受影响对象：android.ts的ABI和包名读取；复现路径：加载真实模块并替换Appium边界；测试范围：正常、缺失、非法及查询错误；执行入口：npm test；预期结果：精确设备身份与错误传播；判据：所有真实导出调用断言通过。 */
 function fixture() {
   const f = { output: '', calls: [], creates: [], properties: {}, propertyReads: [] };
   class ADB {
@@ -22,6 +22,7 @@ function fixture() {
     if (id === 'appium-adb') return { ADB };
     if (id === '../../nativeToolchain') return { resolveNativeToolchain: root => ({ adb: 'adb-' + root, sdkRoot: 'sdk-' + root, ndkRoot: 'ndk-' + root }) };
     if (id === './logger') return { logger: { log() {} } };
+    if (id === '../../serverLauncher') return { compileServerLauncher() { assert.fail('设备元数据查询不得编译Native启动器'); } };
     if (['./androidPaths', './utils', './jdwp', 'ini', 'teen_process'].includes(id)) return {};
     return require(id);
   } });

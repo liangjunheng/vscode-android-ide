@@ -4,11 +4,8 @@ import * as path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as vscode from 'vscode';
 import { findJava } from './java';
-import { adbPath, listDevices } from '../../sdk';
-import { readProjectLocalConfig } from '../../projectLocalConfig';
-import { adbExec, resolveLauncherActivity } from '../native-debugger/nativeTarget';
 import { omitAuto } from '../autoConfig';
-import { createJdwpForward } from '../jdwpForward';
+import { AndroidCoordinator, AndroidDebugSession } from '../coordinator/androidCoordinator';
 
 export const JVM_DEBUG_TYPE = 'android-jvm';
 type Message = { type: string; seq: number; command?: string; request_seq?: number; success?: boolean; message?: string; arguments?: Record<string, any>; [key: string]: any };
@@ -19,7 +16,7 @@ export function getJvmDebugConfigurations(): vscode.DebugConfiguration[] { retur
 /** 保留上游JVM配置默认值，Android仅选择设备不分配资源；jvm-debugger.test.js覆盖选择、取消及非法端口。 */
 export class JvmConfigurationProvider implements vscode.DebugConfigurationProvider {
   /** 仅缺少PID和包名时读取当前构建选择；jvm-debugger.test.js验证惰性解析和错误传播。 */
-  constructor(private readonly selectedPackage: (folder?: vscode.WorkspaceFolder) => string | undefined = () => undefined) {}
+  constructor(private readonly selectedPackage: (folder?: vscode.WorkspaceFolder) => string | undefined = () => undefined, private readonly coordinator?: AndroidCoordinator) {}
   /** initial/dynamic入口提供内置名称；jvm-debugger.test.js断言两入口与返回隔离。 */
   provideDebugConfigurations(): vscode.DebugConfiguration[] { return getJvmDebugConfigurations(); }
 
@@ -39,8 +36,8 @@ export class JvmConfigurationProvider implements vscode.DebugConfigurationProvid
       if (config.pid === undefined && config.processId === undefined) config.packageName ??= this.selectedPackage(folder);
       let serial = config.serial ?? config.target;
       if (!serial || serial === 'select') {
-        const devices = (await listDevices()).filter(device => device.state === 'device');
-        const selected = await vscode.window.showQuickPick(devices.map(device => ({ label: device.name ?? device.serial, serial: device.serial })), { placeHolder: 'Select Android device for Kotlin/Java debugging' });
+        const devices = (await this.coordinator!.devices()).filter(device => device.state === 'device');
+        const selected = await vscode.window.showQuickPick(devices.map(device => ({ label: device.serial, serial: device.serial })), { placeHolder: 'Select Android device for Kotlin/Java debugging' });
         if (!selected) return undefined;
         serial = selected.serial;
       }
@@ -84,20 +81,23 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
   private readonly controller = new AbortController();
   private readonly requests = new Map<number, string>();
   private buffer = Buffer.alloc(0);
-  private forwarding?: { adb: string; serial: string; port: number };
+  private session?: AndroidDebugSession;
   private startup?: Promise<void>;
   private closing?: Promise<void>;
   private readonly exited: Promise<void>;
   private terminated?: Message;
+  private childClosed = false;
 
   /** 创建已验证JDK/JAR的stdio进程并绑定关闭事件；jvm-debugger.test.js验证原始DAP响应及异常。 */
-  constructor(private readonly child: ChildProcessWithoutNullStreams, private readonly config: vscode.DebugConfiguration, private readonly report: (error: unknown) => void) {
-    this.exited = new Promise(resolve => child.once('close', () => resolve()));
+  constructor(private readonly child: ChildProcessWithoutNullStreams, private readonly config: vscode.DebugConfiguration, private readonly report: (error: unknown) => void, private readonly coordinator?: AndroidCoordinator) {
+    this.exited = new Promise(resolve => child.once('close', () => { this.childClosed = true; resolve(); }));
     child.stdout.on('data', chunk => this.receive(Buffer.from(chunk)));
     child.stderr.on('data', chunk => this.emitter.fire({ type: 'event', seq: 0, event: 'output', body: { category: 'stderr', output: String(chunk) } }));
     child.on('error', error => { this.report(error); void this.close().catch(this.report); });
     child.stdin.on('error', error => { this.report(error); void this.close().catch(this.report); });
-    child.once('close', () => { void this.close().then(() => this.emitter.fire(this.terminated ?? { type: 'event', seq: 0, event: 'terminated' }), this.report); });
+    child.once('close', () => {
+      void this.close().catch(this.report).finally(() => this.emitter.fire(this.terminated ?? { type: 'event', seq: 0, event: 'terminated' }));
+    });
   }
 
   /** 仅将Android launch改写为上游attach，其余DAP原样转发；jvm-debugger.test.js覆盖启动和提前断开。 */
@@ -106,9 +106,11 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
       if (this.startup || this.closing) { this.failure(message, new Error('Android JVM session already started or closed')); return; }
       this.startup = this.start(message).catch(async error => {
         let failure = error;
+        this.child.stdin.end();
+        if (!this.childClosed) this.child.kill();
+        await this.exited;
         try { await this.releaseForward(); } catch (cleanup) { failure = new AggregateError([error, cleanup], 'JVM startup and cleanup failed'); }
         this.failure(message, failure);
-        this.child.stdin.end();
       });
     } else if (this.closing) {
       if (message.type === 'request') this.failure(message, new Error('Android JVM session is closing'));
@@ -133,8 +135,13 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
    * 输出：向JVM后端发送Attach请求；仅自建forward写入本适配器清理状态。
    * 验证：node --test tests/jvm-debugger.test.js 覆盖动态、父会话和用户管理端口的Attach/Launch路径。 */
   private async start(message: Message): Promise<void> {
-    const signal = this.controller.signal;
     const config = { ...this.config, ...message.arguments };
+    if (!this.coordinator) throw new Error('Android debug Coordinator is unavailable');
+    this.session = this.coordinator.session(config.serial, error => { this.report(error); void this.close().catch(this.report); });
+    const cancel = () => this.session!.cancel(this.controller.signal.reason);
+    this.controller.signal.addEventListener('abort', cancel, { once: true });
+    if (this.controller.signal.aborted) cancel();
+    const signal = this.session.signal;
     const requestedPort = this.androidJdwpPort(config.port);
     if (config.androidJdwpPort !== undefined) this.androidJdwpPort(config.androidJdwpPort);
     const serial = config.serial as string;
@@ -143,25 +150,18 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
     const configuredPid = config.pid ?? config.processId;
     if (message.command === 'attach' && configuredPid === undefined && !/^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+$/.test(config.packageName ?? '')) throw new Error('Android attach requires pid or a valid packageName');
     if (message.command === 'attach' && configuredPid !== undefined && (!Number.isSafeInteger(Number(configuredPid)) || Number(configuredPid) <= 0)) throw new Error('Invalid Android process id');
-    const adb = readProjectLocalConfig(config.androidProjectRoot ?? config.projectRoot).debugger?.adbPath ?? adbPath();
-    let pid = config.pid ?? config.processId;
+    let pid = configuredPid;
+
     if (message.command === 'attach' && pid === undefined) {
-      const pids = (await adbExec(adb, serial, ['shell', 'pidof', '-s', config.packageName], signal)).trim();
-      if (!/^\d+$/.test(pids)) throw new Error('No unique Android process found for ' + config.packageName);
-      pid = Number(pids);
+      const match = (await this.coordinator!.clients(serial, signal)).find(client => client.packageName === config.packageName);
+      if (!match) throw new Error('No Android process found for ' + config.packageName);
+      pid = match.pid;
     }
     if (message.command === 'launch') {
-      await adbExec(adb, serial, ['shell', 'am', 'force-stop', config.packageName], signal);
-      signal.throwIfAborted();
-      if (config.apkPath && !config.androidApkInstalled) await adbExec(adb, serial, ['install', '-r', config.apkPath], signal);
-      const activity = config.launchActivity ?? await resolveLauncherActivity(adb, serial, config.packageName, signal);
-      const component = `${config.packageName}/${activity}`;
-      if (!/^[\w.$]+\/[\w.$]+$/.test(component)) throw new Error('Invalid Android launch component');
-      const output = await adbExec(adb, serial, ['shell', 'am', 'start', '-D', '-n', component], signal);
-      if (/Error:|Exception|Status:\s*(?!ok\b)\S+/i.test(output)) throw new Error('Android launch failed: ' + output.trim());
-      const pids = (await adbExec(adb, serial, ['shell', 'pidof', config.packageName], signal)).trim();
-      if (!/^\d+$/.test(pids)) throw new Error('Expected exactly one Android process for ' + config.packageName + ', got: ' + pids);
-      pid = Number(pids);
+      if (config.apkPath && !config.androidApkInstalled) await this.coordinator!.install(serial, config.apkPath, signal);
+      const component = config.launchActivity ? `${config.packageName}/${config.launchActivity}` : '';
+      if (component && !/^[\w.$]+\/[\w.$]+$/.test(component)) throw new Error('Invalid Android launch component');
+      pid = await this.coordinator!.launch(serial, config.packageName, component, signal);
     }
     signal.throwIfAborted();
     let port: number;
@@ -174,13 +174,12 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
       port = this.androidJdwpPort(config.androidJdwpPort);
       if (port < 1) throw new Error('Invalid parent Android JVM JDWP port');
     } else {
-      const forward = await createJdwpForward(adb, serial, Number(pid), requestedPort, signal);
-      port = forward.port;
-      this.forwarding = { adb, serial, port };
+      const lease = await this.session.claim(Number(pid));
+      port = lease.port;
     }
     signal.throwIfAborted();
     this.requests.set(message.seq, message.command!);
-    const hostName = typeof config.hostName === 'string' && config.hostName !== 'auto' ? config.hostName : '127.0.0.1';
+    const hostName = config.androidJdwpExternal === true || userManagedForward ? config.hostName ?? '127.0.0.1' : '127.0.0.1';
     this.send({ ...message, command: 'attach', arguments: { ...config, hostName, port, projectRoot: config.projectRoot ?? config.androidProjectRoot } });
   }
 
@@ -203,9 +202,11 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
         if (this.buffer.length < end + 4 + length) return;
         const message: Message = JSON.parse(this.buffer.subarray(end + 4, end + 4 + length).toString('utf8'));
         this.buffer = this.buffer.subarray(end + 4 + length);
-        if (message.type === 'response' && this.requests.has(message.request_seq!)) {
-          message.command = this.requests.get(message.request_seq!);
-          this.requests.delete(message.request_seq!);
+        const requestCommand = message.type === 'response' ? this.requests.get(message.request_seq!) : undefined;
+        const trackedRequest = requestCommand !== undefined;
+        if (trackedRequest) this.requests.delete(message.request_seq!);
+        if (trackedRequest) {
+          message.command = requestCommand;
         }
         if (message.event === 'terminated') {
           this.terminated = message;
@@ -228,21 +229,17 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
     this.emitter.fire({ type: 'response', seq: 0, command: request.command, request_seq: request.seq, success: false, message: text });
   }
 
-  /** 仅删除本会话分配的forward；jvm-debugger.test.js断言精确端口及清理错误传播。 */
-  private async releaseForward(): Promise<void> {
-    if (!this.forwarding) return;
-    const { adb, serial, port } = this.forwarding;
-    await adbExec(adb, serial, ['forward', '--remove', `tcp:${port}`]);
-    this.forwarding = undefined;
-  }
+  /** 功能：结算 Coordinator 自有租约；输入会话账本；输出释放结果；验证：jvm-debugger.test.js。 */
+  private async releaseForward(): Promise<void> { await this.session?.close(); }
 
   /** 取消未完成准备、终止自有JAR并等待退出与forward回收；jvm-debugger.test.js验证幂等关闭。 */
   close(): Promise<void> {
     return this.closing ??= (async () => {
       this.controller.abort();
       await this.startup;
-      this.child.kill();
-      const results = await Promise.allSettled([this.exited, this.releaseForward()]);
+      if (!this.childClosed) this.child.kill();
+      await this.exited;
+      const results = await Promise.allSettled([this.releaseForward()]);
       const errors = results.filter((value): value is PromiseRejectedResult => value.status === 'rejected').map(value => value.reason);
       if (errors.length) throw new AggregateError(errors, 'JVM cleanup failed');
     })();
@@ -256,7 +253,7 @@ export class AndroidJvmAdapter implements vscode.DebugAdapter {
 export class JvmAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
   private readonly active = new Set<AndroidJvmAdapter>();
   /** 工厂归扩展所有；jvm-debugger.test.js验证注册与关闭。 */
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext, private readonly coordinator?: AndroidCoordinator) {}
 
   /** 找到JDK17+/JDI后启动bundled JAR，不依赖外部Kotlin插件；jvm-debugger.test.js断言stdio及完整参数。 */
   async createDebugAdapterDescriptor(session: vscode.DebugSession): Promise<vscode.DebugAdapterDescriptor> {
@@ -270,7 +267,7 @@ export class JvmAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
     const configuredJvmArgs = session.configuration.adapterJvmArgs as string[] | undefined;
     const args = [...(configuredJvmArgs?.length ? configuredJvmArgs : settings.get<string[]>('adapterJvmArgs', ['-Xmx512m'])), '-jar', jar, '--log-level', session.configuration.logLevel ?? settings.get<string>('logLevel', 'INFO'), '--log-file', logFile];
     if (!session.configuration.android && session.configuration.type !== JVM_DEBUG_TYPE) return new vscode.DebugAdapterExecutable(runtime.java, args);
-    const adapter = new AndroidJvmAdapter(spawn(runtime.java, args, { windowsHide: true, stdio: 'pipe' }), session.configuration, error => { void vscode.window.showErrorMessage('JVM debugger: ' + String(error)); });
+    const adapter = new AndroidJvmAdapter(spawn(runtime.java, args, { windowsHide: true, stdio: 'pipe' }), session.configuration, error => { void vscode.window.showErrorMessage('JVM debugger: ' + String(error)); }, this.coordinator);
     this.active.add(adapter);
     adapter.onDidSendMessage(message => { if (message.event === 'terminated') this.active.delete(adapter); });
     return new vscode.DebugAdapterInlineImplementation(adapter);
@@ -302,11 +299,12 @@ export class JvmTrackerFactory implements vscode.DebugAdapterTrackerFactory {
 }
 
 /** 注册独立JVM类型及initial/dynamic内置项，保留Native唯一工厂；jvm-debugger.test.js验证注册表。 */
-export function registerJvmDebugger(context: vscode.ExtensionContext, selectedPackage?: (folder?: vscode.WorkspaceFolder) => string | undefined): void {
-  const factory = new JvmAdapterFactory(context);
+export function registerJvmDebugger(context: vscode.ExtensionContext, selectedPackage?: (folder?: vscode.WorkspaceFolder) => string | undefined, coordinator?: AndroidCoordinator): JvmAdapterFactory {
+  const factory = new JvmAdapterFactory(context, coordinator);
   const output = vscode.window.createOutputChannel('Android Kotlin/Java Debugger');
   context.subscriptions.push(output, vscode.debug.registerDebugAdapterTrackerFactory(JVM_DEBUG_TYPE, new JvmTrackerFactory(output)), factory,
     vscode.debug.registerDebugAdapterDescriptorFactory(JVM_DEBUG_TYPE, factory),
-    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, new AndroidJvmConfigurationProvider(selectedPackage)),
-    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, new AndroidJvmConfigurationProvider(selectedPackage), vscode.DebugConfigurationProviderTriggerKind.Dynamic));
+    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, new AndroidJvmConfigurationProvider(selectedPackage, coordinator)),
+    vscode.debug.registerDebugConfigurationProvider(JVM_DEBUG_TYPE, new AndroidJvmConfigurationProvider(selectedPackage, coordinator), vscode.DebugConfigurationProviderTriggerKind.Dynamic));
+  return factory;
 }
