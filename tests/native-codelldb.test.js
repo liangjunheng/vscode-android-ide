@@ -207,7 +207,8 @@ test('四、生成真实 CodeLLDB 命令并保留未知选项且不泄露信号'
   assert.equal(f.calls.find(call => call[0] === 'abis')[2], controller.signal);
   assert.equal(config.initCommands[1], 'platform select remote-android');
   assert.equal(config.initCommands[2], 'platform connect unix-abstract-connect://[serial]platform-0');
-  assert.deepEqual(Array.from(config.initCommands).slice(3), ['settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', 'custom init']);
+  assert.deepEqual(Array.from(config.initCommands).slice(3), ['settings set plugin.jit-loader.gdb.enable off', 'custom init']);
+  assert.deepEqual(Array.from(config.preRunCommands), ['process handle SIGBUS SIGSEGV --pass true --stop false --notify false', 'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault']);
   const escaped = f.library.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   assert.deepEqual(Array.from(config.postRunCommands), ['target modules add -- "' + escaped + '"', 'custom post']);
   assert.deepEqual(Array.from(config.exitCommands), ['custom exit', 'platform disconnect', 'log disable lldb platform']);
