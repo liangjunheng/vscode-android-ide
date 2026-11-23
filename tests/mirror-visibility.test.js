@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-// 加载真实投屏类，只替换宿主和视频源；npm test controls 回归验证当前设备、资源和显示生命周期。
+/** 功能点：投屏可见性；受影响对象：真实RunningDeviceView；复现路径：隐藏、恢复及切换设备；测试范围：偏好、资源和错误；执行入口：npm test；预期结果：保留精确生命周期且视频仅替换startScrcpy；判据：可见性与资源次数断言全部通过。 */
 function fixture(preference) {
   const calls = [], messages = [], started = [], module = { exports: {} };
   const deps = {
@@ -17,8 +17,8 @@ function fixture(preference) {
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController, setTimeout, clearTimeout, clearInterval, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id) });
   const view = new module.exports.RunningDeviceView(path.join(__dirname, '..'), undefined, preference);
   view.view = { visible: true, webview: { postMessage: m => messages.push(m) } };
-  view.pickMode = () => 'screencap';
-  view.startScreencap = () => { started.push(view.serial); view.loop = {}; };
+  view.pickMode = () => 'scrcpy';
+  view.startScrcpy = () => { started.push(view.serial); view.loop = {}; };
   return { view, calls, messages, started };
 }
 

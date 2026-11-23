@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-// 执行真实提供方及轻量Explorer，模式测试可无设备运行，断言唯一模式/停止/保存和消息错误。
+/** 功能点：设备视图互斥切换；受影响对象：真实提供方与Explorer；复现路径：切换投屏、文件和进程视图；测试范围：保存、恢复及错误；执行入口：npm test；预期结果：状态准确且视频仅替换当前startScrcpy边界；判据：消息与启动次数断言全部通过。 */
 function fixture(mode = 'mirror') {
   const messages = [], saved = [], context = [], started = [], module = { exports: {} };
   const deps = { vscode: { commands: { executeCommand: async () => {} } }, './sdk': { listDevices: async () => [{ serial: 'phone', state: 'device' }] }, './emulatorGrpc': {}, './scrcpy': {}, './skin': { skinForAvd: () => undefined } };
@@ -13,7 +13,7 @@ function fixture(mode = 'mirror') {
   const preference = { mode, visible: mode === 'mirror', save: async visible => saved.push(visible), saveMode: async value => saved.push(value) };
   const explorer = { setContext: async (serial, visible, surface = 'files') => context.push([serial, visible, surface]), handle: async m => messages.push({ handled: m.action }) };
   const view = new module.exports.RunningDeviceView('', undefined, preference, undefined, explorer);
-  view.view = { visible: true, webview: { postMessage: m => messages.push(m) } }; view.serial = 'phone'; view.pickMode = () => 'screencap'; view.startScreencap = () => { started.push(view.serial); view.loop = {}; };
+  view.view = { visible: true, webview: { postMessage: m => messages.push(m) } }; view.serial = 'phone'; view.pickMode = () => 'scrcpy'; view.startScrcpy = () => { started.push(view.serial); view.loop = {}; };
   return { view, messages, saved, context, started, preference };
 }
 

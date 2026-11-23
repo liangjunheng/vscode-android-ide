@@ -15,7 +15,7 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { transformSync } = require('esbuild');
 
-// 真实 activate 和两个提供方，仅替换 VS Code、ADB/视频源和目录定时器；npm test 可无硬件运行并严格计数。
+/** 功能点：双视图设备选择同步；受影响对象：真实activate、RunningDeviceView及LogcatView；复现路径：切换、清空和隐藏设备；测试范围：幂等、错误与视频边界；执行入口：npm test；预期结果：选择双向同步且不启动真实视频；判据：真实消息与调用次数断言全部通过。 */
 function fixture() {
   const f = { devices: [{ serial: 'phone', state: 'device' }, { serial: 'two', state: 'device' }], views: {}, handlers: {}, commands: [], errors: [], streams: [], mirrors: [], intervals: new Map() };
   const vscode = {
@@ -48,7 +48,8 @@ function fixture() {
   // 仅隔离两个调试注册边界；仍执行真实activate和双侧选择，不加载调试会话。
   load('extension', { './android-debugger/debugging': { registerAndroidDebugging: () => ({ async dispose() {} }) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { async initialize() {} dispose() {} currentNativeDebugMetadata() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
   f.running = f.views['android-ide.runningDevice']; f.logcat = f.views['android-ide.logcat'];
-  f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
+  f.running.pickMode = () => 'scrcpy';
+  f.running.startScrcpy = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
   // 创建实际 HTML 与宿主消息入口，默认均可见；可在测试中延迟创建或隐藏来覆盖生命周期。
   f.resolve = (provider) => {
     const messages = [], view = { visible: true, webview: { cspSource: 'test:', asWebviewUri: p => p, postMessage: m => messages.push(m), onDidReceiveMessage: fn => { view.receive = fn; } }, onDidDispose() {}, onDidChangeVisibility: fn => { view.visibilityChanged = fn; } };

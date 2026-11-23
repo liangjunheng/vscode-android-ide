@@ -37,7 +37,7 @@ test('mirror selection clears previous frames and never falls back to another ph
   let stopped = 0;
   mirror.view = { visible: true, webview: { postMessage: (m) => messages.push(m) } };
   mirror.pickMode = () => 'screencap';
-  mirror.startScreencap = () => { started.push(mirror.serial); mirror.loop = {}; };
+  mirror.startScrcpy = () => { started.push(mirror.serial); mirror.loop = {}; };
   mirror.session = { stop: () => stopped++ };
   await mirror.select({ serial: 'phone' });
   assert.equal(stopped, 1);
@@ -236,7 +236,7 @@ test('dropdown selection messages switch the actual mirrored serial', async () =
   const started = [], messages = [];
   mirror.view = { visible: true, webview: { postMessage: m => messages.push(m) } };
   mirror.pickMode = () => 'screencap';
-  mirror.startScreencap = () => { started.push(mirror.serial); mirror.loop = {}; };
+  mirror.startScrcpy = () => { started.push(mirror.serial); mirror.loop = {}; };
   await mirror.onMessage({ type: 'select', serial: 'one' });
   await mirror.onMessage({ type: 'select', serial: 'two' });
   assert.deepEqual(started, ['one', 'two']);

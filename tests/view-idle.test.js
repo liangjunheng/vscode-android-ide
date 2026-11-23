@@ -1,3 +1,4 @@
+// 功能点：视图闲置生命周期；受影响对象：RunningDeviceView、Explorer、Processes及传输资源；复现路径：建立连接后切走、恢复、超过60秒及取消在途创建/截图；测试范围：现有scrcpy/gRPC路由、独立截图方法、精确期限及异常回收；执行入口：node --test tests/view-idle.test.js；预期结果：复用存活连接并按所有权释放；判据：全部时钟、取消、关闭及调用次数断言通过。
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -44,7 +45,7 @@ function backend(clock,options={}){
     // 记录危险命令以验证切走后的旧确认不会继续执行。
     async kill(pid,signal){signal.throwIfAborted();calls.push(['kill',this.serial,pid]);}
   }
-  const deps={vscode,'./deviceExplorerFiles':{DeviceExplorerFiles:Files},'./deviceExplorerProcesses':{DeviceExplorerProcesses:Processes}};
+  const deps={vscode,'./startup':require('./debug-startup-loader.cjs')(),'./deviceExplorerFiles':{DeviceExplorerFiles:Files},'./deviceExplorerProcesses':{DeviceExplorerProcesses:Processes}};
   deps['./projectLocalConfig']=load('projectLocalConfig.ts',deps,clock);
   deps['./android-debugger']=load('android-debugger/index.ts',deps,clock);
   deps['./processes']=load('processes.ts',deps,clock);
@@ -61,7 +62,7 @@ function mirror(clock,options={}){
     // 将handler与具体会话对象绑定，供断线及迟到事件测试。
     constructor(...args){this.serial=args[0];this.args=args;this.h=args.find(value=>value&&typeof value.onClose==='function');this.closed=false;this.live=false;this.stops=0;this.noDelay=0;records.push(this);created.resolve(this);}
     // 创建期间仍由该对象拥有，停止后完成不得变回可连接状态。
-    async start(){if(options.startGate)await options.startGate.promise;if(this.closed)throw Object.assign(new Error('cancelled start'),{name:'AbortError'});this.live=true;}
+    async start(){if(options.startGate)await options.startGate.promise;if(this.closed)throw Object.assign(new Error('cancelled start'),{name:'AbortError'});if(options.startError)throw options.startError;this.live=true;}
     // 提供方只能复用真实仍然存活的传输。
     get connected(){return this.live&&!this.closed;}
     // 清理可延迟由外部事件完成，以断言dispose确实等待。
@@ -82,9 +83,9 @@ function mirror(clock,options={}){
   return {view,records,messages,errors,contexts,created,catalog,get reads(){return reads;}};
 }
 
-// 三种投屏传输都必须在60秒内复用，旧释放事件不能杀掉已恢复的连接，60秒后只重连一次。
+// 两种活动投屏传输都必须在60秒内复用，旧释放事件不能杀掉已恢复的连接，60秒后只重连一次。
 test('mirror grace period reuses each live transport and expires at sixty seconds',async()=>{
-  for(const mode of ['scrcpy','emulator','screencap']){
+  for(const mode of ['scrcpy','emulator']){
     const clock=new Clock(),f=mirror(clock,{mode});
     try{
       await f.view.restart();const owner=f.view.mirrorConnection,initial=f.records.length,intervals=clock.intervals;
@@ -93,7 +94,7 @@ test('mirror grace period reuses each live transport and expires at sixty second
       await f.view.applyDeviceViewMode('mirror');assert.equal(f.view.mirrorConnection,owner,mode);assert.equal(f.records.length,initial);assert.equal(clock.intervals,intervals);
       clock.advance(1);assert.equal(owner.controller.signal.aborted,false);
       await f.view.applyDeviceViewMode('explorer');clock.advance(60000);assert.equal(owner.controller.signal.aborted,true);assert.equal(f.view.mirrorConnection,undefined);assert.equal(f.messages[f.messages.length-1].type,'loading');
-      await f.view.applyDeviceViewMode('mirror');assert.notEqual(f.view.mirrorConnection,owner);assert.equal(f.records.length,mode==='screencap'?0:initial+1);assert.equal(clock.intervals,intervals);
+      await f.view.applyDeviceViewMode('mirror');assert.notEqual(f.view.mirrorConnection,owner);assert.equal(f.records.length,initial+1);assert.equal(clock.intervals,intervals);
     }finally{await f.view.dispose();assert.equal(clock.timers.size,0);}
   }
 });
@@ -118,11 +119,12 @@ test('mirror dispose cancels idle timers and awaits transport cleanup',async()=>
   const clock=new Clock(),gate=deferred(),started=deferred(),f=mirror(clock,{releaseGate:gate,releaseStarted:started});
   await f.view.restart();await f.view.applyDeviceViewMode('explorer');let finished=false;const closing=f.view.dispose().then(()=>{finished=true;});await started.promise;assert.equal(finished,false);assert.equal(clock.timers.size,0);gate.resolve();await closing;assert.equal(finished,true);
 });
-// 连接保留期允许截图循环存在，但非活动不发读取，超时取消仍在执行的旧设备读取。
+// 截图方法不属于活动传输入口；独立建立真实连接所有者，验证非活动不再读取及闲置期限取消在途读取。
 test('inactive screenshot view stops reading and expiry aborts an owned capture',async()=>{
   const clock=new Clock(),started=deferred();let signal;
-  const f=mirror(clock,{mode:'screencap',read:input=>new Promise((resolve,reject)=>{signal=input;input.addEventListener('abort',()=>reject(input.reason),{once:true});started.resolve();})});
-  try{await f.view.restart();clock.advance(150);await started.promise;await f.view.applyDeviceViewMode('explorer');clock.advance(59999);assert.equal(f.reads,1);assert.equal(signal.aborted,false);clock.advance(1);assert.equal(signal.aborted,true);assert.equal(f.view.loop,undefined);}
+  const f=mirror(clock,{read:input=>new Promise((resolve,reject)=>{signal=input;input.addEventListener('abort',()=>reject(input.reason),{once:true});started.resolve();})});
+  f.view.mirrorConnection={serial:'phone',controller:new AbortController()};
+  try{f.view.startScreencap();await started.promise;await f.view.applyDeviceViewMode('explorer');clock.advance(59999);await f.view.capture();assert.equal(f.reads,1);assert.equal(signal.aborted,false);clock.advance(1);assert.equal(signal.aborted,true);assert.equal(f.view.loop,undefined);assert.equal(f.view.continuousCapture,false);}
   finally{await f.view.dispose();}
 });
 // 文件上下文与进程追踪独立倒计时，回文件不list，回进程不watch，过期后才重新建立。
@@ -163,6 +165,9 @@ test('all three views expire independently without disconnecting the active view
 function scrcpy(clock,options={}){
   const calls=[],sockets=[],socketReady=deferred(),pushReady=deferred(),forwardReady=deferred();let closes=0,kills=0;
   class Socket extends EventEmitter {
+    // 保存真实net.Socket流控接口的暂停状态，验证首包交接后恢复读取。
+    pause(){this.paused=true;this.pauses=(this.pauses||0)+1;return this;}
+    resume(){this.paused=false;this.resumes=(this.resumes||0)+1;return this;}
     // 关闭同一真实模拟句柄只产生一次close事件。
     setNoDelay(){return this;}
     destroy(){if(!this.destroyed){this.destroyed=true;this.emit('close');}return this;}
@@ -197,7 +202,7 @@ test('actual scrcpy propagates fatal handshake errors without retry',async()=>{
 });
 // 正常启动后根据实际socket判断连接；关闭control立即断线，stop等待forward移除。
 test('actual scrcpy connected state follows sockets and stop awaits forward cleanup',async()=>{
-  const clock=new Clock(),remove=deferred(),f=scrcpy(clock,{remove});const starting=f.session.start();const video=await f.socketReady.promise;video.emit('data',Buffer.from([0]));await starting;assert.equal(f.session.connected,true);assert.equal(f.sockets.length,2);
+  const clock=new Clock(),remove=deferred(),f=scrcpy(clock,{remove});const starting=f.session.start();const video=await f.socketReady.promise;video.emit('data',Buffer.from([0]));await starting;assert.equal(f.session.connected,true);assert.equal(f.sockets.length,2);assert.equal(video.pauses,1);assert.equal(video.resumes,1);assert.equal(video.paused,false);
   f.sockets[1].destroy();assert.equal(f.session.connected,false);let done=false;const closing=f.session.stop().then(()=>{done=true;});await Promise.resolve();assert.equal(done,false);remove.resolve();await closing;assert.equal(done,true);assert.equal(video.destroyed,true);assert.equal(f.closes,1);assert.equal(f.kills,1);
 });
 // 真实EmulatorSession以外部gRPC回调控制启动阶段，验证关闭后不再调用下一阶段。
@@ -260,10 +265,13 @@ test('device selection and disposal immediately close all retained backend sessi
   const clock=new Clock(),f=backend(clock);try{await f.controller.setContext('phone',true,'processes');await f.drain();await f.controller.setContext('phone',true,'files');await f.drain();const old=[...f.controller.scopes.values()];await f.controller.setContext('two',true,'files');await f.drain();assert.ok(old.every(scope=>scope.connection.signal.aborted));assert.equal(f.watchers[0].closed,true);assert.equal(clock.timers.size,0);assert.equal(f.controller.scope.serial,'two');}finally{await f.controller.dispose();assert.equal(clock.timers.size,0);}
 });
 
-// Scrcpy启动失败只报告错误并停止当前流，不自动切换到截图模式，避免隐藏秒级延迟。
+// 在Session.start传输边界注入失败，执行真实startScrcpy错误处理，验证报告错误、关闭所有者且不回退截图。
 test('scrcpy startup failure does not fall back to screenshot mode',async()=>{
-  const clock=new Clock(),f=mirror(clock);f.view.startScrcpy=async()=>{throw new Error('handshake closed');};
-  await f.view.restart();
-  assert.equal(f.messages.some(m=>m.type==='mode'&&m.mode==='screencap'),false);
-  assert.equal(f.messages.some(m=>m.type==='error'&&m.text.includes('handshake closed')),true);
+  const clock=new Clock(),f=mirror(clock,{startError:new Error('handshake closed')});
+  try{
+    await f.view.restart();
+    assert.equal(f.messages.some(m=>m.type==='mode'&&m.mode==='screencap'),false);
+    assert.equal(f.messages.some(m=>m.type==='error'&&m.text.includes('handshake closed')),true);
+    assert.equal(f.reads,0);assert.equal(f.records.length,1);assert.equal(f.records[0].stops,1);assert.equal(f.view.mirrorConnection,undefined);
+  }finally{await f.view.dispose();assert.equal(clock.timers.size,0);}
 });
