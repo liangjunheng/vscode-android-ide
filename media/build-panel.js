@@ -29,16 +29,17 @@ function initBuildPanel(send) {
     const activeRun = activeAction === 'run';
     const activeLaunch = activeAction === 'debugLaunch';
     const activeAttach = activeAction === 'debugAttach';
+    const debugVariant = (state.targetVariant || '').toLowerCase() === 'debug';
     if (runMode) runMode.disabled = stoppable;
     if (debugMode) {
       debugMode.value = state.debugMode || 'dual';
-      debugMode.disabled = stoppable;
+      debugMode.disabled = stoppable || !debugVariant;
       const selected = debugMode.querySelector('selectedcontent');
       const labels = { dual: 'Dual', jvm: 'Jvm', native: 'Native' };
       if (selected) selected.textContent = labels[debugMode.value] || 'Dual';
     }
-    if (debugLaunch) debugLaunch.disabled = stoppable && !activeLaunch || (!stoppable && (!serial || !state.target));
-    if (debugAttach) debugAttach.disabled = stoppable && !activeAttach || (!stoppable && (!serial || !state.target));
+    if (debugLaunch) debugLaunch.disabled = !debugVariant || (stoppable && !activeLaunch) || (!stoppable && (!serial || !state.target));
+    if (debugAttach) debugAttach.disabled = !debugVariant || (stoppable && !activeAttach) || (!stoppable && (!serial || !state.target));
     run.disabled = stoppable && !activeRun || (!stoppable && (!serial || !state.target));
     run.title = activeRun && stoppable ? 'Stop task or app' : 'Build, install and run';
     run.setAttribute('aria-label', activeRun && stoppable ? 'Stop task or app' : 'Run app');

@@ -47,7 +47,7 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
   assert.equal(f.sent.at(-1).type, 'logcat');
-  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', debugMode: 'dual', busy: false, deviceLoading: false, status: 'Ready' };
+  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', targetVariant: 'Debug', debugMode: 'dual', busy: false, deviceLoading: false, status: 'Ready' };
   f.receive({ ...state, deviceLoading: true });
   assert.equal(get('build-project-loading').hidden, true);
   assert.equal(get('build-target-loading').hidden, true);
@@ -61,6 +61,9 @@ test('build panel UI renders safe options and routes all commands', () => {
   f.receive({ type: 'devices', serial: 'phone' });
   f.receive({ type: 'deviceLoading', loading: false });
   assert.equal(get('build-device-loading').hidden, true);
+  assert.equal(get('build-debug-mode').disabled, false);
+  assert.equal(get('build-debug-launch').disabled, false);
+  assert.equal(get('build-debug-attach').disabled, false);
   assert.equal(get('build-run').disabled, false);
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
@@ -140,13 +143,17 @@ test('build panel UI renders safe options and routes all commands', () => {
   f.receive({ type: 'buildState', targets: [], projects: [], busy: false });
   assert.equal(get('build-target').children[1].textContent, 'No Android variants');
   assert.equal(get('build-run').disabled, true);
+  f.receive({ ...state, target: ':app:Release', targetVariant: 'release' });
+  assert.equal(get('build-debug-mode').disabled, true);
+  assert.equal(get('build-debug-launch').disabled, true);
+  assert.equal(get('build-debug-attach').disabled, true);
 });
 
 /** 功能点：停止中的按钮状态；受影响对象：共享构建栏；复现路径：Starting转为资源清理快照；测试范围：无设备、重复停止及禁止新启动；执行入口：本文件及真实浏览器回归；预期结果：停止按钮始终可用且只发送stop；判据：按钮和消息断言全部通过。 */
 test('stopping state keeps only stop available without restoring running status', () => {
   for (const logcat of [false, true]) {
     const f = fixture(true, logcat);
-    f.receive({ type: 'buildState', activeAction: logcat ? undefined : 'debugLaunch', busy: false, running: false, stopping: true, projects: [], targets: [], status: 'Stopping; resources are being released' });
+    f.receive({ type: 'buildState', activeAction: logcat ? undefined : 'debugLaunch', busy: false, running: false, stopping: true, projects: [], targets: [], targetVariant: 'Debug', status: 'Stopping; resources are being released' });
     assert.equal(f.get('build-run').disabled, !logcat);
     assert.equal(f.get('build-run')['aria-label'], logcat ? 'Stop task or app' : 'Run app');
     assert.equal(f.get('build-run-icon').className, logcat ? 'codicon codicon-debug-pause' : 'codicon codicon-play');

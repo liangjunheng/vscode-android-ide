@@ -205,7 +205,7 @@ export class AndroidBuildController implements vscode.Disposable {
     const busy = !this.stopping && !!this.operation && !this.operation.controller.signal.aborted;
     const gradleLoading = busy && this.operation?.action === 'refresh';
     this.snapshot = { type: 'buildState', projects: projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
-      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], debugMode: this.debugModeId, activeAction: this.activeAction, busy, stopping: !!this.stopping || this.cleanupPending, gradleLoading, running: !this.stopping && (!!this.launched || !!this.debugSession), status, ...(error ? { error } : {}) };
+      targets, target: this.targetId, targetVariant: target?.variant, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], debugMode: this.debugModeId, activeAction: this.activeAction, busy, stopping: !!this.stopping || this.cleanupPending, gradleLoading, running: !this.stopping && (!!this.launched || !!this.debugSession), status, ...(error ? { error } : {}) };
     this.post(this.snapshot);
   }
 
@@ -401,6 +401,7 @@ export class AndroidBuildController implements vscode.Disposable {
     const project = this.projects.find(p => p.id === this.projectId);
     const target = buildTargets(project?.tasks || []).find(t => t.id === this.targetId);
     if (!project || !target) throw new Error('Select a Gradle project and Android variant first.');
+    if (['debug', 'debugLaunch', 'debugAttach'].includes(action) && target.variant.toLowerCase() !== 'debug') throw new Error('Debug is available only for the Debug variant.');
     if (action === 'build') { await this.run(operation, project.wrapper, [target.assemble, '--console=plain'], project.root); return 'Build succeeded'; }
     if (!serial || !/^[\w.:-]+$/.test(serial)) throw new Error('Select an online device serial first.');
     const selectedMode = action === 'run' ? this.selectedRunMode() : undefined;
