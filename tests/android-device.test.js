@@ -14,7 +14,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const ts = require('typescript');
+const { transformSync } = require('esbuild');
 const root = path.resolve(__dirname, '..');
 const pkg = 'com.example.app';
 
@@ -152,10 +152,9 @@ function fixture(options = {}) {
       }
       return nativeRequire(id);
     };
-    const output = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-      fileName: file,
-    }).outputText;
+    const output = transformSync(fs.readFileSync(file, 'utf8'), {
+      loader: 'ts', target: 'node22', format: 'cjs', sourcefile: file,
+    }).code;
     const run = vm.runInThisContext('(function(require,module,exports,__filename,__dirname){' + output + '\n})', { filename: file });
     run(localRequire, module, module.exports, file, path.dirname(file));
     return module.exports;

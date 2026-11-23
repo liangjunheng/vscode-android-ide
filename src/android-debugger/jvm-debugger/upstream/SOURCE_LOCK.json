@@ -135,8 +135,10 @@
     {
       "path": "adapter/src/main/kotlin/dev/ktdebug/session/DebugSession.kt",
       "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/DebugSession.kt",
-      "bytes": 35258,
-      "sha256": "2ac52dfebc35c114ad7ffd613c057185b90aef7009dea440ecf73a57ac21bf33"
+      "bytes": 35532,
+      "sha256": "ea4488ee077d3d02554a0e94f00caccd1024a74d66fb562e024ae34caf1a52c7",
+      "upstreamSha256": "2ac52dfebc35c114ad7ffd613c057185b90aef7009dea440ecf73a57ac21bf33",
+      "adaptation": "VMStart事件保存与configurationDone采用同一短临界区原子交接，恢复调用在区外执行；StartResumeTest覆盖双向先后与并发漏恢复"
     },
     {
       "path": "adapter/src/main/kotlin/dev/ktdebug/session/Handles.kt",

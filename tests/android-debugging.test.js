@@ -484,6 +484,46 @@ for (const endsFirst of ['root', 'child']) scenario('正常 Dual ' + endsFirst +
   assert.equal(h.count('app.stop'), 0);
 });
 
+/** 功能：复现真实适配器先退出且宿主未发 termination；输入 Dual 任一侧 onExit；输出整组清理且迟到通知幂等；验证：本文件定向运行。 */
+for (const side of ['root', 'child']) scenario('Dual ' + side + ' adapter exit 在无宿主 termination 时结束整组', async h => {
+  const parent = h.session(await h.resolve(config('dual')));
+  ready(parent.tracker, true);
+  await flush();
+  const child = h.session(h.entries('session.start')[0].args[1], parent.session);
+  ready(child.tracker);
+  await flush();
+  const exited = side === 'root' ? parent : child;
+  const peer = side === 'root' ? child : parent;
+  exited.tracker.onExit(0);
+  await flush();
+  assert.deepEqual(h.entries('session.stop').map(value => value.args[0].id), [peer.session.id]);
+  assert.equal(h.count('native.close'), 1);
+  assert.equal(h.count('java.forward.close'), 1);
+  h.end(exited.session);
+  exited.tracker.onExit(0);
+  await h.owner.dispose();
+  assert.equal(h.count('native.close'), 1);
+  assert.equal(h.count('app.stop'), 0);
+});
+
+/** 功能：清理期间另一适配器仅报告退出也须结束等待；输入无宿主 termination 的退出；输出资源不悬挂；验证：本文件。 */
+scenario('Dual 清理等待以真实 adapter exit 结算且不依赖宿主 termination', async h => {
+  const parent = h.session(await h.resolve(config('dual')));
+  ready(parent.tracker, true);
+  await flush();
+  const child = h.session(h.entries('session.start')[0].args[1], parent.session);
+  ready(child.tracker);
+  await flush();
+  h.state.autoTerminate = false;
+  parent.tracker.onExit(0);
+  await flush();
+  assert.equal(h.count('session.stop'), 1);
+  child.tracker.onExit(0);
+  await h.owner.dispose();
+  assert.equal(h.count('native.close'), 1);
+  assert.equal(h.count('java.forward.close'), 1);
+});
+
 for (const action of [
   { command: 'disconnect', args: { terminateDebuggee: false }, destroy: false },
   { command: 'disconnect', args: { terminateDebuggee: true }, destroy: true },
@@ -612,7 +652,7 @@ scenario('配置 alias、auto 与相对路径通过真实解析，原始配置�
 
 scenario('android-tools Native 和 android-jvm 直接入口使用同一真实业务', async h => {
   const native = await h.resolve(config('native', 'attach', { type: 'android-tools', name: 'tools' }));
-  const java = await h.resolve(config('java', 'attach', { type: 'android-jvm', name: 'jvm', port: 5005, preLaunchTask: 'external' }));
+  const java = await h.resolve(config('java', 'attach', { type: 'android-jvm', android: true, name: 'jvm', port: 5005, preLaunchTask: 'external' }));
   assert.equal(native.type, 'lldb');
   assert.equal(java.type, 'android-jvm');
   assert.equal(java.port, 5005);

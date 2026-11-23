@@ -136,7 +136,7 @@ async function javaSession(executable, directory, t) {
   const source = ['public class RealEngineFixture {', '  // 功能：提供真实局部变量、断点及detach后退出屏障。', '  public static void main(String[] args) throws Exception {', '    int seed = 37;', '    int local = seed + 5;', '    int answer = local * 2;', `    System.out.println("REAL_JVM_RESULT_${token}=" + answer);`, '    System.in.read();', `    System.out.println("${exited}");`, '  }', '}'].join('\n') + '\n';
   const sourceFile = path.join(directory, 'RealEngineFixture.java'), breakpointLine = source.split('\n').findIndex(line => line.includes('int answer =')) + 1;
   fs.writeFileSync(sourceFile, source);
-  const compiler = spawnOwned(path.join(path.dirname(executable.command), process.platform === 'win32' ? 'javac.exe' : 'javac'), ['-g', '-d', directory, sourceFile], directory, path.join(directory, 'javac.jsonl'));
+  const compiler = spawnOwned(path.join(path.dirname(executable.command), process.platform === 'win32' ? 'javac.exe' : 'javac'), ['-encoding', 'UTF-8', '-g', '-d', directory, sourceFile], directory, path.join(directory, 'javac.jsonl'));
   try { const completion = await bounded(compiler.completion, 'javac -g'); assert.equal(completion.code, 0, JSON.stringify(completion)); }
   finally { await compiler.close(); }
   const target = spawnOwned(executable.command, ['-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0', '-cp', directory, 'RealEngineFixture'], directory, path.join(directory, 'target.jsonl'));

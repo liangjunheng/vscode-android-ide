@@ -18,9 +18,14 @@ const upstream = path.join(root, 'src', 'android-debugger', 'jvm-debugger', 'ups
 const lockPath = path.join(upstream, 'SOURCE_LOCK.json');
 const buildScript = path.join(root, 'scripts', 'build-jvm-debugger.cjs');
 
+// 两项 Java 产物保持严格 Shade 契约；许可摘要来自已核对的依赖原文字节。
 const shadedServices = [
-  { jar: 'resources/jvm-debugger/kotlin-debug-adapter.jar' },
-  { jar: 'resources/gradle-tooling-server.jar' },
+  { pom: 'src/android-debugger/jvm-debugger/upstream/adapter/pom.xml', jar: 'resources/jvm-debugger/kotlin-debug-adapter.jar', main: 'dev.ktdebug.MainKt' },
+  {
+    pom: 'src/gradle-tooling/pom.xml', jar: 'resources/gradle-tooling-server.jar', main: 'android.tools.gradle.GradleToolingServer',
+    license: 'META-INF/LICENSE.txt', originalBytes: 1178, originalSha256: '4e7f90c86ab51278228bce153122f1d8df30149d13ce9ef524c8444a84c32dcc',
+    externalLicense: 'resources/gradle-tooling-LICENSE.txt',
+  },
 ];
 
 function digest(file) {
@@ -60,6 +65,7 @@ test('JVM upstream source lock matches copied bytes', () => {
     'adapter/src/test/kotlin/dev/ktdebug/SpringBootDebugTest.kt',
     'adapter/src/test/kotlin/dev/ktdebug/UnitTests.kt',
     'adapter/pom.xml',
+    'adapter/src/main/kotlin/dev/ktdebug/session/DebugSession.kt',
   ];
   assert.deepEqual(lock.files.filter(entry => entry.upstreamSha256 || entry.adaptation).map(entry => entry.path).sort(), adaptedPaths.toSorted());
   for (const entry of lock.files) {
@@ -80,6 +86,14 @@ test('JVM upstream source lock matches copied bytes', () => {
           '                timeoutMs = a.num("timeout")?.toInt(),',
           '                timeoutMs = a.num("timeout")?.toInt() ?: 30_000,');
       } else if (entry.path === adaptedPaths[2]) {
+        original = restoreAdaptation(original,
+          '                    val detail = "${e.javaClass.name}:${e.message ?: ""}"\n' +
+          '                    Log.warn("JDWP handshake failed at $host:$port ($detail)", e)\n' +
+          '                    throw ConnectException2("JDWP handshake failed at $host:$port ($detail)").also { it.initCause(e) }',
+          '                    throw ConnectException2(\n' +
+          '                        "Connected to $host:$port but the JDWP handshake failed. Either the port is not a JDWP " +\n' +
+          '                            "debug port, or another debugger is already attached (JDWP allows one debugger at a time)."\n' +
+          '                    )');
         original = restoreAdaptation(original,
           '    /** 功能：等待尚未监听的调试端口，已连接后的IO失败立即传播；输入目标及可选总期限；输出JDI虚拟机；验证：jvm-connection-reset.test.js。 */\n', '');
         original = restoreAdaptation(original,
@@ -110,6 +124,39 @@ test('JVM upstream source lock matches copied bytes', () => {
           '    fun `explicit attach timeout remains configurable`() {\n' +
           '        assertEquals(1_500, SessionConfig.from("attach", mapOf("timeout" to 1_500, "port" to 5006)).timeoutMs)\n' +
           '    }\n\n', '');
+      } else if (entry.path === 'adapter/src/main/kotlin/dev/ktdebug/session/DebugSession.kt') {
+        original = restoreAdaptation(original, '    private val startEventLock = Any()\n', '');
+        original = restoreAdaptation(original,
+          '    /** 功能：原子交接已配置状态及启动挂起；输入 DAP 配置完成；输出恰好一次恢复；验证：StartResumeTest。 */\n' +
+          '    fun configurationDone() {\n' +
+          '        val pending = synchronized(startEventLock) {\n' +
+          '            configured = true\n' +
+          '            startEventSet.also { startEventSet = null }\n' +
+          '        }\n' +
+          '        pending?.let { set ->\n' +
+          '            set.resume()\n' +
+          '            Log.info("Resumed VM that was waiting for the debugger")\n' +
+          '        }\n    }',
+          '    /** DAP `configurationDone`: breakpoints are installed, release a VM that waits for us. */\n' +
+          '    fun configurationDone() {\n' +
+          '        configured = true\n' +
+          '        startEventSet?.let { set ->\n' +
+          '            startEventSet = null\n' +
+          '            Log.info("Resuming VM that was waiting for the debugger (suspend=y)")\n' +
+          '            set.resume()\n' +
+          '        }\n    }');
+        original = restoreAdaptation(original,
+          '            val suspending = set.suspendPolicy() != EventRequest.SUSPEND_NONE\n' +
+          '            synchronized(startEventLock) {\n' +
+          '                if (suspending && !configured) {\n' +
+          '                    startEventSet = set\n' +
+          '                    Outcome.Hold\n' +
+          '                } else Outcome.Resume\n' +
+          '            }',
+          '            if (set.suspendPolicy() != EventRequest.SUSPEND_NONE && !configured) {\n' +
+          '                startEventSet = set\n' +
+          '                Outcome.Hold\n' +
+          '            } else Outcome.Resume');
       } else if (entry.path === 'adapter/pom.xml') {
         original = restoreAdaptation(original,
           '                                        <!-- java -jar 聚合包仅由 transformer 生成清单，不携带依赖模块描述符。 -->\n' +
@@ -134,6 +181,76 @@ test('JVM upstream Maven layout preserves adapter contracts', () => {
   assert.ok(fs.existsSync(path.join(upstream, 'adapter', 'src', 'fixtures', 'kotlin', 'fixture', 'App.kt')));
   assert.ok(fs.existsSync(path.join(upstream, 'adapter', 'src', 'test', 'kotlin', 'dev', 'ktdebug', 'SpringBootDebugTest.kt')));
   assert.ok(fs.existsSync(path.join(upstream, 'samples', 'spring-boot-kotlin-demo', 'pom.xml')));
+});
+
+/**
+ * 功能点：两项聚合产物的 Shade 配置保持可执行主类、服务发现和冲突许可原文。
+ * 受影响对象：JVM 与 Gradle 两份 POM、build 的 Tooling 外部许可说明及 SOURCE_LOCK 中的 POM 适配。
+ * 复现路径：Node>=22，读取实际 POM 和脚本，不执行 Maven、Java、网络或设备操作。
+ * 测试范围：保留主类/服务 transformer，仅排除签名、依赖清单和全部模块描述符；Tooling 许可使用追加而非过滤。
+ * 执行入口：node --test tests/jvm-build.test.js；也由 npm test 发现。
+ * 预期结果：配置不抑制警告、不排除许可，Tooling 明确说明保留两个依赖的原文。
+ * 判据：排除项及 transformer 全部匹配才通过；真实成品另由下方产物用例检查。
+ */
+test('Shade configuration preserves executable services and appends colliding licenses', () => {
+  for (const service of shadedServices) {
+    const pom = fs.readFileSync(path.join(root, service.pom), 'utf8');
+    const shade = pom.match(/<plugin>\s*<groupId>org\.apache\.maven\.plugins<\/groupId>\s*<artifactId>maven-shade-plugin<\/artifactId>[\s\S]*?<\/plugin>/)?.[0];
+    assert.ok(shade, service.pom);
+    const transformers = [...shade.matchAll(/<transformer\b[^>]*implementation="([^"]+)"[^/>]*(?:\/>|>[\s\S]*?<\/transformer>)/g)];
+    const expected = ['ManifestResourceTransformer', 'ServicesResourceTransformer'];
+    if (service.license) expected.push('AppendingTransformer');
+    assert.deepEqual(transformers.map(match => match[1]), expected.map(name => `org.apache.maven.plugins.shade.resource.${name}`), service.pom);
+    assert.ok(transformers[0][0].includes(`<mainClass>${service.main}</mainClass>`), service.pom);
+    if (service.license) assert.ok(transformers[2][0].includes(`<resource>${service.license}</resource>`), service.pom);
+    const excludes = [...shade.matchAll(/<exclude>([^<]+)<\/exclude>/g)].map(match => match[1]);
+    assert.deepEqual(excludes.sort(), ['META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA', 'META-INF/MANIFEST.MF', 'module-info.class', 'META-INF/versions/**/module-info.class'].sort(), service.pom);
+  }
+  const source = fs.readFileSync(buildScript, 'utf8');
+  assert.match(source, /SLF4J API and Simple 2\.0\.17 — MIT（以下合并保留两依赖的完整许可原文）/);
+  assert.match(source, /\(await slf4jLicense\.buffer\(\)\)\.toString\('utf8'\)/);
+});
+
+/**
+ * 功能点：两项真实成品的清单、非 JPMS 布局和同名许可追加结果保持发布契约。
+ * 受影响对象：JVM 与 Gradle 两项 resources JAR、Tooling 外部许可和 SLF4J 服务发现。
+ * 复现路径：先由独立执行者运行 npm run build:jvm，再以 Node>=22 读取两份成品；本测试不构建、不启动 Java 或设备。
+ * 测试范围：唯一清单及主类 class、预扫不得带入依赖模块名/外部类路径、所有版本 module-info 缺失；两依赖许可按原摘要逐字节保留两份并同步外部许可。
+ * 执行入口：node --test tests/jvm-build.test.js（需要新构建的成品）；也由 npm test 发现。
+ * 预期结果：两份成品均可由清单定位入口，无依赖模块描述符；同名许可仅一个条目但包含两份完整原文。
+ * 判据：缺失、陈旧或损坏成品、错误主类、残留模块描述符、许可丢失/改写/去重及服务提供者丢失均失败，不跳过缺失产物。
+ */
+test('Shaded service artifacts retain main classes and both original licenses without module descriptors', async () => {
+  for (const service of shadedServices) {
+    const archive = await require('unzipper').Open.file(path.join(root, service.jar));
+    const files = archive.files.filter(entry => entry.type === 'File');
+    const manifests = files.filter(entry => entry.path === 'META-INF/MANIFEST.MF');
+    assert.equal(manifests.length, 1, `${service.jar} 唯一清单`);
+    const manifest = (await manifests[0].buffer()).toString('utf8').replace(/\r\n/g, '\n').replace(/\n /g, '');
+    const mainAttributes = manifest.split('\n\n')[0].split('\n');
+    assert.deepEqual(mainAttributes.filter(line => /^Main-Class:/i.test(line)), [`Main-Class: ${service.main}`], service.jar);
+    assert.doesNotMatch(mainAttributes.join('\n'), /^(?:Automatic-Module-Name|Class-Path):/im, `${service.jar} 不引入依赖清单属性`);
+    assert.ok(files.some(entry => entry.path === `${service.main.replaceAll('.', '/')}.class`), `${service.jar} 入口 class`);
+    assert.deepEqual(files.filter(entry => /^(?:META-INF\/versions\/.*\/)?module-info\.class$/.test(entry.path)).map(entry => entry.path), [], service.jar);
+    if (!service.license) continue;
+    const licenses = files.filter(entry => entry.path === service.license);
+    assert.equal(licenses.length, 1, `${service.jar} 唯一追加许可条目`);
+    const merged = await licenses[0].buffer();
+    const original = merged.subarray(0, service.originalBytes);
+    assert.equal(crypto.createHash('sha256').update(original).digest('hex'), service.originalSha256, `${service.jar} 原文摘要`);
+    assert.deepEqual(merged, Buffer.concat([original, Buffer.from('\n'), original, Buffer.from('\n')]), `${service.jar} 两份完整许可原字节`);
+    const external = fs.readFileSync(path.join(root, service.externalLicense));
+    const first = external.indexOf(original);
+    const second = external.indexOf(original, first + original.length);
+    assert.ok(first >= 0 && second >= first + original.length, `${service.externalLicense} 保留两个依赖原文`);
+    assert.equal(external.indexOf(original, second + original.length), -1, `${service.externalLicense} 两份原文`);
+    if (service.license === 'META-INF/LICENSE.txt') {
+      assert.deepEqual(external.subarray(external.length - merged.length), merged, 'Tooling 外部许可保留完整追加条目');
+      const providers = files.filter(entry => entry.path === 'META-INF/services/org.slf4j.spi.SLF4JServiceProvider');
+      assert.equal(providers.length, 1, 'SLF4J 服务条目');
+      assert.ok((await providers[0].buffer()).toString('utf8').split(/\r?\n/).includes('org.slf4j.simple.SimpleServiceProvider'), 'SLF4J Simple 提供者');
+    }
+  }
 });
 
 /** 回归：静态验证 Maven/JDK 错误路径、Windows cmd.exe 参数策略和产物校验未被吞掉。 */

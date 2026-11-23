@@ -95,6 +95,7 @@ class DebugSession(
     private val worker = Executors.newCachedThreadPool { r -> Thread(r, "kda-worker").apply { isDaemon = true } }
     private val watchdog = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kda-watchdog").apply { isDaemon = true } }
     @Volatile private var startEventSet: EventSet? = null
+    private val startEventLock = Any()
     @Volatile private var configured = false
     @Volatile private var disposed = false
     @Volatile private var terminatedSent = false
@@ -122,13 +123,15 @@ class DebugSession(
         runCatching { request.javaClass.getMethod("addPlatformThreadsOnly").invoke(request) }
     }
 
-    /** DAP `configurationDone`: breakpoints are installed, release a VM that waits for us. */
+    /** 功能：原子交接已配置状态及启动挂起；输入 DAP 配置完成；输出恰好一次恢复；验证：StartResumeTest。 */
     fun configurationDone() {
-        configured = true
-        startEventSet?.let { set ->
-            startEventSet = null
-            Log.info("Resuming VM that was waiting for the debugger (suspend=y)")
+        val pending = synchronized(startEventLock) {
+            configured = true
+            startEventSet.also { startEventSet = null }
+        }
+        pending?.let { set ->
             set.resume()
+            Log.info("Resumed VM that was waiting for the debugger")
         }
     }
 
@@ -245,10 +248,13 @@ class DebugSession(
 
     private fun handleEvent(ev: Event, set: EventSet): Outcome = when (ev) {
         is VMStartEvent -> {
-            if (set.suspendPolicy() != EventRequest.SUSPEND_NONE && !configured) {
-                startEventSet = set
-                Outcome.Hold
-            } else Outcome.Resume
+            val suspending = set.suspendPolicy() != EventRequest.SUSPEND_NONE
+            synchronized(startEventLock) {
+                if (suspending && !configured) {
+                    startEventSet = set
+                    Outcome.Hold
+                } else Outcome.Resume
+            }
         }
         is ClassPrepareEvent -> { breakpoints.onClassPrepare(ev); Outcome.Resume }
         is BreakpointEvent -> onBreakpoint(ev)

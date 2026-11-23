@@ -45,6 +45,7 @@ class DebugRun {
   private releaseStartup: () => void;
   private readonly ended = new Set<string>();
   private readonly stopping = new Map<string, Promise<void>>();
+  private readonly exits = new Map<string, () => void>();
   private destroy = false;
 
   /** 功能：绑定一次运行的明确目标；输入配置和依赖；输出取消及退出唯一所有者。 */
@@ -142,7 +143,12 @@ class DebugRun {
         }
       },
       onError: error => this.fail(error),
-      onExit: () => { signal.removeEventListener('abort', abort); },
+      onExit: () => {
+        signal.removeEventListener('abort', abort);
+        this.ended.add(session.id);
+        this.exits.get(session.id)?.();
+        void this.close(this.destroy).catch(error => this.report(error));
+      },
     };
   }
 
@@ -203,9 +209,10 @@ class DebugRun {
       if (this.ended.has(session.id)) return;
       let ended!: () => void;
       const exited = new Promise<void>(resolve => { ended = resolve; });
+      this.exits.set(session.id, ended);
       const listener = vscode.debug.onDidTerminateDebugSession(value => { if (value.id === session.id) ended(); });
       try { if (!this.ended.has(session.id)) { await session.customRequest('disconnect', { terminateDebuggee: false }); await exited; } }
-      finally { listener.dispose(); }
+      finally { this.exits.delete(session.id); listener.dispose(); }
     });
     this.stopping.set(session.id, stopping);
     return stopping;
@@ -264,7 +271,7 @@ export function registerAndroidDebugging(context: vscode.ExtensionContext, selec
       const config = omitAuto(input);
       const options = config.type === 'android-jvm' || (config.mode ?? config.androidMode) === 'java' ? config.java : config.native;
       if (options?.preLaunchTask && config.preLaunchTask && options.preLaunchTask !== config.preLaunchTask) throw new Error('Use one preLaunchTask at the top level or in the selected debugger configuration');
-      config.preLaunchTask ??= options?.preLaunchTask;
+      if (options?.preLaunchTask !== undefined) config.preLaunchTask ??= options.preLaunchTask;
       return config;
     },
     async resolveDebugConfigurationWithSubstitutedVariables(folder, input, token) {
@@ -330,9 +337,10 @@ export function registerAndroidDebugging(context: vscode.ExtensionContext, selec
         if (config.request === 'attach' && (!config.pid && !config.processId || !config.packageName)) {
           const rows = await device.clients(scope.signal);
           const raw = config.pid ?? config.processId;
-          const candidates = rows.filter(row => raw !== undefined ? row.pid === Number(raw) : !config.packageName || row.packageName === config.packageName);
-          const selected = candidates.length === 1 ? candidates[0] : (await vscode.window.showQuickPick(candidates.map(row => ({ label: row.packageName, description: String(row.pid), row })), { placeHolder: 'Pick Android Process' }, debugCancellationToken(scope.signal)))?.row;
-          if (!selected) return undefined;
+          const matches = raw !== undefined ? rows.filter(row => row.pid === Number(raw)) : config.packageName ? rows.filter(row => row.packageName === config.packageName) : [];
+          const candidates = matches.length ? matches : raw === undefined ? rows : [];
+          const selected = candidates.length === 1 ? candidates[0] : (await vscode.window.showQuickPick(candidates.map(row => ({ label: row.packageName, description: String(row.pid), detail: 'PID ' + row.pid, row })), { placeHolder: 'Pick Android Process' }, debugCancellationToken(scope.signal)))?.row;
+          if (!selected) { if (!candidates.length) throw new Error('No attachable Android processes found'); return undefined; }
           Object.assign(config, { pid: selected.pid, processId: selected.pid, packageName: selected.packageName });
         }
         scope.signal.throwIfAborted();

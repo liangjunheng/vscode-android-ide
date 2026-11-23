@@ -20,7 +20,9 @@ export async function selectNativeLibraries(_searchPaths: readonly string[], opt
   const root = path.resolve(options.projectRoot);
   const key = 'androidNative.symbols:' + JSON.stringify([root, options.packageName ?? '', options.abi ?? '']);
   if (options.storage.get(key) !== undefined) await options.storage.update(key, undefined);
-  const files = await discoverProjectLibraries(root, options.abi);
+  let files: string[];
+  try { files = await discoverProjectLibraries(root, options.abi, options.token); }
+  catch (error) { if (error instanceof Error && error.cause === options.token && options.token?.isCancellationRequested) return undefined; throw error; }
   if (options.token?.isCancellationRequested) return undefined;
   const groups = new Map<string, string[]>();
   for (const filename of new Set(files)) {

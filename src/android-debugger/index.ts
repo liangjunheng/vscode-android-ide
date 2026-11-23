@@ -97,6 +97,7 @@ export async function startAndroidDebugging(folder: vscode.WorkspaceFolder | und
   const starting = Promise.resolve().then(async () => {
     signal.throwIfAborted();
     if (!await vscode.debug.startDebugging(folder, mapped)) throw new Error('Android debug session did not start');
+    if (!started || owned.get(started.id)?.ended) throw new Error('Android debug session did not report a live start');
     await waitDebugConnection(mapped);
     signal.throwIfAborted();
     if (!started || owned.get(started.id)?.ended) throw new Error('Android debug session did not report a live start');

@@ -35,35 +35,46 @@ async function directoryEntries(directory: string): Promise<import('node:fs').Di
   }
 }
 
-/** 递归扫描项目内指定 Native 目录，只记录普通 .so 文件路径，不跟随目录或文件链接。 */
-async function scanNativeTree(root: string, projectRoot: string, outputs: Set<string>): Promise<void> {
-  const entries = await directoryEntries(root);
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) continue;
-    const filename = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      if (IGNORED_DIRECTORIES.has(entry.name)) continue;
-      await scanNativeTree(filename, projectRoot, outputs);
-    } else if (entry.isFile() && entry.name.endsWith('.so')) {
-      const actual = await fs.realpath(filename);
-      if (inside(projectRoot, actual) && path.basename(actual).endsWith('.so')) outputs.add(actual);
-    }
-  }
+interface ScanCancellation { readonly isCancellationRequested: boolean; }
+// 限制在途文件系统请求及 ELF 句柄，避免大项目一次打开全部产物。
+const SCAN_CONCURRENCY = 16;
+
+/** 功能：在文件系统边界检查取消；输入当前扫描状态；输出取消错误；验证：native-project-libraries.test.js。 */
+function checkCancelled(cancellation?: ScanCancellation): void {
+  if (cancellation?.isCancellationRequested) throw new Error('Native symbol discovery cancelled', { cause: cancellation });
 }
 
-/** 递归查找当前项目内 .cxx/cxx/cmake/ndkBuild 目录并收集其中的 Native 库。 */
-async function scanProject(root: string): Promise<Set<string>> {
+/** 功能：有界执行同批 I/O 并等待全部结算；输入任务和取消状态；输出结果或原始失败，不遗留句柄；验证：扫描并发、错误与取消回归。 */
+async function scanBatch<T>(jobs: (() => Promise<T>)[], cancellation?: ScanCancellation): Promise<T[]> {
+  checkCancelled(cancellation);
+  const results = await Promise.allSettled(jobs.map(job => job()));
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failures.length === 1) throw failures[0].reason;
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Native symbol scan failed');
+  checkCancelled(cancellation);
+  return results.map(result => (result as PromiseFulfilledResult<T>).value);
+}
+
+/** 功能：并行枚举项目目录；输入真实项目根及取消状态；输出 Native 普通库路径，不跟随链接；验证：全集、边界及取消回归。 */
+async function scanProject(root: string, cancellation?: ScanCancellation): Promise<Set<string>> {
   const outputs = new Set<string>();
-  const visit = async (directory: string): Promise<void> => {
-    const entries = await directoryEntries(directory);
-    for (const entry of entries) {
-      if (entry.isSymbolicLink() || !entry.isDirectory() || IGNORED_DIRECTORIES.has(entry.name)) continue;
-      const child = path.join(directory, entry.name);
-      if (NATIVE_OUTPUTS.has(entry.name)) await scanNativeTree(child, root, outputs);
-      else await visit(child);
+  const queue = [{ directory: root, native: false }];
+  for (let index = 0; index < queue.length;) {
+    const batch = queue.slice(index, index + SCAN_CONCURRENCY);
+    index += batch.length;
+    const rows = await scanBatch(batch.map(item => async () => ({ item, entries: await directoryEntries(item.directory) })), cancellation);
+    for (const { item, entries } of rows) {
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        const filename = path.join(item.directory, entry.name);
+        if (entry.isDirectory() && !IGNORED_DIRECTORIES.has(entry.name)) {
+          queue.push({ directory: filename, native: item.native || NATIVE_OUTPUTS.has(entry.name) });
+        } else if (item.native && entry.isFile() && entry.name.endsWith('.so')) {
+          outputs.add(filename);
+        }
+      }
     }
-  };
-  await visit(root);
+  }
   return outputs;
 }
 
@@ -152,14 +163,21 @@ async function hasDwarf(filename: string, abi: string | undefined): Promise<bool
   }
 }
 
-/** 读取项目内扫描到的普通 .so，统一执行项目边界、ABI 和 DWARF 校验。 */
-export async function discoverProjectLibraries(projectRoot: string, abi?: string): Promise<string[]> {
+/** 功能：有界校验项目库；输入根、ABI及取消状态；输出完整排序全集，失败或取消不返回部分结果；验证：native-project-libraries.test.js。 */
+export async function discoverProjectLibraries(projectRoot: string, abi?: string, cancellation?: ScanCancellation): Promise<string[]> {
+  checkCancelled(cancellation);
   const project = await realDirectory(path.resolve(projectRoot));
+  checkCancelled(cancellation);
   if (!project) return [];
-  const candidates = await scanProject(project);
+  const candidates = [...await scanProject(project, cancellation)];
   const result = new Set<string>();
-  for (const filename of candidates) {
-    if (await hasDwarf(filename, abi)) result.add(filename);
+  for (let index = 0; index < candidates.length; index += SCAN_CONCURRENCY) {
+    const valid = await scanBatch(candidates.slice(index, index + SCAN_CONCURRENCY).map(filename => async () => {
+      const actual = await fs.realpath(filename);
+      if (!inside(project, actual) || !path.basename(actual).endsWith('.so')) return undefined;
+      return await hasDwarf(actual, abi) ? actual : undefined;
+    }), cancellation);
+    for (const filename of valid) if (filename) result.add(filename);
   }
   return [...result].sort();
 }

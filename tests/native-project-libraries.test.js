@@ -7,17 +7,23 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
+// 功能点：完整 Native 产物发现与有界 I/O；受影响对象：扫描、ELF 读取及调用方取消。
+// 复现路径：临时多 ABI/多构建树，真实 ELF 与可控文件系统边界；不使用设备。
+// 测试范围：原有全集、大小端、DWARF、链接隔离，并发上限及取消后句柄关闭。
+// 执行入口：node --test tests/native-project-libraries.test.js。
+// 预期结果：保留完整排序全集，并发取消不返回部分结果；判据：全部断言通过。
 const source = fs.readFileSync(path.join(__dirname, '..', 'src/android-debugger/native-debugger/projectLibraries.ts'), 'utf8');
-const moduleObject = { exports: {} };
-vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
-  module: moduleObject,
-  exports: moduleObject.exports,
-  require,
-  Buffer,
-  process,
-  console,
-});
-const { discoverProjectLibraries } = moduleObject.exports;
+/** 功能：执行真实扫描逻辑；输入可控文件系统；输出模块入口；验证：并发及取消回归。 */
+function loadDiscovery(overrides = {}) {
+  const moduleObject = { exports: {} };
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
+    module: moduleObject, exports: moduleObject.exports,
+    require: id => id === 'node:fs/promises' ? { ...fsp, ...overrides } : require(id),
+    Buffer, process, console,
+  });
+  return moduleObject.exports.discoverProjectLibraries;
+}
+const discoverProjectLibraries = loadDiscovery();
 
 function writeNumber(buffer, offset, value, size, little) {
   if (size === 2) return little ? buffer.writeUInt16LE(value, offset) : buffer.writeUInt16BE(value, offset);
@@ -215,6 +221,43 @@ test('uses only the newest CMake index and returns normal missing builds as an e
   const empty = await fsp.mkdtemp(path.join(os.tmpdir(), 'project-libraries-empty-'));
   t.after(() => fsp.rm(empty, { recursive: true, force: true }));
   assert.deepEqual(Array.from(await discoverProjectLibraries(empty, 'arm64-v8a')), []);
+});
+
+/** 功能：挂起真实读取以检查并发和取消；输入取消时机；输出全部句柄释放及无部分结果；验证：本文件。 */
+for (const cancel of [false, true]) test('bounded ELF discovery drains open handles, cancellation=' + cancel, async t => {
+  const fixture = await createFixture(t);
+  for (let index = 0; index < 24; index++) await writeSo(path.join(fixture.buildRoot, 'lib' + index + '.so'), {});
+  const entered = Promise.withResolvers(), released = Promise.withResolvers();
+  const cancellation = { isCancellationRequested: false };
+  let opened = 0, active = 0, peak = 0;
+  const discover = loadDiscovery({ async open(...args) {
+    const handle = await fsp.open(...args);
+    opened++; active++; peak = Math.max(peak, active);
+    if (opened === 16) entered.resolve();
+    return {
+      stat: () => handle.stat(),
+      async read(...readArgs) { await released.promise; return handle.read(...readArgs); },
+      async close() { try { await handle.close(); } finally { active--; } },
+    };
+  } });
+  const pending = discover(fixture.project, 'arm64-v8a', cancellation);
+  const result = pending.then(value => ({ value }), error => ({ error }));
+  try {
+    await entered.promise;
+    assert.equal(active, 16);
+    cancellation.isCancellationRequested = cancel;
+  } finally { released.resolve(); }
+  const outcome = await result;
+  assert.equal(active, 0);
+  assert.equal(peak, 16);
+  if (cancel) {
+    assert.match(String(outcome.error), /cancelled/);
+    assert.equal(outcome.value, undefined);
+    assert.equal(opened, 16);
+  } else {
+    assert.equal(outcome.error, undefined);
+    assert.equal(outcome.value.length, 24);
+  }
 });
 
 test('ignores malformed build metadata and returns only valid ELF DWARF libraries', async t => {
