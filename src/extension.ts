@@ -12,10 +12,10 @@ import { AndroidCoordinator } from './android-debugger/coordinator/androidCoordi
 
 let closeDebuggers: (() => Promise<void>) | undefined;
 
-/** 检测工作区是否包含 Android 项目入口，并同步控制设备视图的工作台可见性。 */
+/** 无输入，扫描 Gradle 入口并更新设备视图上下文；回归：node --test tests/configuration-prefix.test.js，Manifest 单独存在时不显示。 */
 async function refreshGradleProjectContext(): Promise<void> {
   const files = await vscode.workspace.findFiles(
-    '**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}',
+    '**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat}',
     '**/{node_modules,.git,.gradle,build}/**',
     1,
   );

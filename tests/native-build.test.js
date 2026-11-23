@@ -73,7 +73,8 @@ test('manifest exposes the unified Android debug fallback and real extension ent
   const p = require('../package.json');
   assert.equal(p.main, './dist/extension.js');
   assert.match(fs.readFileSync(path.join(root, 'src/extension.ts'), 'utf8'), /export function activate\(/);
-  assert.ok(p.activationEvents.includes('workspaceContains:**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}'));
+  assert.ok(p.activationEvents.includes('workspaceContains:settings.gradle'));
+  assert.equal(p.activationEvents.some(event => event.includes('AndroidManifest.xml')), false);
   assert.equal(p.activationEvents.includes('*'), false);
   assert.ok(p.activationEvents.includes('onDebugResolve:android-debug'));
   assert.ok(p.activationEvents.includes('onDebugDynamicConfigurations:android-debug'));

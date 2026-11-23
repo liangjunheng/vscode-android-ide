@@ -5,12 +5,49 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { transformSync } = require('esbuild');
 
-// npm test：Android 工作区通过 Gradle 或 Manifest 文件匹配激活，调试入口仍由专用事件触发，不使用全局启动激活。
-test('extension activates for Android workspaces', () => {
+// 功能点：Gradle 工作区识别；受影响对象：清单激活事件、refreshGradleProjectContext、设备视图与 Logcat。
+// 复现路径：根目录搜索超时、嵌套 Gradle、空目录、仅有 Manifest；测试范围：与 Gradle for Java 相同的十项激活事件及六种入口。
+// 执行入口：node --test tests/configuration-prefix.test.js；预期结果与判据：根构建入口精确激活，嵌套入口保留，Manifest 不匹配，不增加全局启动事件。
+test('extension activates for Gradle workspaces', () => {
   const events = require('../package.json').activationEvents;
-  assert.ok(events.includes('workspaceContains:**/{build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,gradlew,gradlew.bat,AndroidManifest.xml}'));
+  assert.deepEqual(events.filter(event => event.startsWith('workspaceContains:')), [
+    'workspaceContains:**/gradlew',
+    'workspaceContains:**/gradlew.bat',
+    'workspaceContains:build.gradle',
+    'workspaceContains:**/build.gradle',
+    'workspaceContains:settings.gradle',
+    'workspaceContains:**/settings.gradle',
+    'workspaceContains:build.gradle.kts',
+    'workspaceContains:**/build.gradle.kts',
+    'workspaceContains:settings.gradle.kts',
+    'workspaceContains:**/settings.gradle.kts',
+  ]);
+  assert.equal(events.some(event => event.includes('AndroidManifest.xml')), false);
   assert.equal(events.includes('*'), false);
   assert.equal(events.includes('onStartupFinished'), false);
+  assert.ok(events.includes('onDebugResolve:android-debug'));
+});
+
+test('Gradle visibility ignores manifest-only workspaces', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
+  const start = source.indexOf('async function refreshGradleProjectContext(');
+  const end = source.indexOf('\n// 注册共享设备区域', start);
+  assert.ok(start >= 0 && end > start);
+  const { minimatch } = require('minimatch');
+  const files = ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew', 'gradlew.bat'];
+  for (const entries of [[], ['AndroidManifest.xml'], ['app/src/main/AndroidManifest.xml'], ...files.map(file => [file]), ...files.map(file => ['nested/' + file])]) {
+    const contexts = [];
+    const context = vm.createContext({ vscode: {
+      workspace: { findFiles: async (include, exclude, limit) => {
+        assert.equal(limit, 1);
+        return entries.filter(file => minimatch(file, include) && !minimatch(file, exclude)).slice(0, limit);
+      } },
+      commands: { executeCommand: async (...args) => { contexts.push(args); } },
+    } });
+    vm.runInContext(transformSync(source.slice(start, end), { loader: 'ts' }).code, context);
+    await vm.runInContext('refreshGradleProjectContext()', context);
+    assert.deepEqual(contexts, [['setContext', 'android-ide.hasAndroidProject', entries.length > 0 && !entries[0].endsWith('AndroidManifest.xml')]]);
+  }
 });
 
 // 编译输入与rootDir同属src；Node>=22运行node --test tests/configuration-prefix.test.js，通过本机TypeScript CLI的showConfig JSON断言全部扩展源码仍受strict检查，第三方参考源码不被误收。
