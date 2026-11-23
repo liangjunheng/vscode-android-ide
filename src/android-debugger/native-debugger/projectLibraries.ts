@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { availableParallelism } from 'node:os';
 
 const IGNORED_DIRECTORIES = new Set(['.git', '.gradle', 'node_modules', '.idea', '.test-artifacts', '.qoder']);
 const NATIVE_OUTPUTS = new Set(['.cxx', 'cxx', 'cmake', 'ndkBuild']);
@@ -36,8 +37,6 @@ async function directoryEntries(directory: string): Promise<import('node:fs').Di
 }
 
 interface ScanCancellation { readonly isCancellationRequested: boolean; }
-// 限制在途文件系统请求及 ELF 句柄，避免大项目一次打开全部产物。
-const SCAN_CONCURRENCY = 16;
 
 /** 功能：在文件系统边界检查取消；输入当前扫描状态；输出取消错误；验证：native-project-libraries.test.js。 */
 function checkCancelled(cancellation?: ScanCancellation): void {
@@ -55,12 +54,12 @@ async function scanBatch<T>(jobs: (() => Promise<T>)[], cancellation?: ScanCance
   return results.map(result => (result as PromiseFulfilledResult<T>).value);
 }
 
-/** 功能：并行枚举项目目录；输入真实项目根及取消状态；输出 Native 普通库路径，不跟随链接；验证：全集、边界及取消回归。 */
-async function scanProject(root: string, cancellation?: ScanCancellation): Promise<Set<string>> {
+/** 功能：并行枚举项目目录；输入真实项目根、该次 CPU 并行度及取消状态；输出普通库路径，不跟随链接；验证：native-project-libraries.test.js。 */
+async function scanProject(root: string, concurrency: number, cancellation?: ScanCancellation): Promise<Set<string>> {
   const outputs = new Set<string>();
   const queue = [{ directory: root, native: false }];
   for (let index = 0; index < queue.length;) {
-    const batch = queue.slice(index, index + SCAN_CONCURRENCY);
+    const batch = queue.slice(index, index + concurrency);
     index += batch.length;
     const rows = await scanBatch(batch.map(item => async () => ({ item, entries: await directoryEntries(item.directory) })), cancellation);
     for (const { item, entries } of rows) {
@@ -163,16 +162,17 @@ async function hasDwarf(filename: string, abi: string | undefined): Promise<bool
   }
 }
 
-/** 功能：有界校验项目库；输入根、ABI及取消状态；输出完整排序全集，失败或取消不返回部分结果；验证：native-project-libraries.test.js。 */
+/** 功能：按每次读取的 CPU 可用并行度扫描校验项目库；输入根、ABI及取消状态；输出完整排序全集，失败或取消不返回部分结果；验证：native-project-libraries.test.js。 */
 export async function discoverProjectLibraries(projectRoot: string, abi?: string, cancellation?: ScanCancellation): Promise<string[]> {
   checkCancelled(cancellation);
   const project = await realDirectory(path.resolve(projectRoot));
   checkCancelled(cancellation);
   if (!project) return [];
-  const candidates = [...await scanProject(project, cancellation)];
+  const concurrency = availableParallelism();
+  const candidates = [...await scanProject(project, concurrency, cancellation)];
   const result = new Set<string>();
-  for (let index = 0; index < candidates.length; index += SCAN_CONCURRENCY) {
-    const valid = await scanBatch(candidates.slice(index, index + SCAN_CONCURRENCY).map(filename => async () => {
+  for (let index = 0; index < candidates.length; index += concurrency) {
+    const valid = await scanBatch(candidates.slice(index, index + concurrency).map(filename => async () => {
       const actual = await fs.realpath(filename);
       if (!inside(project, actual) || !path.basename(actual).endsWith('.so')) return undefined;
       return await hasDwarf(actual, abi) ? actual : undefined;

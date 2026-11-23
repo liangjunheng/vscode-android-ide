@@ -9,16 +9,17 @@ const { transformSync } = require('esbuild');
 
 // 功能点：完整 Native 产物发现与有界 I/O；受影响对象：扫描、ELF 读取及调用方取消。
 // 复现路径：临时多 ABI/多构建树，真实 ELF 与可控文件系统边界；不使用设备。
-// 测试范围：原有全集、大小端、DWARF、链接隔离，并发上限及取消后句柄关闭。
+// 测试范围：原有全集、大小端、DWARF、链接隔离，CPU 并行度 1/4/32、连续扫描变化及取消后句柄关闭。
 // 执行入口：node --test tests/native-project-libraries.test.js。
-// 预期结果：保留完整排序全集，并发取消不返回部分结果；判据：全部断言通过。
+// 预期结果：目录和 ELF 并发跟随每次 CPU 可用并行度，保留完整排序全集且取消不返回部分结果。
+// 判据：并发峰值与注入 CPU 数一致、读取次数及结果正确、全部句柄关闭且断言通过。
 const source = fs.readFileSync(path.join(__dirname, '..', 'src/android-debugger/native-debugger/projectLibraries.ts'), 'utf8');
-/** 功能：执行真实扫描逻辑；输入可控文件系统；输出模块入口；验证：并发及取消回归。 */
-function loadDiscovery(overrides = {}) {
+/** 功能：执行真实扫描逻辑；输入文件系统及 CPU 并行度边界；输出模块入口；验证：动态并发及取消回归。 */
+function loadDiscovery(overrides = {}, parallelism = os.availableParallelism) {
   const moduleObject = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module: moduleObject, exports: moduleObject.exports,
-    require: id => id === 'node:fs/promises' ? { ...fsp, ...overrides } : require(id),
+    require: id => id === 'node:fs/promises' ? { ...fsp, ...overrides } : id === 'node:os' ? { availableParallelism: parallelism } : require(id),
     Buffer, process, console,
   });
   return moduleObject.exports.discoverProjectLibraries;
@@ -223,41 +224,70 @@ test('uses only the newest CMake index and returns normal missing builds as an e
   assert.deepEqual(Array.from(await discoverProjectLibraries(empty, 'arm64-v8a')), []);
 });
 
-/** 功能：挂起真实读取以检查并发和取消；输入取消时机；输出全部句柄释放及无部分结果；验证：本文件。 */
-for (const cancel of [false, true]) test('bounded ELF discovery drains open handles, cancellation=' + cancel, async t => {
+/** 功能：挂起真实读取检查 CPU 动态并发和取消；输入 CPU 数及取消时机；输出完整结果或取消且句柄归零；验证：本文件。 */
+for (const concurrency of [1, 4, 32]) for (const cancel of [false, true]) test('CPU ' + concurrency + ' bounds ELF discovery and drains handles, cancellation=' + cancel, { timeout: 10000 }, async t => {
   const fixture = await createFixture(t);
-  for (let index = 0; index < 24; index++) await writeSo(path.join(fixture.buildRoot, 'lib' + index + '.so'), {});
+  const total = concurrency + 3;
+  for (let index = 0; index < total; index++) await writeSo(path.join(fixture.buildRoot, 'lib' + index + '.so'), {});
   const entered = Promise.withResolvers(), released = Promise.withResolvers();
   const cancellation = { isCancellationRequested: false };
-  let opened = 0, active = 0, peak = 0;
+  let opened = 0, active = 0, peak = 0, cpuReads = 0;
   const discover = loadDiscovery({ async open(...args) {
     const handle = await fsp.open(...args);
     opened++; active++; peak = Math.max(peak, active);
-    if (opened === 16) entered.resolve();
+    if (opened === concurrency) entered.resolve();
     return {
       stat: () => handle.stat(),
       async read(...readArgs) { await released.promise; return handle.read(...readArgs); },
       async close() { try { await handle.close(); } finally { active--; } },
     };
-  } });
+  } }, () => { cpuReads++; return concurrency; });
   const pending = discover(fixture.project, 'arm64-v8a', cancellation);
   const result = pending.then(value => ({ value }), error => ({ error }));
   try {
     await entered.promise;
-    assert.equal(active, 16);
+    assert.equal(active, concurrency);
     cancellation.isCancellationRequested = cancel;
   } finally { released.resolve(); }
   const outcome = await result;
   assert.equal(active, 0);
-  assert.equal(peak, 16);
+  assert.equal(peak, concurrency);
+  assert.equal(cpuReads, 1);
   if (cancel) {
     assert.match(String(outcome.error), /cancelled/);
     assert.equal(outcome.value, undefined);
-    assert.equal(opened, 16);
+    assert.equal(opened, concurrency);
   } else {
     assert.equal(outcome.error, undefined);
-    assert.equal(outcome.value.length, 24);
+    assert.equal(outcome.value.length, total);
   }
+});
+
+/** 功能：复用同一模块并改变 CPU 并行度；输入 1/4/32 个可用 CPU；输出目录并发随每次扫描变化且库全集不变；验证：本文件。 */
+test('each scan refreshes CPU parallelism for directory enumeration', { timeout: 10000 }, async t => {
+  const fixture = await createFixture(t);
+  const libraries = [];
+  for (let index = 0; index < 35; index++) {
+    const library = path.join(fixture.project, 'module' + index, '.cxx', 'libproject.so');
+    await writeSo(library, {});
+    libraries.push(await fsp.realpath(library));
+  }
+  let concurrency = 1, active = 0, peak = 0, cpuReads = 0;
+  const discover = loadDiscovery({ async readdir(...args) {
+    active++; peak = Math.max(peak, active);
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      return await fsp.readdir(...args);
+    } finally { active--; }
+  } }, () => { cpuReads++; return concurrency; });
+  for (const value of [1, 4, 32]) {
+    concurrency = value; peak = 0;
+    const actual = await discover(fixture.project, 'arm64-v8a');
+    assert.deepEqual(Array.from(actual), [...libraries].sort());
+    assert.equal(peak, value);
+    assert.equal(active, 0);
+  }
+  assert.equal(cpuReads, 3);
 });
 
 test('ignores malformed build metadata and returns only valid ELF DWARF libraries', async t => {
