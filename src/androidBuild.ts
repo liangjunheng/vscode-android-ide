@@ -9,6 +9,8 @@ import { GradleToolingClient } from './gradleTooling';
 import { omitAuto } from './android-debugger/autoConfig';
 
 interface Project { id: string; label: string; root: string; wrapper: string; tasks: string[]; }
+interface DebugMode { id: 'dual' | 'jvm' | 'native'; }
+type ActiveAction = 'run' | 'debugLaunch' | 'debugAttach';
 interface ApkMetadata { applicationId: string; elements?: unknown; }
 interface Target { id: string; label: string; module: string; variant: string; assemble: string; install: string; }
 interface RunMode { id: string; label: string; action: 'run' | 'debug'; config?: vscode.DebugConfiguration; }
@@ -118,6 +120,9 @@ export class AndroidBuildController implements vscode.Disposable {
   private debugSession?: vscode.DebugSession;
   private debugTermination?: vscode.Disposable;
   private runModeId = 'run';
+  private debugModeId: DebugMode['id'] = 'dual';
+  private activeAction?: ActiveAction;
+  private cleanupPending = false;
   private outputText = '';
   private snapshot?: Record<string, any>;
   private readonly output: vscode.OutputChannel;
@@ -200,7 +205,7 @@ export class AndroidBuildController implements vscode.Disposable {
     const busy = !this.stopping && !!this.operation && !this.operation.controller.signal.aborted;
     const gradleLoading = busy && this.operation?.action === 'refresh';
     this.snapshot = { type: 'buildState', projects: projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
-      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy, stopping: !!this.stopping, gradleLoading, running: !this.stopping && (!!this.launched || !!this.debugSession), status, ...(error ? { error } : {}) };
+      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], debugMode: this.debugModeId, activeAction: this.activeAction, busy, stopping: !!this.stopping || this.cleanupPending, gradleLoading, running: !this.stopping && (!!this.launched || !!this.debugSession), status, ...(error ? { error } : {}) };
     this.post(this.snapshot);
   }
 
@@ -306,6 +311,16 @@ export class AndroidBuildController implements vscode.Disposable {
     return selectAndroidDebugConfiguration(folder, undefined, signal);
   }
 
+  // 功能：按工具栏选择的模式和请求类型取得唯一内置调试配置。
+  // 输入：request 为 launch 或 attach；前置条件是 debugMode 已通过 handle 的白名单校验。
+  // 输出：返回对应的 android-debug 配置，Jvm 模式转换为内部 java；找不到配置时抛出错误。
+  // 验证：node --test tests/android-build.test.js --test-name-pattern="debug toolbar"。
+  private selectedDebugConfiguration(request: 'launch' | 'attach'): vscode.DebugConfiguration {
+    const configMode = this.debugModeId === 'jvm' ? 'java' : this.debugModeId;
+    const config = getAndroidDebugConfigurations().find(item => item.request === request && item.mode === configMode);
+    if (!config) throw new Error('Invalid debug mode selection');
+    return config;
+  }
 
   // 将面板选择的六个内置项映射为稳定调试配置；默认run项保持普通应用启动链。
   private selectedRunMode(): RunMode {
@@ -389,8 +404,9 @@ export class AndroidBuildController implements vscode.Disposable {
     if (action === 'build') { await this.run(operation, project.wrapper, [target.assemble, '--console=plain'], project.root); return 'Build succeeded'; }
     if (!serial || !/^[\w.:-]+$/.test(serial)) throw new Error('Select an online device serial first.');
     const selectedMode = action === 'run' ? this.selectedRunMode() : undefined;
-    const effectiveAction = selectedMode?.action ?? action;
-    const selectedConfig = effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project, operation.controller.signal) : undefined;
+    const debugRequest = action === 'debugLaunch' ? 'launch' : action === 'debugAttach' ? 'attach' : undefined;
+    const effectiveAction = debugRequest ?? (action === 'runApp' ? 'run' : selectedMode?.action ?? action);
+    const selectedConfig = debugRequest ? this.selectedDebugConfiguration(debugRequest) : effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project, operation.controller.signal) : undefined;
     const config = selectedConfig ? omitAuto(selectedConfig) : undefined;
     this.check(operation);
     if (effectiveAction === 'debug' && !config) return 'Debug cancelled';
@@ -423,6 +439,7 @@ export class AndroidBuildController implements vscode.Disposable {
         this.debugSession = undefined;
         this.debugTermination?.dispose();
         this.debugTermination = undefined;
+        if (!this.stopping) this.activeAction = undefined;
         if (!this.disposed) this.state(this.stopping ? 'Stopping; resources are being released' : 'Stopped');
       }
     });
@@ -447,7 +464,7 @@ export class AndroidBuildController implements vscode.Disposable {
   // 回归：node --test tests/android-build.test.js，覆盖每次刷新查询真实模型、并发合并、失败传播和取消。
   async handle(message: any, serial?: string): Promise<void> {
     if (this.disposed) throw new Error('Android build controller is disposed');
-    if (!message || message.type !== 'buildPanel' || !['sync', 'refresh', 'project', 'target', 'build', 'install', 'run', 'runMode', 'debug', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
+    if (!message || message.type !== 'buildPanel' || !['sync', 'refresh', 'project', 'target', 'build', 'install', 'run', 'runApp', 'runMode', 'debug', 'debugMode', 'debugLaunch', 'debugAttach', 'stop', 'output'].includes(message.action)) throw new Error('Invalid build panel action');
     if (message.action === 'sync') {
       if (this.snapshot) { this.post(this.snapshot); return; }
       return this.handle({ type: 'buildPanel', action: 'refresh' });
@@ -455,7 +472,7 @@ export class AndroidBuildController implements vscode.Disposable {
     if (message.action === 'output') { this.output.show(true); return; }
     if (message.action === 'stop') { return this.stop(); }
     if (message.action === 'refresh' && !this.stopping && !this.operation?.controller.signal.aborted && this.operation?.action === 'refresh') return this.operation.done;
-    if (this.operation || this.stopping) throw new Error('An Android operation is already running');
+    if (this.operation || this.stopping || this.cleanupPending) throw new Error('An Android operation is already running');
     if (!vscode.workspace.isTrusted) {
       const error = 'Workspace is not trusted';
       this.cachedProjects = undefined; this.projects = []; this.projectId = ''; this.targetId = '';
@@ -467,7 +484,18 @@ export class AndroidBuildController implements vscode.Disposable {
       else { const targets = buildTargets(this.projects.find(p => p.id === this.projectId)?.tasks || []); if (!targets.some(t => t.id === message.value)) throw new Error('Invalid target selection'); this.targetId = message.value; }
       this.state('Ready'); return;
     }
-    if ((this.launched || this.debugSession) && ['run', 'debug'].includes(message.action)) throw new Error('Stop the current app before starting another run.');
+    if ((this.launched || this.debugSession) && ['run', 'runApp', 'debug', 'debugLaunch', 'debugAttach'].includes(message.action)) throw new Error('Stop the current app before starting another run.');
+    // 功能：更新工具栏调试模式并保持当前宿主快照一致。
+    // 输入：message.value 为 dual、jvm 或 native；前置条件是没有活动 Run/Debug 会话。
+    // 输出：保存模式并发布 Ready 快照；非法模式或活动会话直接抛错。
+    // 验证：node --test tests/android-build.test.js --test-name-pattern="debug toolbar"。
+    if (message.action === 'debugMode') {
+      if (this.launched || this.debugSession) throw new Error('Stop the current app before changing debug mode.');
+      if (!['dual', 'jvm', 'native'].includes(message.value)) throw new Error('Invalid debug mode selection');
+      this.debugModeId = message.value;
+      this.state('Ready');
+      return;
+    }
     if (message.action === 'runMode') {
       if (this.launched || this.debugSession) throw new Error('Stop the current app before changing run mode.');
       const modes = ['run', ...getAndroidDebugConfigurations().map((_, index) => 'debug-' + index)];
@@ -478,16 +506,18 @@ export class AndroidBuildController implements vscode.Disposable {
     }
     const operation: Operation = { controller: new AbortController(), done: Promise.resolve(), action: message.action };
     this.operation = operation;
+    if (message.action === 'run' || message.action === 'runApp' || message.action === 'debugLaunch' || message.action === 'debugAttach') this.activeAction = message.action === 'debugLaunch' ? 'debugLaunch' : message.action === 'debugAttach' ? 'debugAttach' : 'run';
     this.state(message.action === 'refresh' ? 'Discovering Gradle tasks' : message.action + ': ' + this.targetId);
     operation.done = (async () => {
       try {
         const status = await this.execute(operation, message.action, serial);
         this.check(operation);
-        if (this.operation === operation) { this.operation = undefined; this.state(status); }
+        if (this.operation === operation) { this.operation = undefined; if (!this.launched && !this.debugSession) this.activeAction = undefined; this.state(status); }
       } catch (error) {
         if (this.operation === operation) {
           if (message.action === 'refresh') { this.projects = []; this.cachedProjects = undefined; this.projectId = ''; this.targetId = ''; }
           this.operation = undefined;
+          if (!this.stopping) this.activeAction = undefined;
           const cancelled = operation.controller.signal.aborted || error instanceof Cancelled;
           this.state(this.stopping ? 'Stopping; resources are being released' : cancelled ? 'Cancelled' : 'Failed', cancelled ? undefined : String(error));
         }
@@ -503,6 +533,7 @@ export class AndroidBuildController implements vscode.Disposable {
     if (this.stopping) return this.stopping;
     const operation = this.operation;
     const child = this.child;
+    this.cleanupPending = false;
     this.stopping = Promise.resolve().then(async () => {
       if (operation) {
         if (child) await this.terminate(child);
@@ -530,9 +561,12 @@ export class AndroidBuildController implements vscode.Disposable {
       }
     }).then(() => {
       this.stopping = undefined;
+      this.cleanupPending = false;
+      this.activeAction = undefined;
       this.state('Stopped');
     }, error => {
       this.stopping = undefined;
+      this.cleanupPending = true;
       this.state('Stop failed; resources may still be active', String(error));
       throw error;
     });

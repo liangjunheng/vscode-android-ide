@@ -312,7 +312,7 @@ test('Device Tools browser clips long device labels', {skip:!enabled,timeout:600
   }
 });
 
-// LOGCAT_BROWSER=1 node --test --test-name-pattern="run mode" tests/logcat-browser.test.js：真实面板验证纯图标、六项debug、结束复位、宽度缩减及设备弹窗同款样式。
+/** 功能点：真实构建栏及 Attach 图标；受影响对象：共享按钮和 debug-attach.svg/png；复现路径：加载生产模板，在深浅主题及窄屏打开控件；测试范围：模式、交互、16px尺寸、透明背景、主题色及统一色彩空间的PNG像素对比；执行入口：LOGCAT_BROWSER=1 node --test --test-name-pattern="run mode" tests/logcat-browser.test.js；预期结果：图标与PNG轮廓一致且随主题变色；判据：像素最大通道误差不超过3、角落透明且DOM断言全部通过，不替代真机验收。 */
 test('Device Tools run mode browser matches device picker and icon-only actions', {skip:!enabled,timeout:60000}, async t => {
   const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(new Error('Run mode browser deadline')),45000);t.after(()=>clearTimeout(deadline));
   const data=await fixture(),page=await browser(t,data,controller.signal),source=await fs.readFile(path.join(root,'src/runningDevices.ts'),'utf8');
@@ -321,32 +321,55 @@ test('Device Tools run mode browser matches device picker and icon-only actions'
   const css=iconsCSS+source.slice(source.indexOf('<style>')+7,source.indexOf('</style>'))+await fs.readFile(path.join(root,'media/build-panel.css'),'utf8')+await fs.readFile(path.join(root,'media/dropdowns.css'),'utf8');
   await page.evaluate('document.querySelectorAll("style").forEach(style=>style.remove());document.body.innerHTML='+JSON.stringify(markup)+';document.head.appendChild(Object.assign(document.createElement("style"),{textContent:'+JSON.stringify(css)+'}));window.send=message=>window.__hostMessages.push(message)');
   await page.evaluate((await fs.readFile(path.join(root,'media/build-panel.js'),'utf8'))+';initBuildPanel(send);');
+  const pngBytes = await fs.readFile(path.join(root,'media/icons/debug-attach.png'));
+  const pngChunks = [pngBytes.subarray(0,8)];
+  for(let offset=8;offset<pngBytes.length;){const end=offset+12+pngBytes.readUInt32BE(offset);if(pngBytes.toString('ascii',offset+4,offset+8)!=='iCCP')pngChunks.push(pngBytes.subarray(offset,end));offset=end;}
+  const referencePng = Buffer.concat(pngChunks).toString('base64');
+  const referenceSvg = (await fs.readFile(path.join(root,'media/icons/debug-attach.svg'),'utf8')).replace('width="16" height="16" viewBox="4 3 32 32"','width="40" height="37" viewBox="0 0 40 37"').replace('fill="currentColor"','fill="rgb(200,202,208)"');
+  const pixelComparison = await page.evaluate('(async()=>{const load=src=>new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=reject;img.src=src});const png=await load('+JSON.stringify('data:image/png;base64,'+referencePng)+'),svg=await load('+JSON.stringify('data:image/svg+xml;base64,'+Buffer.from(referenceSvg).toString('base64'))+');const canvas=document.createElement("canvas");canvas.width=40;canvas.height=37;const ctx=canvas.getContext("2d");ctx.drawImage(png,0,0);const expected=ctx.getImageData(0,0,40,37).data;ctx.fillStyle="rgb(38,40,42)";ctx.fillRect(0,0,40,37);ctx.drawImage(svg,0,0);const actual=ctx.getImageData(0,0,40,37).data;let maxError=0,maxIndex=0;for(let i=0;i<actual.length;i++){const e=Math.abs(actual[i]-expected[i]);if(e>maxError){maxError=e;maxIndex=i}}const diagnostic={expected:[...expected.slice(maxIndex-maxIndex%4,maxIndex-maxIndex%4+4)],actual:[...actual.slice(maxIndex-maxIndex%4,maxIndex-maxIndex%4+4)],background:[...expected.slice(0,4)]};ctx.clearRect(0,0,40,37);ctx.drawImage(svg,0,0);return{maxError,maxIndex,diagnostic,cornerAlpha:ctx.getImageData(0,0,1,1).data[3]}})()');
+  assert.ok(pixelComparison.maxError<=3,JSON.stringify(pixelComparison));
+  assert.equal(pixelComparison.cornerAlpha,0);
   const state={type:'buildState',projects:[{id:'root',label:'Project'}],project:'root',targets:[{id:':app:Debug',label:'app | Debug'}],target:':app:Debug',runMode:'run',runModes:[{id:'run',label:'app',action:'run'},...Array.from({length:6},(_,index)=>({id:'debug-'+index,label:'Android debug configuration '+index,action:'debug'}))],busy:false,running:false,status:'Ready'};
   await page.post(state);await page.post({type:'devices',serial:'phone'});
   await page.evaluate('document.getElementById("dev").appendChild(Object.assign(document.createElement("option"),{value:"phone",textContent:"Android device"}));document.getElementById("dev").value="phone"');
   for(const theme of ['dark','light'])for(const width of [240,360,480]){
     await page.viewport(width);
     await page.evaluate('document.body.className='+JSON.stringify('vscode-'+theme)+';document.body.style.setProperty("--vscode-menu-background",'+JSON.stringify(theme==='light'?'#fff':'#252526')+');document.body.style.setProperty("--vscode-menu-foreground",'+JSON.stringify(theme==='light'?'#202020':'#ccc')+');document.body.style.setProperty("--vscode-dropdown-background",'+JSON.stringify(theme==='light'?'#fff':'#333')+')');
-    const sizes=await page.evaluate('(()=>{const group=document.querySelector(".build-run-control"),mode=document.getElementById("build-run-mode"),run=document.getElementById("build-run"),actual=mode.getBoundingClientRect().width,before={grid:getComputedStyle(group.parentElement).gridTemplateColumns,width:group.parentElement.getBoundingClientRect().width,group:group.getBoundingClientRect().width};group.style.width="100%";const full=mode.getBoundingClientRect().width,after={grid:getComputedStyle(group.parentElement).gridTemplateColumns,width:group.parentElement.getBoundingClientRect().width,group:group.getBoundingClientRect().width};group.style.removeProperty("width");return{actual,full,before,after,button:run.getBoundingClientRect().width,text:run.textContent.trim(),labels:run.querySelectorAll("span").length}})()');
-    assert.ok(Math.abs(sizes.actual/sizes.full-2/3)<.02,JSON.stringify({width,sizes}));assert.equal(sizes.button,26);assert.equal(sizes.text,'');assert.equal(sizes.labels,0);
+    const sizes=await page.evaluate('(()=>{const box=e=>{const r=e.getBoundingClientRect();const c=getComputedStyle(e);return{left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,cssWidth:c.width,minWidth:c.minWidth,maxWidth:c.maxWidth,flex:c.flex,display:c.display}};const toolbar=document.querySelector(".build-target-toolbar"),target=document.getElementById("build-target"),run=document.getElementById("build-run"),mode=document.getElementById("build-debug-mode"),controls=document.querySelector(".build-debug-controls");return{toolbar:box(toolbar),target:box(target),run:box(run),mode:box(mode),controls:box(controls)}})()');
+    assert.equal(Math.round(sizes.run.width),26);assert.ok(sizes.toolbar.width>0);assert.ok(sizes.mode.width>=60,JSON.stringify({width,sizes}));
+    await page.evaluate('document.body.style.setProperty("--vscode-icon-foreground",'+JSON.stringify(theme==='light'?'#333333':'#dddddd')+')');
+    const attachGeometry=await page.evaluate('(()=>{const e=document.querySelector("#build-debug-attach-image svg"),r=e.getBoundingClientRect(),c=getComputedStyle(e);return{width:r.width,height:r.height,fill:c.fill,background:c.backgroundColor,pauseHidden:document.getElementById("build-debug-attach-icon").hidden}})()');
+    assert.equal(attachGeometry.width,16);assert.equal(attachGeometry.height,16);
+    assert.equal(attachGeometry.fill,theme==='light'?'rgb(51, 51, 51)':'rgb(221, 221, 221)');
+    assert.equal(attachGeometry.background,'rgba(0, 0, 0, 0)');assert.equal(attachGeometry.pauseHidden,true);
     const properties=['backgroundColor','color','borderRadius','padding','borderWidth','boxShadow','maxHeight','overflowY','fontSize'];
     const styles=[];
-    for(const id of ['dev','build-run-mode']){
+    for(const id of ['dev','build-target','build-debug-mode']){
       const point=await page.evaluate('(()=>{const r=document.getElementById('+JSON.stringify(id)+').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
       await page.mouse('mousePressed',point.x,point.y);await page.mouse('mouseReleased',point.x,point.y);await page.frames();
       const actual=await page.evaluate('(()=>{const s=document.getElementById('+JSON.stringify(id)+'),p=getComputedStyle(s,"::picker(select)"),o=getComputedStyle(s.selectedOptions[0]),r=s.getBoundingClientRect(),first=s.options[0].getBoundingClientRect();return{open:s.matches(":open"),appearance:getComputedStyle(s).appearance,popup:Object.fromEntries('+JSON.stringify(properties)+'.map(k=>[k,p[k]])),option:{height:o.minHeight,padding:o.padding,radius:o.borderRadius,background:o.backgroundColor,check:getComputedStyle(s.selectedOptions[0],"::checkmark").content},left:r.left,firstLeft:first.left,inset:parseFloat(p.paddingLeft)+parseFloat(p.borderLeftWidth)}})()');
-      assert.equal(actual.open,true,id);assert.equal(actual.appearance,'base-select',id);assert.ok(Math.abs(actual.firstLeft-actual.inset-actual.left)<1,JSON.stringify(actual));styles.push(actual);await page.key('Escape');
+      assert.equal(actual.open,true,id);assert.equal(actual.appearance,'base-select',id);if(id!=='build-debug-mode')assert.ok(Math.abs(actual.firstLeft-actual.inset-actual.left)<1,JSON.stringify(actual));styles.push(actual);await page.key('Escape');
     }
-    assert.deepEqual(styles[0].popup,styles[1].popup);assert.deepEqual(styles[0].option,styles[1].option);
+    assert.deepEqual(styles[0].popup,styles[1].popup);assert.deepEqual(styles[1].popup,styles[2].popup);assert.deepEqual(styles[0].option,styles[1].option);assert.deepEqual(styles[1].option,styles[2].option);
     if(width===360)await page.screenshot('run-mode-'+theme);
   }
-  for(let index=0;index<6;index++){
-    await page.post({...state,runMode:'debug-'+index});
-    assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-alt');
-    assert.equal(await page.evaluate('getComputedStyle(document.getElementById("build-run-icon"),"::before").content'),'"'+String.fromCharCode(0xeb91)+'"');
-    await page.click('build-run');assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'),'run');
-    await page.post({...state,runMode:'debug-'+index,running:true});assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-pause');
-    await page.post({...state,runMode:'debug-'+index,running:false,status:'Stopped'});assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-debug-alt');
+  for(const mode of ['dual','jvm','native']){
+    await page.post({...state,debugMode:mode});
+    assert.equal(await page.evaluate('document.getElementById("build-debug-mode").value'),mode);
+    assert.equal(await page.evaluate('document.querySelector("#build-debug-mode selectedcontent").textContent'),mode[0].toUpperCase()+mode.slice(1));
+    assert.deepEqual(await page.evaluate('[...document.querySelectorAll("#build-debug-mode option")].map(option=>option.textContent)'),['Dual (Jvm + Native)','Jvm Only','Native Only']);
+    const modePoint=await page.evaluate('(()=>{const r=document.getElementById("build-debug-mode").getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()');
+    await page.mouse('mousePressed',modePoint.x,modePoint.y);await page.mouse('mouseReleased',modePoint.x,modePoint.y);await page.frames();
+    assert.ok(await page.evaluate('document.getElementById("build-debug-mode").matches(":open")'));
+    assert.ok((await page.evaluate('getComputedStyle(document.getElementById("build-debug-mode"),"::picker(select)").minWidth')).includes('190'));
+    await page.key('Escape');
+    assert.equal(await page.evaluate('document.getElementById("build-debug-launch-icon").className'),'codicon codicon-debug');
+    assert.equal(await page.evaluate('document.getElementById("build-debug-attach-image").hidden'),false);
+    assert.equal(await page.evaluate('document.getElementById("build-debug-attach-icon").hidden'),true);
+    await page.click('build-debug-launch');assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'),'debugLaunch');
+    await page.click('build-debug-attach');assert.equal(await page.evaluate('window.__hostMessages.at(-1).action'),'debugAttach');
+    await page.post({...state,debugMode:mode,running:true});assert.equal(await page.evaluate('document.getElementById("build-debug-mode").disabled'),true);
+    await page.post({...state,debugMode:mode,running:false,status:'Stopped'});assert.equal(await page.evaluate('document.getElementById("build-debug-mode").disabled'),false);
   }
   await page.post(state);assert.equal(await page.evaluate('document.getElementById("build-run-icon").className'),'codicon codicon-play');
 });

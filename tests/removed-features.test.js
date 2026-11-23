@@ -49,7 +49,10 @@ test('Device Tools retains combined run debug action and Show Logcat', () => {
   const end = source.indexOf('<div class="build-status"', start);
   assert.ok(start >= 0 && end > start, 'build action template boundaries must exist');
   const ids = [...source.slice(start, end).matchAll(/<button id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(ids, ['build-run', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-logcat']);
-  assert.match(source.slice(start, end), /id="build-run-mode"/);
-  assert.match(read('media/build-panel.css'), /grid-template-columns:minmax\(80px,1fr\) repeat\(5,minmax\(16px,26px\)\)/);
+  assert.deepEqual(ids, ['build-build', 'build-install', 'build-refresh', 'build-output', 'build-logcat']);
+  const targetStart = source.indexOf('<div class="build-target-toolbar">');
+  const targetEnd = source.indexOf('<div class="build-device-row">', targetStart);
+  const target = source.slice(targetStart, targetEnd);
+  for (const id of ['build-run', 'build-debug-mode', 'build-debug-launch', 'build-debug-attach']) assert.match(target, new RegExp('id="' + id + '"'));
+  assert.match(read('media/build-panel.css'), /grid-template-columns:repeat\(5,minmax\(16px,26px\)\)/);
 });

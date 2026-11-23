@@ -552,31 +552,35 @@ test('android-build run installs selected package and stop owns original serial'
   await f.controller.dispose();
 });
 
-// node --test tests/android-build.test.js：面板默认应用项、六个内置项、非法选择及所属会话结束后复位均使用真实消息入口断言。
-test('android-build run mode selection routes all six configurations and resets on termination', async t => {
+// 功能点：验证独立调试模式选择和 Launch/Attach 六项任务映射。
+// 受影响对象：AndroidBuildController.debugMode、debugLaunch、debugAttach、调试会话互斥和普通 Run。
+// 复现路径：刷新测试工程，依次选择 Native、Jvm、Dual，分别执行 Launch 和 Attach；运行期间修改模式或重复启动。
+// 测试范围：默认 Dual、三种模式、Jvm→Java 映射、六种请求、非法模式、运行中互斥、会话终止和普通 Run 回归。
+// 执行入口：node --test tests/android-build.test.js --test-name-pattern="debug toolbar"。
+// 预期结果：每种模式映射正确配置，非法输入和运行中变更被拒绝，会话结束后恢复可操作。
+// 判据：所有断言通过且进程退出码为 0；任一配置或互斥断言失败则失败。
+test('android-build debug toolbar routes all mode and request combinations', async t => {
   const f = fixture(t); await f.action('refresh');
-  assert.equal(f.last().runMode, 'run');
-  assert.equal(f.last().runModes.length, 7);
-  assert.equal(f.last().runModes[0].action, 'run');
-  await assert.rejects(f.action('runMode', 'debug-6'), /Invalid run mode/);
-  const expected = [['native','launch'],['native','attach'],['java','launch'],['java','attach'],['dual','launch'],['dual','attach']];
-  for (let index = 0; index < expected.length; index++) {
-    const calls = f.calls.length;
-    await f.action('runMode', 'debug-' + index);
-    assert.equal(f.calls.length, calls);
-    await f.action('run', undefined, 'phone');
-    assert.equal(f.last().running, true);
-    assert.equal(f.debugCalls.at(-1)[1].mode, expected[index][0]);
-    assert.equal(f.debugCalls.at(-1)[1].request, expected[index][1]);
-    await assert.rejects(f.action('runMode', 'run'), /Stop the current/);
-    for (const listener of [...f.debugTerminationListeners]) listener(f.session);
-    assert.equal(f.last().running, false);
-    assert.equal(f.last().runMode, 'debug-' + index);
-    assert.equal(f.last().status, 'Stopped');
-    assert.equal(f.debugTerminationListeners.size, 0);
+  assert.equal(f.last().debugMode, 'dual');
+  for (const mode of ['native', 'jvm', 'dual']) {
+    await f.action('debugMode', mode);
+    assert.equal(f.last().debugMode, mode);
+    for (const request of ['debugLaunch', 'debugAttach']) {
+      await f.action(request, mode, 'phone');
+      assert.equal(f.last().running, true);
+      assert.equal(f.last().activeAction, request);
+      assert.equal(f.debugCalls.at(-1)[1].mode, mode === 'jvm' ? 'java' : mode);
+      assert.equal(f.debugCalls.at(-1)[1].request, request === 'debugLaunch' ? 'launch' : 'attach');
+      await assert.rejects(f.action('debugMode', 'native'), /Stop the current/);
+      for (const listener of [...f.debugTerminationListeners]) listener(f.session);
+      assert.equal(f.last().running, false);
+      assert.equal(f.last().debugMode, mode);
+      assert.equal(f.last().status, 'Stopped');
+    }
   }
-  await f.action('runMode', 'run');
+  await assert.rejects(f.action('debugMode', 'invalid'), /Invalid debug mode/);
   await f.action('run', undefined, 'phone');
+  assert.equal(f.last().activeAction, 'run');
   assert.ok(f.calls.at(-1).args.includes('monkey'));
   await f.action('stop'); await f.controller.dispose();
 });

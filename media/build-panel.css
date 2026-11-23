@@ -6,8 +6,25 @@
 #build-project{appearance:none;-webkit-appearance:none;border:0;background:transparent;min-width:0;flex:1;color:inherit;font:inherit;text-overflow:ellipsis;cursor:pointer}#build-project:focus-visible,#build-target:focus-visible{outline:0;box-shadow:0 0 0 1px var(--vscode-focusBorder);border-radius:4px}
 #build-root-count{flex:none;color:var(--vscode-descriptionForeground);font-size:10px;white-space:nowrap}
 .build-surface{display:flex;flex-direction:column;gap:5px;border:1px solid var(--vscode-panel-border,#444);border-radius:6px;padding:6px;min-width:0;background:var(--vscode-editorWidget-background)}
-.build-target-row{display:flex;align-items:center;gap:6px;height:29px;border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border,#444));border-radius:4px;padding:0 6px;background:var(--vscode-dropdown-background);min-width:0}
-#build-target{border:0;background:transparent;color:var(--vscode-dropdown-foreground);font:inherit;min-width:0;width:100%;height:100%}
+.build-target-toolbar{display:flex;align-items:center;gap:3px;min-width:0;width:100%}
+.build-target-row{display:flex;align-items:center;gap:6px;height:29px;border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border,#444));border-radius:4px;padding:0 6px;background:var(--vscode-dropdown-background);min-width:0;flex:1 1 0}
+.build-target-control{display:flex;align-items:center;gap:3px;min-width:0;flex:1;height:100%}
+#build-target{border:0;background:transparent;color:var(--vscode-dropdown-foreground);font:inherit;min-width:0;width:100%;height:100%;flex:1}
+.build-target-run-separator{width:1px;height:18px;flex:0 0 1px;background:var(--vscode-panel-border,#555)}
+#build-run{width:26px;height:26px;flex:0 0 26px;justify-content:center;padding:0;background:var(--vscode-button-secondaryBackground);font:inherit}
+#build-run .codicon{color:var(--vscode-testing-iconPassed,#73c991)}
+.build-debug-separator{width:1px;height:18px;flex:0 0 1px;background:var(--vscode-panel-border,#555)}
+.build-debug-controls{display:flex;align-items:center;gap:0;min-width:160px;width:160px;height:29px;flex:0 0 160px;padding:0 3px 0 6px;border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border,#444));border-radius:4px;background:var(--vscode-dropdown-background);box-sizing:border-box}
+.build-debug-mode{width:90px!important;height:100%;min-width:90px!important;flex:0 0 90px!important;padding:0 6px;border:0;background:transparent;color:var(--vscode-dropdown-foreground);font:inherit;box-sizing:border-box;white-space:nowrap}
+.build-debug-mode>button{display:flex;align-items:center;gap:8px;width:100%;height:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:start}
+.build-debug-mode>button selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.build-debug-actions-separator{width:1px;height:18px;flex:0 0 1px;margin-inline:3px;background:var(--vscode-panel-border,#555)}
+.build-debug-controls>button{width:26px;height:26px;min-width:26px;border-radius:3px}
+.build-debug-image{display:block;max-width:18px;max-height:18px;width:auto;height:auto;object-fit:contain}
+.build-debug-image[hidden],#build-debug-attach-icon[hidden]{display:none!important}
+.build-debug-attach-image{display:flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--vscode-icon-foreground)}
+.build-debug-attach-image[hidden],#build-debug-attach-icon[hidden]{display:none!important}
+.build-debug-attach-image svg{display:block;width:16px;height:16px}
 .build-device-row{display:flex;align-items:center;gap:4px;min-width:0}
 #tab{height:28px;gap:6px;padding:2px 6px;flex:1}
 /* 与构建风味共用16px图标槽及零内边距；Device Tools browser回归对比真机/模拟器的尺寸、左留白和文字间距。 */
@@ -17,11 +34,6 @@
 #tab #tdot{display:none!important}
 .build-actions{display:flex;gap:3px;align-items:center;min-width:0;height:29px}
 .build-actions button,.build-view-modes button{width:26px;height:26px;border-radius:4px;flex:none}
-.build-run-control{display:flex;width:calc((100% - 26px) * 2 / 3 + 26px);min-width:0;height:28px}
-#build-run-mode{display:inline-flex;align-items:center;gap:8px;padding:2px 6px;border:1px solid var(--vscode-dropdown-border,var(--vscode-input-border,var(--vscode-panel-border,#555)));border-radius:6px;background:var(--vscode-dropdown-background,var(--vscode-input-background));color:inherit;font:inherit;min-width:0;flex:1;overflow:hidden;cursor:pointer;box-sizing:border-box}
-#build-run{width:26px!important;min-width:26px!important;justify-content:center;padding:0;border-radius:0 4px 4px 0!important;background:var(--vscode-button-secondaryBackground);font:inherit}
-#build-run .codicon{color:var(--vscode-testing-iconPassed,#73c991)}
-#build-run[data-mode="debug"] .codicon{color:var(--vscode-icon-foreground)}
 button:disabled{opacity:.4;cursor:default}
 .build-status{display:flex;align-items:center;gap:5px;min-width:0;height:19px;font-size:11px;color:var(--vscode-descriptionForeground)}
 #build-status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
@@ -29,7 +41,7 @@ button:disabled{opacity:.4;cursor:default}
 .build-status>.codicon{flex:none}
 select:focus-visible,button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}
 @media(max-width:260px){#build-root-count{display:none}.build-actions{gap:1px}.build-actions button{width:23px}}
-.build-actions{display:grid;grid-template-columns:minmax(80px,1fr) repeat(5,minmax(16px,26px));gap:2px}
+.build-actions{display:grid;grid-template-columns:repeat(5,minmax(16px,26px));gap:2px}
 .build-view-separator{height:18px;width:1px;flex:none;background:var(--vscode-panel-border,#555)}
 .build-view-modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;height:26px;min-width:0;flex:0 0 82px}
 .build-view-modes button[aria-pressed="true"]{background:var(--vscode-toolbar-activeBackground,var(--vscode-list-inactiveSelectionBackground))}

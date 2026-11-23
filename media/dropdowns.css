@@ -18,22 +18,25 @@ body select:not([multiple]){appearance:auto;cursor:pointer}
 /* 鼠标点击不显示宿主橙色焦点框；键盘焦点仍由 :focus-visible 提供可访问反馈。 */
 body :is(button,select,input):focus:not(:focus-visible){outline:0!important;box-shadow:none!important}
 body select:not([multiple]):disabled{cursor:default;color:var(--vscode-disabledForeground);opacity:.65}
-body #tab:hover,body #tab:active,body #tab:focus-within,body .build-target-row:hover,body .build-target-row:active,body .build-target-row:focus-within,body #build-run-mode:hover,body #build-run-mode:open,body #build-run-mode:focus-within{border-color:var(--vscode-focusBorder)}
+body #tab:hover,body #tab:active,body #tab:focus-within,body .build-target-row:hover,body .build-target-row:active,body .build-target-row:focus-within,body #build-run-mode:hover,body #build-run-mode:open,body #build-run-mode:focus-within,body #build-debug-mode:hover,body #build-debug-mode:open,body #build-debug-mode:focus-within{border-color:var(--vscode-focusBorder)}
 body #build-project option,body #build-target option{background:var(--popup-bg);color:var(--popup-fg)}
 @supports (appearance:base-select){
-  body select:not([multiple]),body select#dev,body .device-select #dev,body select#build-project,body select#build-target,body select#build-run-mode,body select.process-sort{appearance:base-select;display:inline-flex;background-image:none;padding-inline-end:8px;align-items:center;gap:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  body select:not([multiple]),body select#dev,body .device-select #dev,body select#build-project,body select#build-target,body select#build-run-mode,body select#build-debug-mode,body select.process-sort{appearance:base-select;display:inline-flex;background-image:none;padding-inline-end:8px;align-items:center;gap:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  body #build-debug-mode>button{display:flex;align-items:center;gap:8px;width:100%;height:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:start;overflow:hidden}
+  body #build-debug-mode>button selectedcontent{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   select::picker(select){appearance:base-select;box-sizing:border-box;background:var(--popup-bg);color:var(--popup-fg);border:1px solid var(--popup-border);border-radius:6px;box-shadow:var(--popup-shadow);padding:4px;margin-block:4px;min-width:anchor-size(width);max-width:calc(100vw - 8px);max-height:min(320px,calc(100vh - 8px));overflow:auto;scrollbar-width:thin;scrollbar-color:var(--vscode-scrollbarSlider-background,#8886) transparent;font:13px var(--vscode-font-family);letter-spacing:0}
+  select#build-debug-mode::picker(select){min-width:190px}
   select::picker-icon{content:"\eab4";font:16px codicon;margin-inline-start:auto;flex:0 0 16px;color:var(--vscode-descriptionForeground,var(--popup-fg))}
   select:open::picker-icon{transform:rotate(180deg)}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option{box-sizing:border-box;display:flex;align-items:center;gap:8px;min-height:32px;padding:6px 10px;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--popup-fg);white-space:normal;overflow-wrap:anywhere;font:inherit;line-height:18px}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option::before{content:var(--dropdown-icon,"\ea95");font:16px codicon;flex:0 0 16px;color:var(--vscode-descriptionForeground,var(--popup-fg))}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:checked{background:var(--popup-hover);color:var(--popup-hover-fg)}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:checked::before{color:var(--popup-check)}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option::checkmark{content:"\eab2";font:16px codicon;order:1;margin-inline-start:auto;flex:0 0 16px;color:var(--popup-check)}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:not(:disabled):hover,body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:focus{background:var(--popup-hover);color:var(--popup-hover-fg)}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:disabled{background:transparent;color:var(--vscode-disabledForeground,var(--vscode-descriptionForeground));opacity:.65;cursor:default}
-  body select:is(select,#dev,#build-project,#build-target,#build-run-mode) option:disabled::before{color:inherit}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option{box-sizing:border-box;display:flex;align-items:center;gap:8px;min-height:32px;padding:6px 10px;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--popup-fg);white-space:normal;overflow-wrap:anywhere;font:inherit;line-height:18px}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option::before{content:var(--dropdown-icon,"\ea95");font:16px codicon;flex:0 0 16px;color:var(--vscode-descriptionForeground,var(--popup-fg))}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:checked{background:var(--popup-hover);color:var(--popup-hover-fg)}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:checked::before{color:var(--popup-check)}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option::checkmark{content:"\eab2";font:16px codicon;order:1;margin-inline-start:auto;flex:0 0 16px;color:var(--popup-check)}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:not(:disabled):hover,body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:focus{background:var(--popup-hover);color:var(--popup-hover-fg)}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:disabled{background:transparent;color:var(--vscode-disabledForeground,var(--vscode-descriptionForeground));opacity:.65;cursor:default}
+  body select:is(select,#dev,#build-project,#build-target,#build-run-mode,#build-debug-mode) option:disabled::before{color:inherit}
   select#dev{--dropdown-icon:"\eadb"}
   select#build-project{--dropdown-icon:"\eb30"}
   select#build-target{--dropdown-icon:"\eb29"}

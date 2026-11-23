@@ -24,11 +24,17 @@ function fixture(initialVisible = true, logcat = false) {
     const button = { children: [], querySelector: () => null };
     return { value: '', children: [], textContent: '', disabled: false, hidden: false, title: '', classList: { toggle() {} }, setAttribute(k, v) { this[k] = v; }, querySelector: selector => selector === 'button' ? button : null, replaceChildren(...items) { this.children = items; }, appendChild(o) { this.children.push(o); } };
   })();
-  vm.runInNewContext(js + ';initBuildPanel(send);', { document: { body: { dataset: { mirrorVisible: String(initialVisible) }, classList: { toggle() {} } }, getElementById: id => logcat && ['build-mirror', 'build-explorer', 'build-processes', 'build-logcat', 'device-explorer', 'build-project', 'build-target', 'build-project-loading', 'build-target-loading', 'build-status', 'build-root-count', 'build-progress', 'build-build', 'build-install', 'build-refresh', 'build-output'].includes(id) ? null : get(id), createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
+  vm.runInNewContext(js + ';initBuildPanel(send);', { document: { body: { dataset: { mirrorVisible: String(initialVisible) }, classList: { toggle() {} } }, getElementById: id => logcat && ['build-mirror', 'build-explorer', 'build-processes', 'build-logcat', 'device-explorer', 'build-project', 'build-target', 'build-project-loading', 'build-target-loading', 'build-status', 'build-root-count', 'build-progress', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-debug-mode', 'build-debug-launch', 'build-debug-attach'].includes(id) ? null : get(id), createElement: () => ({}) }, send: m => sent.push(m), addEventListener: (type, fn) => { receive = fn; } });
   return { get, sent, receive: data => receive({ data }) };
 }
 
-// npm test：实际脚本验证无项目/设备、busy和错误按钮状态；已移除工具不再绑定，构建和Logcat消息保持。
+// 功能点：验证 Device Tools 的 variants 内 Run、调试模式选择、Launch 和 Attach 控件。
+// 受影响对象：build-panel.js 状态渲染、模式选择消息、Run/Debug 动作消息和构建栏状态控件。
+// 复现路径：创建包含 Debug 变体的 fixture，接收 buildState，选择 Native，点击 Run/Launch/Attach，再切换 busy、running、错误和空目标。
+// 测试范围：覆盖默认 Dual、模式切换、三类启动动作、设备缺失、停止状态和既有 Build/Install/Logcat 回归。
+// 执行入口：node --test tests/build-panel-ui.test.js --test-name-pattern="build panel UI renders"。
+// 预期结果：模式和动作消息携带正确值，控件禁用状态跟随宿主快照，旧构建动作不回归。
+// 判据：测试退出码为 0 且全部断言通过为成功；任一消息、状态或结构断言失败为失败。
 test('build panel UI renders safe options and routes all commands', () => {
   const f = fixture(), get = f.get;
   assert.equal(f.sent[0].action, 'sync');
@@ -41,7 +47,7 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-logcat').disabled, false);
   get('build-logcat').onclick();
   assert.equal(f.sent.at(-1).type, 'logcat');
-  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', runMode: 'run', runModes: [{ id: 'run', label: 'app | debug', action: 'run' }, ...Array.from({ length: 6 }, (_, index) => ({ id: 'debug-' + index, label: 'Debug ' + index, action: 'debug' }))], busy: false, deviceLoading: false, status: 'Ready' };
+  const state = { type: 'buildState', projects: [{ id: 'root', label: '<Project>' }], project: 'root', targets: [{ id: ':app:Debug', label: 'app | debug' }], target: ':app:Debug', debugMode: 'dual', busy: false, deviceLoading: false, status: 'Ready' };
   f.receive({ ...state, deviceLoading: true });
   assert.equal(get('build-project-loading').hidden, true);
   assert.equal(get('build-target-loading').hidden, true);
@@ -73,25 +79,45 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(f.sent.at(-1).value, 'root');
   get('build-target').onchange();
   assert.equal(f.sent.at(-1).action, 'target');
-  assert.equal(get('build-run-mode').children.length, 8);
-  get('build-run-mode').value = 'debug-0';
-  get('build-run-mode').onchange();
-  assert.equal(f.sent.at(-1).action, 'runMode');
-  assert.equal(f.sent.at(-1).value, 'debug-0');
-  f.receive({ ...state, runMode: 'debug-0' });
-  assert.match(get('build-run-icon').className, /debug-alt/);
-  assert.equal(get('build-run')['aria-label'], 'Start debugging');
+  assert.equal(get('build-debug-mode').value, 'dual');
+  assert.equal(get('build-debug-mode').querySelector('selectedcontent')?.textContent || 'Dual', 'Dual');
+  assert.match(css, /\.build-debug-controls\{[^}]*min-width:160px;[^}]*width:160px;[^}]*flex:0 0 160px/);
+  assert.match(css, /\.build-debug-mode\{[^}]*width:90px!important;[^}]*min-width:90px!important;[^}]*flex:0 0 90px!important/);
+  assert.equal(get('build-debug-launch-icon').className, 'codicon codicon-debug');
+  assert.equal(get('build-debug-attach-image').hidden, false);
+  assert.equal(get('build-debug-attach-icon').hidden, true);
+  get('build-debug-mode').value = 'native';
+  get('build-debug-mode').onchange();
+  assert.equal(f.sent.at(-1).action, 'debugMode');
+  assert.equal(f.sent.at(-1).value, 'native');
+  f.receive({ ...state, debugMode: 'native' });
+  assert.equal(get('build-debug-mode').value, 'native');
+  assert.equal(get('build-debug-mode').querySelector('selectedcontent')?.textContent || 'Native', 'Native');
   for (const action of ['run', 'build', 'install', 'refresh', 'output']) { get('build-' + action).onclick(); assert.equal(f.sent.at(-1).action, action); }
+  get('build-debug-launch').onclick(); assert.equal(f.sent.at(-1).action, 'debugLaunch'); assert.equal(f.sent.at(-1).value, 'native');
+  get('build-debug-attach').onclick(); assert.equal(f.sent.at(-1).action, 'debugAttach'); assert.equal(f.sent.at(-1).value, 'native');
+  f.receive({ ...state, activeAction: 'debugLaunch', busy: true, running: true });
+  assert.equal(get('build-run').disabled, true);
+  assert.equal(get('build-debug-launch').disabled, false);
+  assert.equal(get('build-debug-attach').disabled, true);
+  assert.match(get('build-debug-launch-icon').className, /debug-pause/);
+  f.receive({ ...state, activeAction: 'debugAttach', busy: true, running: true });
+  assert.equal(get('build-run').disabled, true);
+  assert.equal(get('build-debug-launch').disabled, true);
+  assert.equal(get('build-debug-attach').disabled, false);
+  assert.equal(get('build-debug-attach-image').hidden, true);
+  assert.equal(get('build-debug-attach-icon').hidden, false);
+  assert.equal(get('build-debug-attach-icon').className, 'codicon codicon-debug-pause');
   assert.equal(get('build-wifi').onclick, undefined);
   assert.equal(f.sent.some(message => message.type === 'pairDevice'), false);
   f.receive({ type: 'error', text: 'ADB timeout' });
   assert.equal(get('build-status').textContent, 'ADB timeout');
   assert.equal(get('build-status').classList?.failed, undefined);
-  f.receive({ ...state, busy: true, gradleLoading: false, deviceLoading: false, status: 'Starting Android debugger' });
+  f.receive({ ...state, activeAction: 'run', busy: true, gradleLoading: false, deviceLoading: false, status: 'Starting Android debugger' });
   assert.equal(get('build-project-loading').hidden, true);
   assert.equal(get('build-target-loading').hidden, true);
   assert.equal(get('build-refresh').disabled, false);
-  f.receive({ ...state, busy: true, gradleLoading: true, deviceLoading: false, status: 'Gradle :app:installDebug' });
+  f.receive({ ...state, activeAction: 'run', busy: true, gradleLoading: true, deviceLoading: false, status: 'Gradle :app:installDebug' });
   assert.equal(get('build-project-loading').hidden, false);
   assert.equal(get('build-target-loading').hidden, false);
   assert.equal(get('build-device-loading').hidden, true);
@@ -101,7 +127,7 @@ test('build panel UI renders safe options and routes all commands', () => {
   assert.equal(get('build-logcat').disabled, false);
   get('build-run').onclick();
   assert.equal(f.sent.at(-1).action, 'stop');
-  f.receive({ ...state, busy: false, running: true });
+  f.receive({ ...state, activeAction: 'run', busy: false, running: true });
   assert.match(get('build-run-icon').className, /debug-pause/);
   get('build-run').onclick();
   assert.equal(f.sent.at(-1).action, 'stop');
@@ -114,6 +140,28 @@ test('build panel UI renders safe options and routes all commands', () => {
   f.receive({ type: 'buildState', targets: [], projects: [], busy: false });
   assert.equal(get('build-target').children[1].textContent, 'No Android variants');
   assert.equal(get('build-run').disabled, true);
+});
+
+/** 功能点：停止中的按钮状态；受影响对象：共享构建栏；复现路径：Starting转为资源清理快照；测试范围：无设备、重复停止及禁止新启动；执行入口：本文件及真实浏览器回归；预期结果：停止按钮始终可用且只发送stop；判据：按钮和消息断言全部通过。 */
+test('stopping state keeps only stop available without restoring running status', () => {
+  for (const logcat of [false, true]) {
+    const f = fixture(true, logcat);
+    f.receive({ type: 'buildState', activeAction: logcat ? undefined : 'debugLaunch', busy: false, running: false, stopping: true, projects: [], targets: [], status: 'Stopping; resources are being released' });
+    assert.equal(f.get('build-run').disabled, !logcat);
+    assert.equal(f.get('build-run')['aria-label'], logcat ? 'Stop task or app' : 'Run app');
+    assert.equal(f.get('build-run-icon').className, logcat ? 'codicon codicon-debug-pause' : 'codicon codicon-play');
+    if (logcat) {
+      assert.equal(f.get('build-run-mode').disabled, true);
+      f.get('build-run').onclick(); f.get('build-run').onclick();
+    } else {
+      assert.equal(f.get('build-debug-mode').disabled, true);
+      assert.equal(f.get('build-debug-launch').disabled, false);
+      assert.equal(f.get('build-debug-attach').disabled, true);
+      assert.equal(f.get('build-debug-launch-icon').className, 'codicon codicon-debug-pause');
+      f.get('build-debug-launch').onclick(); f.get('build-debug-launch').onclick();
+    }
+    assert.deepEqual(f.sent.slice(-2).map(message => message.action), ['stop', 'stop']);
+  }
 });
 
 // 缓存内容回显不代表真实查询完成；busy快照持续转圈并锁定操作，只有正式结果才解除loading。
@@ -149,9 +197,6 @@ test('Logcat build panel shares controls without Device Tools-only nodes', () =>
   f.receive({ type: 'devices', serial: 'phone' });
   assert.equal(get('build-run').disabled, false);
   assert.equal(get('build-run-icon').className, 'codicon codicon-debug-alt');
-  for (const [id, action] of [['build-run-mode', 'runMode']]) {
-    get(id).onchange(); assert.equal(f.sent.at(-1).action, action); assert.equal(f.sent.at(-1).value, get(id).value);
-  }
   get('build-run').onclick(); assert.equal(f.sent.at(-1).action, 'run');
   for (const phase of [{ busy: true }, { running: true }]) {
     f.receive({ ...state, ...phase });
@@ -160,7 +205,7 @@ test('Logcat build panel shares controls without Device Tools-only nodes', () =>
     get('build-run').onclick(); assert.equal(f.sent.at(-1).action, 'stop');
   }
   f.receive({ ...state, status: 'Stopped', error: 'Gradle failed' });
-  assert.equal(get('build-run-mode').disabled, false);
+  assert.equal(get('build-run-mode')?.disabled ?? false, false);
   assert.equal(get('build-run-icon').className, 'codicon codicon-debug-alt');
   f.receive({ type: 'buildState', targets: [], projects: [], busy: false });
   assert.equal(get('build-run').disabled, true);
@@ -211,7 +256,7 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.equal(calls.at(-1)[0], 'android-ide.pairDevice');
   view.publishBuildState({ type: 'buildState', status: 'Ready' });
   assert.equal(calls.at(-1).status, 'Ready');
-  for (const id of ['build-project', 'build-target', 'build-run-mode', 'build-run', 'build-install', 'build-status', 'build-project-loading', 'build-target-loading', 'build-device-loading']) assert.ok(webview.html.includes('id="' + id + '"'));
+  for (const id of ['build-project', 'build-target', 'build-run', 'build-install', 'build-status', 'build-project-loading', 'build-target-loading', 'build-device-loading']) assert.ok(webview.html.includes('id="' + id + '"'));
   assert.ok(webview.html.includes('build-panel.js'));
   const output = webview.html.indexOf('id="build-output"'), logcat = webview.html.indexOf('id="build-logcat"'), mirror = webview.html.indexOf('id="build-mirror"');
   assert.ok(mirror < output && output < logcat);
@@ -231,10 +276,22 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.equal(js.includes("get('build-wifi')"), false);
   assert.ok(css.includes('body.mirror-hidden #wrap'));
   assert.ok(css.includes('repeat(5,minmax(16px,26px))'));
-  assert.ok(actionRow.includes('id="build-run-mode"'));
-  assert.equal(actionRow.includes('build-run-label'), false);
+  assert.ok(targetRow.includes('id="build-target"'));
+  assert.ok(targetRow.includes('id="build-run"'));
+  assert.ok(targetRow.includes('id="build-debug-mode"'));
+  assert.ok(targetRow.includes('value="dual">Dual (Jvm + Native)'));
+  assert.ok(targetRow.includes('value="jvm">Jvm Only'));
+  assert.ok(targetRow.includes('value="native">Native Only'));
+  assert.ok(targetRow.includes('class="build-debug-actions-separator"'));
+  assert.ok(targetRow.includes('id="build-debug-launch-icon" class="codicon codicon-debug"'));
+  assert.ok(targetRow.includes('id="build-debug-attach-image" class="build-debug-attach-image"'));
+  const attachSvg = fs.readFileSync(path.join(__dirname, '../media/icons/debug-attach.svg'), 'utf8');
+  assert.match(attachSvg, /viewBox="4 3 32 32"/);
+  assert.match(attachSvg, /fill="currentColor"/);
+  assert.match(attachSvg, /<path fill-opacity=/);
+  assert.doesNotMatch(attachSvg, /<image|base64|<rect/);
   const buttons = [...actionRow.matchAll(/<button id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(buttons, ['build-run', 'build-build', 'build-install', 'build-refresh', 'build-output', 'build-logcat']);
+  assert.deepEqual(buttons, ['build-build', 'build-install', 'build-refresh', 'build-output', 'build-logcat']);
   assert.equal(webview.html.includes('build-profiler'), false);
   assert.ok(webview.html.includes('class="build-view-separator"'));
   assert.ok(webview.html.includes('class="build-view-modes"'));
