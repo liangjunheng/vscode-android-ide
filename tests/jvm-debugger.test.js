@@ -1,329 +1,219 @@
+/**
+ * 功能点：JVM 真实引擎注册、参数准备与只读协议诊断。
+ * 受影响对象：registerJvmDebugger、registerJvmDiagnostics、findJava、android-jvm descriptor、扩展设置与会话日志。
+ * 复现路径：Node>=22，VM 加载真实源码，mock vscode/fs/findJava；构造准备完成的 Launch/Attach 会话。
+ * 测试范围：唯一 factory、真实 executable 参数、配置优先级、独立日志、缺失 JAR、非法类型、原始错误与只读 trace；保留 JDK 发现回归。
+ * 执行入口：node --test tests/jvm-debugger.test.js；本任务仅编写，不执行。
+ * 预期结果：真实 JAR 直接处理 DAP，无 provider、代理、设备调用或子会话，诊断不改消息且保留连接错误。
+ * 判据：descriptor、设置、原始错误、日志和 JDK 发现全部符合断言；不支持的宿主或模块调用立即失败。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { EventEmitter } = require('node:events');
-const { PassThrough } = require('node:stream');
 const { transformSync } = require('esbuild');
 
-/** 功能点：Android JVM 会话接入 Coordinator。
- * 受影响对象：JvmConfigurationProvider、AndroidJvmAdapter、JvmAdapterFactory。
- * 复现路径：Node>=22，使用可控 stdio 子进程和真实 Coordinator facade，发送 Attach/Launch/关闭请求。
- * 测试范围：设备选择、动态/外部/父端口、取消、异常、DAP 帧及资源回收。
- * 执行入口：npm test；定向 node --test tests/jvm-debugger.test.js。
- * 预期结果：只申请自有租约、取消不启动后端、先关闭 JAR 再释放租约。
- * 判据：真实函数的协议输出、错误及释放顺序与断言全部一致。 */
-function fixture() {
-  const f = { calls: [], errors: [], registrations: [], devices: [{ serial: 'phone', state: 'device' }], exists: true };
-  class Emitter {
-    listeners = new Set();
-    event = listener => { this.listeners.add(listener); return { dispose: () => this.listeners.delete(listener) }; };
-    fire(message) { for (const listener of this.listeners) listener(message); }
-    dispose() { this.listeners.clear(); }
-  }
-  const disposable = () => ({ dispose() {} });
+/** 功能：隔离加载真实入口；输入设置及失败条件；输出注册记录、文件操作和可调用 factory，不提供设备 API。 */
+function fixture(options = {}) {
+  const f = { lines: [], shown: [], registrations: [], trackers: [], settings: [], reads: [], disposed: [], homes: [], checked: [], directories: [], values: options.settings ?? {} };
+  const output = { appendLine: line => f.lines.push(line), show: value => f.shown.push(value), dispose: () => f.disposed.push('output') };
+  const uri = fsPath => ({ fsPath });
   const vscode = {
-    EventEmitter: Emitter,
-    workspace: { isTrusted: true, getConfiguration: section => { assert.equal(section, 'android-ide.jvmDebugger'); return { get: (key, fallback) => fallback }; } },
-    window: { createOutputChannel: () => ({ appendLine() {}, dispose() {}, show() {} }), showQuickPick: async items => f.cancel ? undefined : items[0], showErrorMessage: message => f.errors.push(message) },
-    DebugConfigurationProviderTriggerKind: { Dynamic: 2 },
-    DebugAdapterExecutable: class { constructor(command, args) { Object.assign(this, { command, args }); } },
-    DebugAdapterInlineImplementation: class { constructor(implementation) { this.implementation = implementation; } },
+    Uri: { joinPath: (base, ...parts) => uri(path.join(base.fsPath, ...parts)) },
+    DebugAdapterExecutable: class {
+      /** 功能：记录真实 descriptor 构造参数；输入 Java 与参数；输出可断言的 executable。 */
+      constructor(command, args) { this.command = command; this.args = Array.from(args); }
+    },
+    window: { createOutputChannel(name) { assert.equal(name, 'Android Kotlin/Java Debugger'); return output; } },
+    workspace: { getConfiguration(section, folder) {
+      f.settings.push([section, folder]);
+      return { get(key, fallback) { f.reads.push(key); return Object.hasOwn(f.values, key) ? f.values[key] : fallback; } };
+    } },
     debug: {
-      registerDebugAdapterTrackerFactory(type) { assert.ok(['android-jvm', 'android-jvm'].includes(type)); return disposable(); },
-      registerDebugAdapterDescriptorFactory(type, factory) { f.registrations.push(['factory', type, factory]); return disposable(); },
-      registerDebugConfigurationProvider(type, provider, kind) { f.registrations.push(['provider', type, provider, kind]); return disposable(); },
+      registerDebugAdapterDescriptorFactory(type, factory) { f.registrations.push([type, factory]); return { dispose: () => f.disposed.push('descriptor') }; },
+      registerDebugAdapterTrackerFactory(type, factory) { f.trackers.push([type, factory]); return { dispose: () => f.disposed.push('tracker') }; },
     },
   };
-  const configModule = { exports: {} };
-  vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/index.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module: configModule, exports: configModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? { omitAuto: config => ({ ...config }) } : require(id) });
-  const module = { exports: {} };
-  const coordinatorModule = { exports: {} };
-  class CoordinatorClient {
-    onEvent(listener) { (f.listeners ??= new Set()).add(listener); return { dispose: () => f.listeners.delete(listener) }; }
-    async command(operation, args, signal) {
-      signal?.throwIfAborted();
-      f.calls.push({ operation, args: Array.from(args), signal });
-      if (f.command) return f.command(operation, args, signal);
-      if (operation === 'devices') return f.devices.map(d => d.serial + '\t' + d.state).join('\n');
-      if (operation === 'clients') return '42\tcom.example.app';
-      if (operation === 'launch') return '42';
-      if (operation === 'claim') return '19\t4567';
-      return '';
-    }
-    async dispose() {}
-  }
-  vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/coordinator/androidCoordinator.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module: coordinatorModule, exports: coordinatorModule.exports, require: () => ({ AndroidDebugCoordinatorClient: CoordinatorClient }), AbortController, AggregateError });
-  f.coordinator = new coordinatorModule.exports.AndroidCoordinator('/extension');
-  const dependencies = {
-    '../coordinator/androidCoordinator': coordinatorModule.exports,
+  const deps = {
     vscode,
-    './autoConfig': { omitAuto: config => ({ ...config }) },
-    '../jdwpForward': { createJdwpForward: async (adb, serial, pid, requestedPort, signal) => {
-      if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) throw new Error('Invalid Android JVM port; use 0 for a dynamic port');
-      const output = await dependencies['../native-debugger/nativeTarget'].adbExec(adb, serial, ['forward', `tcp:${requestedPort}`, `jdwp:${pid}`], signal);
-      const port = requestedPort || Number(output.trim());
-      return { port, cleanup: async () => { await dependencies['../native-debugger/nativeTarget'].adbExec(adb, serial, ['forward', '--remove', `tcp:${port}`]); } };
-    } },
-    '../autoConfig': { omitAuto: config => ({ ...config }) },
-    './java': { findJava: async home => { f.javaHome = home; return { java: '/jdk/bin/java', version: 21 }; } },
-    '../index': configModule.exports,
-    '../../sdk': { adbPath: () => '/sdk/adb', listDevices: async () => f.devices },
-    '../../projectLocalConfig': { readProjectLocalConfig: () => ({}) },
-    '../native-debugger/nativeTarget': {
-      resolveLauncherActivity: async () => '.MainActivity',
-      async adbExec(adb, serial, args, signal) {
-        f.calls.push({ adb, serial, args: Array.from(args), signal });
-        if (f.adb) return f.adb(args, signal);
-        if (args[0] === 'jdwp') return '42\n';
-        if (args[0] === 'shell' && args[1]?.includes('__ANDROID_DEBUG_PID__')) return 'Starting: Intent { cmp=com.example.app/.MainActivity }\n__ANDROID_DEBUG_PID__\n42\n';
-        return args[0] === 'forward' ? args[1] === '--remove' ? '' : '4567' : args.includes('pidof') ? '42' : 'Status: ok';
+    fs: {
+      existsSync(file) { f.checked.push(file); return options.jarExists !== false; },
+      mkdirSync(directory, flags) {
+        f.directories.push([directory, flags.recursive]);
+        if (options.directoryError) throw options.directoryError;
       },
     },
-    'node:fs': { ...fs, existsSync: () => f.exists, mkdirSync: () => undefined },
-    'node:child_process': { spawn: () => f.child },
+    './java': { async findJava(home) {
+      f.homes.push(home);
+      if (options.javaError) throw options.javaError;
+      return { java: path.join('/jdk with spaces', 'bin', 'java'), version: 21, source: 'mock' };
+    } },
   };
-  vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/jvm-debugger/adapter.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code,
-    { module, exports: module.exports, require: id => dependencies[id] ?? require(id), Buffer, AbortController, AggregateError });
-  f.api = module.exports; f.vscode = vscode;
-  return f;
+  const module = { exports: {} };
+  vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/android-debugger/jvm-debugger/adapter.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code,
+    { module, exports: module.exports, require(id) { assert.ok(Object.hasOwn(deps, id), '禁止额外依赖：' + id); return deps[id]; } });
+  const context = { subscriptions: [], extensionUri: uri('/extension with spaces'), logUri: uri('/session logs') };
+  if (options.diagnosticsOnly) module.exports.registerJvmDiagnostics(context);
+  else module.exports.registerJvmDebugger(context);
+  return Object.assign(f, { api: module.exports, context, vscode, factory: f.registrations[0]?.[1], trackerFactory: f.trackers[0][1] });
 }
 
-/** 模拟stdio子进程，只替换OS边界；保留真实Content-Length打包解析与关闭事件顺序。 */
-function childFixture(f, config = { android: true, request: 'launch', serial: 'phone', packageName: 'com.example.app' }) {
-  const child = new EventEmitter();
-  Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
-  child.kill = () => { f.kills = (f.kills ?? 0) + 1; child.emit('close', 0); return true; };
-  const adapter = new f.api.AndroidJvmAdapter(child, config, error => f.errors.push(error), f.coordinator);
-  const output = [], writes = [];
-  adapter.onDidSendMessage(message => output.push(message));
-  child.stdin.on('data', chunk => writes.push(Buffer.from(chunk)));
-  return { adapter, child, output, writes };
+/** 功能：构造已完成配置准备的引擎会话；输入覆盖配置与会话 ID；输出不含设备准备行为的会话。 */
+function session(configuration = {}, id = 'session-1') {
+  return { id, type: 'android-jvm', workspaceFolder: { uri: { fsPath: '/project' } }, configuration: { type: 'android-jvm', name: 'JVM', request: 'attach', hostName: '127.0.0.1', port: 8700, ...configuration } };
 }
 
-/** 生成UTF8 DAP帧；分片/合并用例检查Content-Length按字节计算。 */
-function frame(message) {
-  const body = Buffer.from(JSON.stringify(message));
-  return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
-}
+// 功能：覆盖 Launch/Attach 入口；输入已准备配置；输出唯一真实 executable，不注册 provider 或子会话。
+test('JVM registers one real executable factory and one read-only tracker for launch and attach', async () => {
+  const f = fixture();
+  assert.equal(f.registrations.length, 1); assert.equal(f.registrations[0][0], 'android-jvm');
+  assert.equal(f.trackers.length, 1); assert.equal(f.trackers[0][0], 'android-jvm');
+  assert.equal(f.api.JVM_DEBUG_TYPE, 'android-jvm');
+  for (const request of ['launch', 'attach']) {
+    const input = session({ request }, request);
+    const before = JSON.stringify(input);
+    const descriptor = await f.factory.createDebugAdapterDescriptor(input);
+    assert.ok(descriptor instanceof f.vscode.DebugAdapterExecutable);
+    assert.equal(descriptor.command, path.join('/jdk with spaces', 'bin', 'java'));
+    assert.deepEqual(descriptor.args, ['-Xmx512m', '-jar', path.join('/extension with spaces', 'resources', 'jvm-debugger', 'kotlin-debug-adapter.jar'), '--log-file', path.join('/session logs', `jvm-${request}.log`), '--log-level', 'INFO']);
+    assert.equal(JSON.stringify(input), before);
+    assert.deepEqual(f.settings.at(-1), ['android-ide.jvmDebugger', input.workspaceFolder.uri]);
+  }
+  assert.deepEqual(f.homes, [undefined, undefined]);
+  assert.deepEqual(f.directories, [['/session logs', true], ['/session logs', true]]);
+  assert.equal(f.context.subscriptions.length, 3);
+  for (const disposable of f.context.subscriptions) disposable.dispose();
+  assert.deepEqual(f.disposed, ['output', 'tracker', 'descriptor']);
+});
 
-/** 等待真实生产异步操作完成，不以延时或轮询判断结果。 */
-async function started(adapter) { await adapter.startup; }
+// 功能：读取所属目录设置；输入带空格参数与 JDK；输出未经 shell 拼接的准确参数及独立会话日志。
+test('JVM executable respects workspace settings and isolates session log files', async () => {
+  const settings = { javaHome: '/custom jdk', adapterJvmArgs: ['-Xmx1g', '-Dlabel=hello world'], logLevel: 'WARN' };
+  const f = fixture({ settings });
+  const first = await f.factory.createDebugAdapterDescriptor(session({}, 'one'));
+  const second = await f.factory.createDebugAdapterDescriptor(session({}, 'two'));
+  assert.deepEqual(first.args.slice(0, 2), settings.adapterJvmArgs);
+  assert.equal(first.args.at(-1), 'WARN');
+  assert.equal(first.args[first.args.indexOf('--log-file') + 1], path.join(f.context.logUri.fsPath, 'jvm-one.log'));
+  assert.equal(second.args[second.args.indexOf('--log-file') + 1], path.join(f.context.logUri.fsPath, 'jvm-two.log'));
+  assert.deepEqual(f.homes, ['/custom jdk', '/custom jdk']);
+  assert.deepEqual(settings.adapterJvmArgs, ['-Xmx1g', '-Dlabel=hello world']);
+});
 
-/** 与已安装Kotlin插件共存时不得重复注册其设置；运行时读取由fixture严格断言新命名空间。 */
-test('JVM settings use an extension-owned namespace without upstream collisions', () => {
+// 功能：会话参数显式覆盖设置；输入空数组和 TRACE；输出无默认 JVM 参数且不修改用户数组。
+test('JVM session arguments override settings including an explicitly empty array', async () => {
+  const f = fixture({ settings: { adapterJvmArgs: ['-Xmx1g'], logLevel: 'WARN' } });
+  const args = Object.freeze([]);
+  const descriptor = await f.factory.createDebugAdapterDescriptor(session({ adapterJvmArgs: args, logLevel: 'TRACE' }));
+  assert.equal(descriptor.args[0], '-jar'); assert.equal(descriptor.args.at(-1), 'TRACE');
+  const custom = Object.freeze(['-ea']);
+  const next = await f.factory.createDebugAdapterDescriptor(session({ adapterJvmArgs: custom }));
+  assert.equal(next.args[0], '-ea'); assert.equal(next.args.at(-1), 'WARN');
+  assert.deepEqual(Array.from(custom), ['-ea']);
+});
+
+// 功能：拒绝缺失 JAR；输入不存在的内置路径；输出明确路径错误且不查找 JDK 或创建日志目录。
+test('JVM rejects a missing bundled JAR before runtime preparation', async () => {
+  const f = fixture({ jarExists: false });
+  await assert.rejects(f.factory.createDebugAdapterDescriptor(session()), /JAR 不存在/);
+  assert.deepEqual(f.checked, [path.join('/extension with spaces', 'resources', 'jvm-debugger', 'kotlin-debug-adapter.jar')]);
+  assert.deepEqual(f.homes, []); assert.deepEqual(f.directories, []);
+});
+
+// 功能：校验设置和会话参数；输入非法数组、日志级别与 javaHome；输出类型错误且无准备副作用。
+test('JVM rejects malformed user arguments and settings without preparing the runtime', async () => {
+  for (const value of ['-Xmx1g', null, 1, {}, [1], ['-ea', null]]) {
+    for (const source of ['settings', 'session']) {
+      const f = fixture({ settings: source === 'settings' ? { adapterJvmArgs: value } : {} });
+      await assert.rejects(f.factory.createDebugAdapterDescriptor(session(source === 'session' ? { adapterJvmArgs: value } : {})), /adapterJvmArgs 必须是字符串数组/);
+      assert.deepEqual(f.homes, []); assert.deepEqual(f.checked, []); assert.deepEqual(f.directories, []);
+    }
+  }
+  for (const value of [null, 1, [], 'debug', 'VERBOSE', '']) {
+    for (const source of ['settings', 'session']) {
+      const f = fixture({ settings: source === 'settings' ? { logLevel: value } : {} });
+      await assert.rejects(f.factory.createDebugAdapterDescriptor(session(source === 'session' ? { logLevel: value } : {})), /logLevel 必须是/);
+      assert.deepEqual(f.homes, []); assert.deepEqual(f.directories, []);
+    }
+  }
+  for (const value of [null, 17, [], {}]) {
+    const f = fixture({ settings: { javaHome: value } });
+    await assert.rejects(f.factory.createDebugAdapterDescriptor(session()), /javaHome 必须是字符串/);
+    assert.deepEqual(f.homes, []);
+  }
+});
+
+// 功能：保留准备失败原始对象；输入 JDK 与目录错误；输出同一错误而非包装、吞掉或替换。
+test('JVM preserves original runtime and log directory errors', async () => {
+  for (const key of ['javaError', 'directoryError']) {
+    const error = Object.assign(new Error('original failure'), { code: 'EACCES' });
+    const f = fixture({ [key]: error });
+    await assert.rejects(f.factory.createDebugAdapterDescriptor(session()), actual => actual === error);
+    assert.deepEqual(f.lines, []);
+  }
+});
+
+// 功能：默认保护协议内容；输入冻结的双向消息；输出零协议日志且不改变报文。
+test('JVM diagnostics are read-only and default to private protocol tracing', () => {
+  const f = fixture(), input = session();
+  const tracker = f.trackerFactory.createDebugAdapterTracker(input);
+  const request = Object.freeze({ type: 'request', seq: 1, command: 'evaluate', arguments: Object.freeze({ expression: 'secret' }) });
+  const response = Object.freeze({ type: 'response', seq: 2, request_seq: 1, command: 'evaluate', success: true });
+  const before = JSON.stringify([request, response]);
+  tracker.onWillReceiveMessage(request); tracker.onDidSendMessage(response); tracker.onExit(0, undefined);
+  assert.equal(JSON.stringify([request, response]), before);
+  assert.deepEqual(f.lines, []); assert.deepEqual(f.shown, []);
+  assert.deepEqual(f.settings, [['android-ide.jvmDebugger', input.workspaceFolder.uri]]);
+});
+
+// 功能：显式追踪保留连接失败报文；输入冻结的失败响应与反向请求；输出原始 JSON 和错误，不修改响应。
+test('JVM diagnostics log both directions and preserve original connection errors', () => {
+  const f = fixture({ settings: { traceProtocol: true } }), tracker = f.trackerFactory.createDebugAdapterTracker(session());
+  const request = Object.freeze({ type: 'request', seq: 3, command: 'runInTerminal', arguments: Object.freeze({ args: Object.freeze(['中文']) }) });
+  const response = Object.freeze({ type: 'response', seq: 4, request_seq: 2, command: 'attach', success: false, message: 'java.net.ConnectException: Connection refused', body: Object.freeze({ error: Object.freeze({ id: 42, format: 'original JVM connection error' }) }) });
+  const before = JSON.stringify([request, response]);
+  assert.equal(tracker.onWillReceiveMessage(request), undefined);
+  assert.equal(tracker.onDidSendMessage(response), undefined);
+  tracker.onError(new Error('transport failed')); tracker.onExit(2, 'SIGTERM');
+  assert.equal(JSON.stringify([request, response]), before);
+  assert.deepEqual(f.lines, ['--> ' + JSON.stringify(request), '<-- ' + JSON.stringify(response), 'Adapter error: transport failed', 'Adapter exited: 2 SIGTERM']);
+  assert.deepEqual(f.shown, [true]);
+  assert.equal(typeof tracker.onDidStartDebugSession, 'undefined');
+});
+
+// 功能：隔离追踪开关快照；输入不同会话创建时的配置；输出只记录启用会话。
+test('JVM tracing choice belongs to each session', () => {
+  const f = fixture(), silent = f.trackerFactory.createDebugAdapterTracker(session());
+  f.values.traceProtocol = true;
+  const traced = f.trackerFactory.createDebugAdapterTracker(session({}, 'second'));
+  silent.onDidSendMessage({ seq: 1 }); traced.onDidSendMessage({ seq: 2 });
+  assert.deepEqual(f.lines, ['<-- {"seq":2}']);
+});
+
+// 功能：保留纯日志入口；输入仅诊断注册；输出零 descriptor factory、零文件操作及零 JDK 查询。
+test('JVM diagnostics can still be registered without registering an engine', () => {
+  const f = fixture({ diagnosticsOnly: true });
+  assert.equal(f.registrations.length, 0); assert.equal(f.trackers.length, 1);
+  assert.equal(f.context.subscriptions.length, 2);
+  assert.deepEqual(f.checked, []); assert.deepEqual(f.directories, []); assert.deepEqual(f.homes, []);
+});
+
+// 功能：验证扩展自有命名空间；输入公开贡献及现有源码；输出无上游设置冲突。
+test('JVM settings use extension-owned namespace at the engine boundary', () => {
   const properties = require('../package.json').contributes.configuration.properties;
   assert.equal(Object.keys(properties).some(key => key.startsWith('kotlinDebugger.')), false);
-  for (const key of ['javaHome', 'adapterJvmArgs', 'traceProtocol', 'logLevel']) assert.ok(Object.hasOwn(properties, 'android-ide.jvmDebugger.' + key), key);
-  for (const file of ['src/android-debugger/jvm-debugger/java.ts', 'src/android-debugger/jvm-debugger/adapter.ts', 'src/android-debugger/jvm-debugger/upstream/adapter/src/main/kotlin/dev/ktdebug/Main.kt']) {
-    const source = fs.readFileSync(file, 'utf8');
+  for (const key of ['javaHome', 'adapterJvmArgs', 'traceProtocol', 'logLevel']) assert.ok(Object.hasOwn(properties, 'android-ide.jvmDebugger.' + key));
+  for (const file of ['src/android-debugger/jvm-debugger/java.ts', 'src/android-debugger/jvm-debugger/adapter.ts']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     assert.equal(source.includes('kotlinDebugger'), false, file);
     assert.ok(source.includes('android-ide.jvmDebugger'), file);
   }
 });
 
-test('JVM built-in providers are isolated and registered as initial plus dynamic', async () => {
-  const f = fixture();
-  const context = { subscriptions: [] };
-  f.api.registerJvmDebugger(context, undefined, f.coordinator);
-  assert.ok(f.registrations.filter(row => row[0] === 'factory' && row[1] === 'android-jvm').length === 1); assert.ok(f.registrations.filter(row => row[0] === 'provider' && row[1] === 'android-jvm').length >= 2);
-  assert.ok(f.registrations.some(row => row[0] === 'provider' && row[3] === 2));
-  const provider = f.registrations.find(row => row[0] === 'provider' && row[1] === 'android-jvm')[2];
-  await assert.rejects(provider.resolveDebugConfiguration(undefined, { request: 'attach', port: 5005 }), /android: true/);
-  const androidProvider = provider;
-  assert.deepEqual(Array.from(androidProvider.provideDebugConfigurations()), []);
-  assert.deepEqual(Array.from(provider.provideDebugConfigurations()), []);
-  assert.equal(context.subscriptions.length, 6);
-});
-
-test('JVM provider supports upstream launch attach defaults and rejects invalid boundaries', async () => {
-  const f = fixture(), provider = new f.api.JvmConfigurationProvider();
-  const folder = { uri: { fsPath: path.resolve('sample') } };
-  const config = await provider.resolveDebugConfiguration(folder, { request: 'attach', name: 'JVM', port: 5005, sourcePaths: ['src'] });
-  assert.equal(config.port, 5005);
-  assert.equal(config.sourcePaths[0], path.join(folder.uri.fsPath, 'src'));
-  const defaults = await provider.resolveDebugConfiguration(undefined, { type: 'android-jvm', android: true, request: 'attach', serial: 'phone', packageName: 'com.example.app' }); assert.equal(defaults.serial, 'phone');
-  for (const port of [undefined, 65536, '5005', 'bad', 2.5]) await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'attach', port }), /port/);
-  await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'launch' }), /mainClass/);
-  assert.equal((await provider.resolveDebugConfiguration(folder, { request: 'launch', mainClass: 'MainKt' })).cwd, folder.uri.fsPath);
-  await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'bogus' }), /request/);
-  await assert.rejects(provider.resolveDebugConfiguration(folder, { request: 'attach', port: 5005, sourcePaths: [42] }), /sourcePaths/);
-  const roots = await provider.resolveDebugConfiguration(folder, { request: 'attach', port: 5005, androidSourceRoots: ['src/java'] });
-  assert.equal(roots.sourcePaths[0], path.join(folder.uri.fsPath, 'src/java'));
-  f.vscode.workspace.isTrusted = false; await assert.rejects(provider.resolveDebugConfiguration(folder, {}), /trusted/);
-});
-
-test('Android provider selects devices validates identity and resolves Build package lazily', async () => {
-  const f = fixture(); let reads = 0;
-  const provider = new f.api.JvmConfigurationProvider(() => { reads++; return 'com.example.app'; }, f.coordinator);
-  const input = { type: 'android-jvm', request: 'attach', name: 'Android child', android: true, target: 'select' };
-  const config = await provider.resolveDebugConfiguration(undefined, input);
-  assert.equal(config.serial, 'phone'); assert.equal(config.packageName, 'com.example.app'); assert.equal(input.serial, undefined);
-  const attach = await provider.resolveDebugConfiguration(undefined, { android: true, request: 'attach', serial: 'phone', packageName: 'com.example.app' });
-  assert.equal(attach.processId, undefined); assert.equal(reads, 1);
-  for (const value of [{ pid: 0 }, { pid: 1.5 }, { pid: 42, processId: 41 }]) await assert.rejects(provider.resolveDebugConfiguration(undefined, { android: true, request: 'attach', serial: 'phone', ...value }), /process|requires/);
-  const noPackage = new f.api.JvmConfigurationProvider(() => undefined);
-  await assert.rejects(noPackage.resolveDebugConfiguration(undefined, { android: true, request: 'attach', serial: 'phone' }), /process|requires/);
-  f.cancel = true; assert.equal(await provider.resolveDebugConfiguration(undefined, input), undefined);
-  const broken = new f.api.JvmConfigurationProvider(() => { throw new Error('model failed'); });
-  await assert.rejects(broken.resolveDebugConfiguration(undefined, input), /model failed/);
-  const exactPid = await broken.resolveDebugConfiguration(undefined, { type: 'android-jvm', request: 'attach', name: 'PID', android: true, serial: 'phone', pid: 42, apkPath: '/missing.apk' });
-  assert.equal(exactPid.pid, 42);
-});
-
-/**
- * 功能点：直接android-jvm配置的显式JDWP端口和任务由用户管理。
- * 受影响对象：AndroidJvmAdapter.start、ADB forward所有权、直接Attach与Launch配置。
- * 复现路径：配置android-jvm，填写preLaunchTask、非零port和hostName，分别发送Attach与Launch请求。
- * 测试范围：覆盖Attach、Launch、旧进程停止、后端端口/主机透传和关闭时不删除用户forward。
- * 执行入口：node --test tests/jvm-debugger.test.js。
- * 预期结果：适配器连接用户端口，不创建或移除ADB forward；Launch先停止旧包。
- * 判据：没有forward命令且后端Attach参数等于用户hostName与port。
- */
-test('Android explicit task and port remain user-managed for attach and launch', async () => {
-  for (const command of ['attach', 'launch']) {
-    const f = fixture();
-    const config = command === 'attach'
-      ? { android: true, serial: 'phone', pid: 42, packageName: 'com.example.app', preLaunchTask: 'prepare-jdwp', port: 5005, hostName: 'remote.example' }
-      : { android: true, serial: 'phone', packageName: 'com.example.app', preLaunchTask: 'prepare-jdwp', port: 5005, hostName: 'remote.example' };
-    const x = childFixture(f, config);
-    x.adapter.handleMessage({ type: 'request', seq: 7, command, arguments: {} });
-    await started(x.adapter);
-    assert.equal(f.calls.some(call => call.args[0] === 'forward'), false, command);
-    const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
-    assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 5005); assert.equal(sent.arguments.hostName, 'remote.example');
-    if (command === 'launch') assert.deepEqual(f.calls.map(call => [call.operation, ...call.args]), [['launch', 'phone', 'com.example.app', '']]);
-    await x.adapter.close();
-    assert.equal(f.calls.some(call => call.args[0] === 'forward'), false, command);
-  }
-});
-
-/**
- * 功能点：Android JVM端口仅接受数字，缺省或0动态分配，字符串auto必须失败。
- * 受影响对象：AndroidJvmAdapter.start、JDWP forward创建和端口输入校验。
- * 复现路径：直接android-jvm Attach/Launch分别配置port为auto或字符串数字。
- * 测试范围：覆盖两种请求、非法字符串拒绝和无forward副作用。
- * 执行入口：node --test tests/jvm-debugger.test.js。
- * 预期结果：返回DAP失败响应且不创建ADB forward。
- * 判据：错误包含端口校验信息，ADB调用不包含forward。
- */
-test('Android attach and launch reject nonnumeric port values before ADB', async () => {
-  for (const command of ['attach', 'launch']) for (const port of ['auto', '5005']) {
-    const f = fixture();
-    const config = command === 'attach'
-      ? { android: true, serial: 'phone', pid: 42, packageName: 'com.example.app', port }
-      : { android: true, serial: 'phone', packageName: 'com.example.app', port };
-    const x = childFixture(f, config);
-    x.adapter.handleMessage({ type: 'request', seq: 7, command, arguments: {} });
-    await started(x.adapter);
-    assert.equal(x.output[0].success, false, command + ':' + port); assert.match(x.output[0].message, /Invalid Android JVM port/);
-    assert.equal(f.calls.length, 0, command + ':' + port);
-  }
-  for (const internalPort of ['auto', '5005']) {
-    const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', packageName: 'com.example.app', androidJdwpPort: internalPort });
-    x.adapter.handleMessage({ type: 'request', seq: 8, command: 'attach', arguments: {} }); await started(x.adapter);
-    assert.equal(x.output[0].success, false, internalPort); assert.match(x.output[0].message, /Invalid Android JVM port/); assert.equal(f.calls.length, 0, internalPort);
-  }
-});
-
-/** Attach-only内置模式只查询现有进程，不安装/启动APK，并使用动态forward端口。 */
-test('Android attach-only resolves an existing package PID without installing or launching', async () => {
-  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', packageName: 'com.example.app' });
-  x.adapter.handleMessage({ type: 'request', seq: 7, command: 'attach', arguments: {} }); await started(x.adapter);
-  assert.deepEqual(f.calls.map(call => [call.operation, ...call.args]), [['clients', 'phone'], ['claim', 'phone', '42']]);
-  const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
-  assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 4567);
-  await x.adapter.close(); assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']);
-});
-
-test('Android launch forwards exact PID and preserves backend DAP response and UTF8 frames', async () => {
-  const f = fixture(), x = childFixture(f);
-  x.adapter.handleMessage({ type: 'request', seq: 7, command: 'launch', arguments: {} });
-  await started(x.adapter);
-  assert.deepEqual(f.calls.map(call => [call.operation, ...call.args]), [['launch', 'phone', 'com.example.app', ''], ['claim', 'phone', '42']]);
-  const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
-  assert.equal(sent.command, 'attach'); assert.equal(sent.arguments.port, 4567);
-  const response = frame({ type: 'response', seq: 1, request_seq: 7, command: 'attach', success: true });
-  x.child.stdout.write(response.subarray(0, 9)); x.child.stdout.write(response.subarray(9));
-  assert.equal(x.output[0].command, 'launch'); assert.equal(x.output[0].success, true);
-  const event = { type: 'event', seq: 2, event: 'output', body: { output: '中文' } };
-  x.child.stdout.write(Buffer.concat([frame(event), frame({ type: 'event', seq: 3, event: 'initialized' })]));
-  assert.equal(x.output[1].body.output, '中文'); assert.equal(x.output[2].event, 'initialized');
-  const close = x.adapter.close(); assert.equal(close, x.adapter.close()); await close;
-  assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']); assert.equal(f.kills, 1);
-});
-
-test('Android attach owns forward and refuses ambiguous launch process or ADB failures', async () => {
-  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 52 });
-  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-  assert.equal(f.calls[0].operation, 'claim'); assert.deepEqual(f.calls[0].args, ['phone', '52']); await x.adapter.close();
-  for (const failure of ['ambiguous', 'adb']) {
-    const g = fixture(), y = childFixture(g);
-    g.command = async () => { throw new Error(failure === 'adb' ? 'ADB denied' : 'Expected exactly one Android Client'); };
-    y.adapter.handleMessage({ type: 'request', seq: 2, command: 'launch', arguments: {} }); await started(y.adapter);
-    assert.equal(y.output[0].success, false); assert.match(y.output[0].message, failure === 'adb' ? /ADB denied/ : /exactly one/);
-    assert.equal(y.writes.length, 0); await y.adapter.close();
-  }
-});
-
-test('Android startup cancellation after forward awaits ownership and removes only allocated port', async () => {
-  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
-  let resolveForward;
-  f.command = async operation => operation === 'claim' ? new Promise(resolve => { resolveForward = resolve; }) : '';
-  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} });
-  const closing = x.adapter.close(); resolveForward('19\t4567'); await closing;
-  assert.equal(x.output.find(message => message.request_seq === 1).success, false);
-  assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']); assert.equal(x.writes.length, 0);
-});
-
-/** 后端终止/断开都必须释放forward，终止事件只发一次且保留原body。 */
-test('Android backend termination and disconnect response close the owned JAR and forward', async () => {
-  for (const event of [true, false]) {
-    const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
-    x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-    if (!event) x.adapter.handleMessage({ type: 'request', seq: 2, command: 'disconnect', arguments: {} });
-    x.child.stdout.write(frame(event ? { type: 'event', seq: 3, event: 'terminated', body: { restart: false } } : { type: 'response', seq: 3, request_seq: 2, command: 'disconnect', success: true }));
-    await x.adapter.close(); await new Promise(resolve => setImmediate(resolve));
-    assert.equal(f.kills, 1); assert.equal(f.calls.at(-1).operation, 'release'); assert.deepEqual(f.calls.at(-1).args, ['19']);
-    assert.equal(x.output.filter(message => message.event === 'terminated').length, 1);
-    if (event) assert.equal(x.output.find(message => message.event === 'terminated').body.restart, false);
-    else assert.equal(x.output.find(message => message.request_seq === 2).success, true);
-  }
-});
-
-test('owned JDWP lease always connects to loopback even when hostName is supplied', async () => {
-  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42, hostName: 'remote.example' });
-  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-  const sent = JSON.parse(x.writes[0].subarray(x.writes[0].indexOf('\r\n\r\n') + 4));
-  assert.equal(sent.arguments.hostName, '127.0.0.1'); await x.adapter.close();
-});
-
-test('JVM child termination is delivered even if lease cleanup fails', async () => {
-  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
-  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-  f.command = async operation => { if (operation === 'release') throw new Error('release denied'); return ''; };
-  const terminated = Promise.withResolvers();
-  x.adapter.onDidSendMessage(message => { if (message.event === 'terminated') terminated.resolve(); });
-  x.child.emit('close', 0); await terminated.promise;
-  assert.equal(x.output.filter(message => message.event === 'terminated').length, 1); assert.ok(f.errors.length > 0);
-});
-
-test('Android cleanup and malformed transport errors remain visible', async () => {
-  const f = fixture(), x = childFixture(f, { android: true, serial: 'phone', pid: 42 });
-  x.adapter.handleMessage({ type: 'request', seq: 1, command: 'attach', arguments: {} }); await started(x.adapter);
-  f.command = async operation => { if (operation === 'release') throw new Error('remove denied'); return ''; };
-  await assert.rejects(x.adapter.close(), /cleanup/);
-  const g = fixture(), y = childFixture(g);
-  y.child.stdout.write(Buffer.from('Broken: 1\r\n\r\nx')); await y.adapter.close();
-  assert.match(String(g.errors[0]), /Content-Length/);
-});
-
-/** 上游JDK探测真实实现的边界回归，拒绝旧Java/JRE并验证17+/21与版本解析。 */
-test('upstream JDK discovery requires Java 17 and jdk.jdi without invoking shells', async () => {
-  const source = transformSync(fs.readFileSync('src/android-debugger/jvm-debugger/java.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code;
+// 功能：保留真实 JDK 发现边界；输入旧 Java、缺 JDI 与受支持 JDK；输出精确接受结果及缓存，不调用真实进程。
+test('JDK discovery requires Java 17 and jdk.jdi without invoking shells', async () => {
+  const source = transformSync(fs.readFileSync(path.join(__dirname, '../src/android-debugger/jvm-debugger/java.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code;
   for (const [version, jdi, accepted] of [[8, true, false], [17, false, false], [17, true, true], [21, true, true]]) {
     const module = { exports: {} }, calls = [];
     const deps = {
@@ -335,60 +225,9 @@ test('upstream JDK discovery requires Java 17 and jdk.jdi without invoking shell
     assert.equal(module.exports.parseJavaVersion('openjdk version "21.0.4"'), 21);
     assert.equal(module.exports.parseJavaVersion('not java'), 0);
     if (accepted) {
-      const runtime = await module.exports.findJava(undefined); assert.equal(runtime.version, version);
+      assert.equal((await module.exports.findJava(undefined)).version, version);
       await module.exports.findJava(undefined); assert.equal(calls.length, 2);
     } else await assert.rejects(module.exports.findJava(undefined), /No suitable JDK/);
     assert.ok(calls.every(call => call.command.endsWith(process.platform === 'win32' ? 'java.exe' : 'java')));
   }
-});
-
-/** 追踪仅记录不修改DAP，退出异常必须可见；默认不输出敏感协议内容。 */
-test('JVM tracker preserves tracing switch and surfaces adapter crashes', () => {
-  const f = fixture(), lines = []; let shown = 0;
-  const factory = new f.api.JvmTrackerFactory({ appendLine: line => lines.push(line), show: () => shown++ });
-  let tracker = factory.createDebugAdapterTracker();
-  tracker.onWillReceiveMessage({ command: 'initialize' }); assert.equal(lines.length, 0);
-  f.vscode.workspace.getConfiguration = () => ({ get: () => true });
-  tracker = factory.createDebugAdapterTracker();
-  tracker.onWillReceiveMessage({ command: 'threads' }); tracker.onDidSendMessage({ body: { threads: [] } });
-  tracker.onError(new Error('transport failed')); tracker.onExit(2, undefined);
-  assert.match(lines[0], /threads/); assert.match(lines[1], /threads/); assert.match(lines[2], /transport failed/); assert.equal(shown, 1);
-});
-
-/** 扩展停用释放每个Android子进程，不能只释放注册句柄；两个会话资源均须结算。 */
-test('JVM factory owns Android adapter processes across extension disposal', async () => {
-  const f = fixture(), factory = new f.api.JvmAdapterFactory({ asAbsolutePath: value => '/extension/' + value });
-  const children = [];
-  for (const id of ['first', 'second']) {
-    const child = new EventEmitter();
-    Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
-    child.kill = () => { child.killed = true; child.emit('close', 0); return true; };
-    children.push(child); f.child = child;
-    const descriptor = await factory.createDebugAdapterDescriptor({ id, configuration: { android: true, serial: 'phone', pid: 42 } });
-    assert.equal(typeof descriptor.implementation.handleMessage, 'function');
-  }
-  await factory.dispose();
-  assert.ok(children.every(child => child.killed));
-  assert.equal(f.errors.length, 0);
-});
-
-test('JVM factory uses bundled JAR with upstream arguments and rejects missing JAR', async () => {
-  const f = fixture(), context = { asAbsolutePath: value => '/extension/' + value };
-  const factory = new f.api.JvmAdapterFactory(context);
-  const session = { id: 'session', configuration: {}, workspaceFolder: undefined };
-  const descriptor = await factory.createDebugAdapterDescriptor(session);
-  assert.equal(descriptor.command, '/jdk/bin/java');
-  assert.equal(descriptor.args[0], '-Xmx512m'); assert.equal(descriptor.args[1], '-jar');
-  const autoTemplate = { type: 'android-debug', mode: 'java', java: { adapterJvmArgs: [] } }; assert.deepEqual(autoTemplate.java.adapterJvmArgs, []);
-  assert.equal(descriptor.args[2], '/extension/resources/jvm-debugger/kotlin-debug-adapter.jar');
-  assert.ok(descriptor.args.includes('--log-file'));
-  f.vscode.workspace.getConfiguration = section => {
-    assert.equal(section, 'android-ide.jvmDebugger');
-    return { get: (key, fallback) => ({ javaHome: '/custom-jdk', adapterJvmArgs: ['-Xmx768m'], logLevel: 'DEBUG' })[key] ?? fallback };
-  };
-  const configured = await factory.createDebugAdapterDescriptor(session);
-  assert.equal(f.javaHome, '/custom-jdk'); assert.equal(configured.args[0], '-Xmx768m');
-  assert.equal(configured.args[configured.args.indexOf('--log-level') + 1], 'DEBUG');
-  f.exists = false; await assert.rejects(factory.createDebugAdapterDescriptor(session), /missing/);
-  await factory.dispose();
 });

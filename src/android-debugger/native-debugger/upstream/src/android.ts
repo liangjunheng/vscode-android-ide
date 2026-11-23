@@ -137,20 +137,20 @@ async function getLldbServer(abi: string, projectRoot?: string, overrides?: Nati
 
 // 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言项目ADB隔离/ABI/server部署失败/forward清理。
 /**
- * 功能：隔离部署lldb-server及设备事件启动器，先注册inotify再exec，监听后核对socket文件身份并发布就绪。
- * 输入：设备、合法包名和设备 ABI；前置条件是共享工具链已解析且设备可执行 run-as。
- * 输出：返回 socket、子进程和幂等 stop；启动异常会先停止自有进程并清理自有部署目录。
- * 验证：tests/native-runtime.test.js 的 socket-file 事件、earlyExit、隔离部署和精确 stop 回归。
+ * 功能：按依赖并行准备和传输隔离部署，合并包内安装；先注册inotify再exec并核对socket文件身份发布就绪。
+ * 输入：设备、合法包名和设备 ABI；前置条件是共享工具链可解析且设备可执行 run-as。
+ * 输出：返回 socket、子进程和幂等 stop；准备和传输全部结算后部署或回滚，聚合原始与清理错误。
+ * 验证：tests/native-runtime.test.js 的并行门闩、双错清理、两push一shell、socket-file、earlyExit和精确stop回归。
  */
 export async function startLldbServer(device: Device, packageName: string, abi: string) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(packageName)) {
         throw new Error("A valid package name is required.");
     }
 
-    let deviceAdb = await getDeviceAdb(device);
     const nativeDevice = device as Device & {androidProjectRoot?: string, androidNativeToolchain?: NativeToolchainOverrides};
     const projectRoot = nativeDevice.androidProjectRoot;
-    let lldbServerLocalPath = await getLldbServer(abi, projectRoot, nativeDevice.androidNativeToolchain);
+    const toolchain = resolveNativeToolchain(projectRoot, nativeDevice.androidNativeToolchain);
+    const lldbServerLocalPath = findLldbServer(toolchain.ndkRoot, abi);
 
     logger.log(`Using lldb-server at ${lldbServerLocalPath}`);
 
@@ -160,22 +160,45 @@ export async function startLldbServer(device: Device, packageName: string, abi: 
     const lldbServerPath = `${lldbServerDir}/lldb-server`;
     const launcherPath = `${lldbServerDir}/server-launcher`;
     const launcherTmpPath = `${lldbServerTmpPath}-launcher`;
-    const toolchain = resolveNativeToolchain(projectRoot, nativeDevice.androidNativeToolchain);
-    const launcher = await compileServerLauncher(toolchain.ndkRoot, abi);
+    let deviceAdb!: ADB;
+    let launcher: Awaited<ReturnType<typeof compileServerLauncher>> | undefined;
+    const errors: unknown[] = [];
+    const adbPreparation = Promise.allSettled([getDeviceAdb(device)]);
+    const transfers = await Promise.allSettled([
+        // 职责：取得ADB后立即传输原始server路径；输入准备结果，输出传输结算，准备错误仅由此分支报告；验证：准备/传输门闩用例。
+        (async () => {
+            const [adb] = await adbPreparation;
+            if (adb.status === 'rejected') throw adb.reason;
+            deviceAdb = adb.value;
+            await deviceAdb.push(lldbServerLocalPath, lldbServerTmpPath);
+        })(),
+        // 职责：独立编译后等待ADB传输launcher；输入同一工具链，输出传输结算并保留产物供统一清理；验证：准备失败/双错清理用例。
+        (async () => {
+            launcher = await compileServerLauncher(toolchain.ndkRoot, abi);
+            const [adb] = await adbPreparation;
+            // ADB失败已由server分支记录，不重复报告，也不在无通道时尝试传输。
+            if (adb.status === 'fulfilled') await adb.value.push(launcher.file, launcherTmpPath);
+        })()
+    ]);
+    errors.push(...transfers.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
 
+    /** 功能：删除本次身份的远端产物；输入已结算的ADB准备状态，输出清理完成或错误；验证：并行失败与隔离stop用例。 */
     const removeDeployment = async (): Promise<void> => {
-        await deviceAdb.shell(`run-as ${packageName} rm -rf ${lldbServerDir} && rm -f ${lldbServerTmpPath} ${launcherTmpPath}`);
+        if (deviceAdb) await deviceAdb.shell(`run-as ${packageName} rm -rf ${lldbServerDir} && rm -f ${lldbServerTmpPath} ${launcherTmpPath}`);
     };
-    try {
-        await deviceAdb.push(lldbServerLocalPath, lldbServerTmpPath);
-        await deviceAdb.shell(`run-as ${packageName} mkdir -p ${lldbServerDir}`);
-        await deviceAdb.shell(`cat ${lldbServerTmpPath} | run-as ${packageName} sh -c 'cat > ${lldbServerPath} && chmod 700 ${lldbServerPath}'`);
-        await deviceAdb.push(launcher.file, launcherTmpPath);
-        await deviceAdb.shell(`cat ${launcherTmpPath} | run-as ${packageName} sh -c 'cat > ${launcherPath} && chmod 700 ${launcherPath}'`);
-    } catch (error) {
-        try { await removeDeployment(); } catch (cleanup) { throw new AggregateError([error, cleanup], 'Native deployment and cleanup failed'); }
-        throw error;
-    } finally { await launcher.close(); }
+    if (!errors.length) {
+        try {
+            await deviceAdb.shell(`run-as ${packageName} mkdir -p ${lldbServerDir} && cat ${lldbServerTmpPath} | run-as ${packageName} sh -c 'cat > ${lldbServerPath} && chmod 700 ${lldbServerPath}' && cat ${launcherTmpPath} | run-as ${packageName} sh -c 'cat > ${launcherPath} && chmod 700 ${launcherPath}'`);
+        } catch (error) { errors.push(error); }
+    }
+    if (launcher) {
+        try { await launcher.close(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length) {
+        try { await removeDeployment(); } catch (error) { errors.push(error); }
+        if (errors.length === 1) throw errors[0];
+        throw new AggregateError(errors, 'Native preparation, deployment and cleanup failed');
+    }
 
     const socket = `/${packageName}/platform-${utils.randomString(16)}.sock`;
     const socketFile = `${lldbServerDir}/socket-id`;

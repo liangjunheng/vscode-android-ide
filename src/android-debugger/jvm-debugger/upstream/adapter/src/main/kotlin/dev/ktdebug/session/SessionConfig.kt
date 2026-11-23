@@ -11,7 +11,7 @@ data class SessionConfig(
     // attach
     val hostName: String,
     val port: Int,
-    val timeoutMs: Int,
+    val timeoutMs: Int?,
     // launch
     val mainClass: String?,
     val classPaths: List<String>?,
@@ -56,7 +56,7 @@ data class SessionConfig(
                 sourcePaths = (a.strList("sourcePaths") ?: emptyList()).map { Paths.get(it) },
                 hostName = a.str("hostName") ?: a.str("host") ?: "localhost",
                 port = a.num("port")?.toInt() ?: 5005,
-                timeoutMs = a.num("timeout")?.toInt() ?: 30_000,
+                timeoutMs = a.num("timeout")?.toInt(),
                 mainClass = a.str("mainClass"),
                 classPaths = a.strList("classPaths") ?: a.strList("classpath"),
                 modulePaths = a.strList("modulePaths"),

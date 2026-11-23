@@ -1,3 +1,12 @@
+/**
+ * 功能点：设备选择器、镜像与标题栏UI契约。
+ * 受影响对象：RunningDeviceView、设备命令、SDK发现及extension.activate。
+ * 复现路径：Node>=22，加载真实入口与页面片段，隔离设备和调试注册边界。
+ * 测试范围：选择、掉线、错误传播、布局、刷新及两个调试注册入口参数。
+ * 执行入口：node --test tests/device-manager-ui.test.js。
+ * 预期结果：UI行为和布局不变，仅调用registerAndroidDebugging与registerJvmDebugger。
+ * 判据：既有UI断言及注册边界断言全部满足，不加载原生适配器。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -13,7 +22,7 @@ function load(name, dependencies) {
   const module = { exports: {} };
   vm.runInNewContext(transformSync(src, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, console, process, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
-    require: (id) => id.endsWith('/coordinator/androidCoordinator') ? { AndroidCoordinator: class { async dispose() {} } } : id === './autoConfig' || id === '../autoConfig' ? require('./auto-config-loader.cjs')() : id.endsWith('/runtimeContext') ? require('./runtime-context-loader.cjs')(dependencies) : Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
+    require: (id) => id === './autoConfig' || id === '../autoConfig' ? require('./auto-config-loader.cjs')() : id.endsWith('/runtimeContext') ? require('./runtime-context-loader.cjs')(dependencies) : Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
   });
   return module.exports;
 }
@@ -80,43 +89,18 @@ test('title selector replaces device list and registers only the mirror view', a
   assert.ok(runningSource.includes('id=\"tic-d\"') && runningSource.includes('id=\"tic-l\"'), 'leading device icons remain');
   const dropdowns = fs.readFileSync(path.join(__dirname, '../media/dropdowns.css'), 'utf8');
   assert.match(dropdowns, /select::picker\(select\)\{[^}]*min-width:anchor-size\(width\)/);
-  const handlers = {}, views = [], errors = [], debugRegistrations = [], debugProviders = [], buildActions = [];
-  const vscode = { DebugConfigurationProviderTriggerKind: {Initial:1,Dynamic:2}, workspace: { findFiles: async () => [], getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }), onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; }, executeCommand: async () => undefined }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { debugRegistrations.push([type, factory]); return { dispose() {} }; }, registerDebugConfigurationProvider: (type, provider, trigger) => { debugProviders.push([type, provider, trigger]); return { dispose() {} }; }, onDidStartDebugSession: () => ({ dispose() {} }), onDidTerminateDebugSession: () => ({ dispose() {} }) } };
+  const handlers = {}, views = [], errors = [], debuggingRegistrations = [], jvmRegistrations = [], buildActions = [];
+  const vscode = { workspace: { findFiles: async () => [], getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }), onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) }, commands: { registerCommand: (id, fn) => { handlers[id] = fn; }, executeCommand: async () => undefined }, window: { registerWebviewViewProvider: id => views.push(id), showErrorMessage: e => errors.push(e) } };
   class Running { async refresh() { throw new Error('adb unavailable'); } }
-  // 通过真实 Native adapter 转译加载；仅隔离其直接上游/工具链边界，本用例不启动后端或设备命令。
-  const adapter = { createAndroidDebugAdapterFactory(context, selectedPackage, coordinator) { nativeApi.registerNativeProviders(context, selectedPackage, coordinator); return { createDebugAdapterDescriptor() {} }; } };
-  const nativeApi = load('android-debugger/native-debugger/adapter', {
-    vscode,
-    '@vscode/debugadapter': { LoggingDebugSession: class {}, TerminatedEvent: class {}, OutputEvent: class {} },
-    '@vscode/debugprotocol': {},
-    '../index': load('android-debugger/index',{vscode}),
-    './upstream/src/android': {},
-    './upstream/src/targetPicker': { activate() {}, pickTarget: async () => ({ udid: 'phone' }), getLastOrPickTarget: async () => ({ udid: 'phone' }), getTargetFromUDID: async udid => ({ udid }), setCurrentTarget() {}, resetCurrentTarget() {} },
-    './upstream/src/debugConfigProvider': { AndroidDebugConfigurationProvider: class {}, LLDBDebugConfigurationProvider: class {} },
-    '../sessionAdapter': {},
-    './upstream/src/targetCommand': { activate() {}, pickAndroidProcess() {}, getBestAbi() {}, getBestMappedAbi() {}, getPackageNameForPid: async () => 'app', resumeWaitingProcess() {}, setAbiResolutionInfo() {}, setProcessPickerInfo() {}, resetAbiResolutionInfo() {}, resetProcessPickerInfo() {} },
-    './nativeToolchain': { resolveNativeToolchain: () => ({ adb: 'adb', sdkRoot: '', ndkRoot: '' }) },
-    './nativeTarget': { resolveLauncherActivity: async () => 'MainActivity', adbExec: async () => '' },
-    '../../sdk': { adbPath: () => 'adb', listDevices: async () => [] },
-    '../../projectLocalConfig': { readProjectLocalConfig: () => ({}) },
-    './nativeSymbols': { selectNativeLibraries: async () => [] },
-    './forwardLease': load('android-debugger/native-debugger/forwardLease', {}),
-  });
-  // UI 回归只验证设备视图接线；JVM debugger 的外部注册边界由独立测试覆盖，因此在这里隔离整个注册模块。
-  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { constructor() { this.refreshes = 0; } async initialize() {} async handle(message) { buildActions.push(message.action); if (message.action === 'refresh') this.refreshes++; } dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/adapter': adapter, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate({ extensionPath: '', subscriptions: [] });
+  const context = { extensionPath: '', subscriptions: [] };
+  // UI只观察注册边界；公开配置和引擎连接交调试模块独立覆盖，不加载原生适配器。
+  const debugging = { registerAndroidDebugging: (ctx, selectedPackage) => { debuggingRegistrations.push([ctx, selectedPackage]); return { async dispose() {} }; } };
+  load('extension', { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, './androidBuild': { AndroidBuildController: class { constructor() { this.refreshes = 0; } async initialize() {} async handle(message) { buildActions.push(message.action); if (message.action === 'refresh') this.refreshes++; } dispose() {} currentNativeDebugMetadata() {} } }, vscode, './android-debugger/debugging': debugging, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger: ctx => { jvmRegistrations.push(ctx); } }, './deviceManager': { registerDeviceManager() {} }, './runningDevices': { RunningDeviceView: Running }, './logcat': { LogcatView: class {} }, './extendedControls': {} }).activate(context);
   assert.deepEqual(views, ['android-ide.runningDevice', 'android-ide.logcat']);
-  // extension 同一工厂注册两种外部入口；android-tools仅保留resolver，android-debug提供六项动态内置配置。
-  assert.deepEqual(debugRegistrations.map(item => item[0]).sort(), ['android-debug', 'android-tools'].sort());
-  assert.deepEqual(debugProviders.map(item => item[0]).sort(), ['android-debug', 'android-debug', 'android-tools', 'lldb'].sort());
-  const dynamic = debugProviders.find(item => item[0] === 'android-debug' && item[2] === 2);
-  assert.equal(dynamic[1].provideDebugConfigurations().length, 6);
-  assert.deepEqual(JSON.stringify(Array.from(dynamic[1].provideDebugConfigurations(), config => config.name).sort()), JSON.stringify([
-    'Android: Native Debug Launch', 'Android: Native Debug Attach',
-    'Android: JVM Debug Launch', 'Android: JVM Debug Attach',
-    'Android: Dual(Native and JVM) Debug Launch', 'Android: Dual(Native and JVM) Debug Attach',
-  ].sort()));
-  assert.equal(typeof dynamic[1].resolveDebugConfiguration,'function');
-  assert.equal(typeof debugRegistrations.find(item => item[0] === 'android-debug')[1].createDebugAdapterDescriptor, 'function');
+  assert.equal(debuggingRegistrations.length, 1);
+  assert.equal(debuggingRegistrations[0][0], context);
+  assert.equal(typeof debuggingRegistrations[0][1], 'function');
+  assert.deepEqual(jvmRegistrations, [context]);
   await handlers['android-ide.refresh']();
   assert.deepEqual(buildActions, ['refresh']);
   assert.match(errors[0], /adb unavailable/);

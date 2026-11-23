@@ -9,12 +9,12 @@ const { transformSync } = require('esbuild');
 const root = path.resolve(__dirname, '..');
 
 // 功能点：Native lldb-server 启动就绪与生命周期回归。
-// 受影响对象：android.ts 的 startLldbServer 部署、socket-file 事件就绪、earlyExit、隔离 stop；本测试的 ADB/SubProcess mock。
-// 复现路径：在同一设备和包名连续启动服务，模拟 socket-file 原子写入事件、启动失败和提前退出，再分别停止服务。
-// 测试范围：正常真实启动信号、无假 echo、同 PID 重附加隔离、启动异常清理、earlyExit、幂等 stop 和旧接口回归。
+// 受影响对象：android.ts 的 startLldbServer 依赖准备、并行传输、部署回滚、socket-file 事件就绪、earlyExit、隔离 stop；本测试的 ADB/SubProcess mock。
+// 复现路径：以可控门闩分别阻塞ADB、编译和两路push，注入准备/传输/部署/清理错误；同设备同包连续启动，再分别停止。
+// 测试范围：准备重叠、两push重叠、全结算后清理/部署、全部异常保留、两push一shell顺序、真实启动信号、无假echo、路径隔离、earlyExit和幂等stop。
 // 执行入口：Node.js >= 22 执行 node --test tests/native-runtime.test.js。
-// 预期结果：只有设备启动器确认监听后输出匹配socket身份才完成启动；异常只清理自有进程和部署目录。
-// 判据：测试 mock 必须拒绝 ANDROID_NATIVE_STARTED，并断言匹配事件、事件前退出、路径隔离和精确 stop；未执行不视为通过。
+// 预期结果：依赖完成后才部署，任一路失败均等待其他工作后回滚并保留清理异常；只有设备启动器确认匹配socket身份才完成启动。
+// 判据：门闩未释放不得清理/部署；精确断言调用数、命令顺序、错误身份、产物和进程归属；未执行不视为通过。
 function loadJdwp() {
   const source = fs.readFileSync(path.join(root, 'src/android-debugger/native-debugger/upstream/src/jdwp.ts'), 'utf8');
   const module = { exports: {} };
@@ -55,9 +55,9 @@ test('runtime sources retain strict toolchain and cleanup contracts', () => {
   assert.match(target, /throw error;/); assert.match(target, /async function lldbServerCleanup/);
 });
 
-// 回归：Node>=22执行 node --test tests/native-runtime.test.js，断言加载真实生产模块与边界fixture，不替换待验证函数。
+/** 功能：加载真实Android模块并仅替换外部边界；输入可选假时钟；输出API、调用/资源状态及门闩钩子；验证：本文件Native部署和既有运行时用例。 */
 async function loadAndroidRuntime(options = {}) {
-  const state = { timerCallbacks: [], creates: [], calls: [], failCopy: false, failStart: false, nativeExitBeforeReady: false, nativeReadyEvents: [], stopCalls: 0, stopResolved: false, subprocesses: [], jdwpConnectFail: false, jdwpResumeFail: false, failRemoveForward: false, jdwp: [], processLines: [], processError: null, processStopError: null, processName: 'demo', packageOutput: '', packageError: false, processNameError: false, avdProperties: null, connectedDevices: [{udid:'serial',state:'device'}], deviceError: null, apkInfo: {name:'com.example.app'}, apkError: null, stopGate: undefined, installError: null, shellResult: '', avdId: 'serial', emulatorResult: {code:0,stdout:'Pixel\nINFO    | ignored\n'}, emulatorError: null };
+  const state = { deploymentHooks: {}, launcherFiles: new Set(), remoteFiles: new Set(), toolchainCalls: [], timerCallbacks: [], creates: [], calls: [], failCopy: false, failStart: false, nativeExitBeforeReady: false, nativeReadyEvents: [], stopCalls: 0, stopResolved: false, subprocesses: [], jdwpConnectFail: false, jdwpResumeFail: false, failRemoveForward: false, jdwp: [], processLines: [], processError: null, processStopError: null, processName: 'demo', packageOutput: '', packageError: false, processNameError: false, avdProperties: null, connectedDevices: [{udid:'serial',state:'device'}], deviceError: null, apkInfo: {name:'com.example.app'}, apkError: null, stopGate: undefined, installError: null, shellResult: '', avdId: 'serial', emulatorResult: {code:0,stdout:'Pixel\nINFO    | ignored\n'}, emulatorError: null };
   globalThis.__nativeRuntimeState = state;
   const { build } = require('esbuild');
   const entry = path.join(root, 'src/android-debugger/native-debugger/upstream/src/android.ts');
@@ -68,9 +68,9 @@ async function loadAndroidRuntime(options = {}) {
     build.onResolve({ filter: /nativeToolchain|androidPaths|\.\/logger|\.\/utils|^ini$|^teen_process$/ }, args => ({ path: args.path, namespace: 'runtime-adb-mock' }));
     build.onLoad({ filter: /.*/, namespace: 'runtime-adb-mock' }, args => {
       if (args.path === 'jdwp') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState; class JDWP { constructor(){ this.closed=false; } async connect(){ s.jdwp.push('connect'); if(s.jdwpConnectFail) throw new Error('connect failed'); } async resume(){ s.jdwp.push('resume'); if(s.jdwpResumeFail) throw new Error('resume failed'); } async disconnect(){ s.jdwp.push('disconnect'); this.closed=true; } } module.exports={JDWP};" };
-      if (args.path === 'appium-adb') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState; class ADB { constructor(opts){ s.creates.push(opts); this.opts=opts; this.EXEC_OUTPUT_FORMAT={FULL:'full'}; } clone(){ return this; } setDevice(d){ this.device=d; } async getConnectedDevices(options){ s.calls.push(['devices',options,this.opts.sdkRoot]); if(s.deviceError) throw s.deviceError; return s.connectedDevices; } async getApkInfo(apk){ s.calls.push(['apk',apk,this.opts.sdkRoot]); if(s.apkError) throw s.apkError; return s.apkInfo; } async getBinaryFromSdkRoot(name){s.calls.push(['binary',name]);return 'emulator';} async launchAVD(name){s.calls.push(['avd',name]);this.curDeviceId=s.avdId;} async getDeviceProperty(){ return 'arm64-v8a'; } async getNameByPid(){ if(s.processNameError) throw new Error('name failed'); return s.processName; } async getEmuImageProperties(){ return s.avdProperties; } async push(a,b){ s.calls.push(['push',a,b]); } async shell(cmd){ s.calls.push(['shell',cmd]); if(s.failCopy && cmd.includes('cat ')) throw new Error('copy failed'); if(cmd.includes('package list packages')) { if(s.packageError) throw new Error('package permission failed'); return s.packageOutput; } return s.shellResult; } createSubProcess(args){ const listeners={}; const p={args, on(name,fn){ (listeners[name] ||= []).push(fn); return p; }, off(name,fn){ listeners[name]=(listeners[name]||[]).filter(x=>x!==fn); return p; }, listenerCount(name){return (listeners[name]||[]).length;}, emit(name,...values){ for(const fn of listeners[name]||[]) fn(...values); }, async start(detector){ s.calls.push(['start']); if(s.failStart) throw new Error('start failed'); if(args[0]==='shell' && detector){ const command=args[1]; const socket=command.split(' ').find(value=>value.startsWith('unix-abstract://'))?.slice('unix-abstract://'.length); const event=s.nativeReadyEvent ?? `ANDROID_NATIVE_LISTENING\\t${socket}\\n`; if(s.nativeExitBeforeReady){ await new Promise(()=>{ queueMicrotask(()=>{ if(s.nativeReadyEvent) detector(event,''); p.emit('exit',1,null); }); }); } else { s.nativeReadyEvents.push(event); await new Promise((resolve,reject)=>queueMicrotask(()=>{try{if(detector(event,''))resolve();else reject(new Error('unexpected readiness output'));}catch(error){reject(error);}})); } } if(args[0]==='jdwp') queueMicrotask(()=>{ if(s.processError) p.emit('error',s.processError); else if(s.processLines.length) p.emit('lines-stdout',s.processLines); }); }, async stop(){ s.stopCalls++; await s.stopGate; if(s.processStopError) throw s.processStopError; s.stopResolved=true; }}; s.subprocesses.push(p); return p; } async adbExec(args){ s.calls.push(['adbExec',args]); if(args[0]==='install' && s.installError) throw s.installError; return '12345'; } async removePortForward(p){ s.calls.push(['removeForward',p]); if(s.failRemoveForward) throw new Error('remove forward failed'); } } module.exports={ADB};" };
-      if (args.path === 'serverLauncher') return { loader: 'js', contents: "module.exports={async compileServerLauncher(){return {file:'launcher',async close(){}};}}" };
-      if (args.path.includes('nativeToolchain')) return { loader: 'js', contents: "module.exports={resolveNativeToolchain(root){return {adb:'adb-'+(root||'default'),sdkRoot:'sdk-'+(root||'default'),ndkRoot:'ndk-'+(root||'default')};},findLldbServer(ndk,abi){return 'lldb-'+ndk+'-'+abi;}}" };
+      if (args.path === 'appium-adb') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState; class ADB { constructor(opts){ s.creates.push(opts); this.opts=opts; this.EXEC_OUTPUT_FORMAT={FULL:'full'}; } clone(){ return this; } setDevice(d){ this.device=d; } async getConnectedDevices(options){ s.calls.push(['devices',options,this.opts.sdkRoot]); if(s.deviceError) throw s.deviceError; return s.connectedDevices; } async getApkInfo(apk){ s.calls.push(['apk',apk,this.opts.sdkRoot]); if(s.apkError) throw s.apkError; return s.apkInfo; } async getBinaryFromSdkRoot(name){s.calls.push(['binary',name]);return 'emulator';} async launchAVD(name){s.calls.push(['avd',name]);this.curDeviceId=s.avdId;} async getDeviceProperty(){ return 'arm64-v8a'; } async getNameByPid(){ if(s.processNameError) throw new Error('name failed'); return s.processName; } async getEmuImageProperties(){ return s.avdProperties; } async push(a,b){ s.calls.push(['push',a,b]); s.remoteFiles.add(b); await s.deploymentHooks.push?.(a,b); s.calls.push(['pushDone',a,b]); } async shell(cmd){ s.calls.push(['shell',cmd]); if(cmd.includes('rm -rf')) { await s.deploymentHooks.remove?.(cmd); const dir=cmd.split('rm -rf ')[1].split(' ')[0]; const tmp=cmd.split('rm -f ')[1].split(' '); for(const file of [...s.remoteFiles]) if(tmp.includes(file) || file.startsWith(dir+'/')) s.remoteFiles.delete(file); } if(s.failCopy && cmd.includes('cat ')) { s.remoteFiles.add(cmd.split('cat > ')[1].split(' ')[0]); throw new Error('copy failed'); } if(cmd.includes('mkdir -p')) { for(const match of cmd.matchAll(/cat > ([^ ]+)/g)) s.remoteFiles.add(match[1]); } if(cmd.includes('package list packages')) { if(s.packageError) throw new Error('package permission failed'); return s.packageOutput; } return s.shellResult; } createSubProcess(args){ const listeners={}; const p={args, on(name,fn){ (listeners[name] ||= []).push(fn); return p; }, off(name,fn){ listeners[name]=(listeners[name]||[]).filter(x=>x!==fn); return p; }, listenerCount(name){return (listeners[name]||[]).length;}, emit(name,...values){ for(const fn of listeners[name]||[]) fn(...values); }, async start(detector){ s.calls.push(['start']); if(s.failStart) throw new Error('start failed'); if(args[0]==='shell' && detector){ const command=args[1]; const socket=command.split(' ').find(value=>value.startsWith('unix-abstract://'))?.slice('unix-abstract://'.length); const event=s.nativeReadyEvent ?? `ANDROID_NATIVE_LISTENING\\t${socket}\\n`; if(s.nativeExitBeforeReady){ await new Promise(()=>{ queueMicrotask(()=>{ if(s.nativeReadyEvent) detector(event,''); p.emit('exit',1,null); }); }); } else { s.nativeReadyEvents.push(event); await new Promise((resolve,reject)=>queueMicrotask(()=>{try{if(detector(event,''))resolve();else reject(new Error('unexpected readiness output'));}catch(error){reject(error);}})); } } if(args[0]==='jdwp') queueMicrotask(()=>{ if(s.processError) p.emit('error',s.processError); else if(s.processLines.length) p.emit('lines-stdout',s.processLines); }); }, async stop(){ s.stopCalls++; await s.stopGate; if(s.processStopError) throw s.processStopError; s.stopResolved=true; }}; s.subprocesses.push(p); return p; } async adbExec(args){ s.calls.push(['adbExec',args]); if(args[0]==='start-server') await s.deploymentHooks.adb?.(); if(args[0]==='install' && s.installError) throw s.installError; return '12345'; } async removePortForward(p){ s.calls.push(['removeForward',p]); if(s.failRemoveForward) throw new Error('remove forward failed'); } } module.exports={ADB};" };
+      if (args.path === 'serverLauncher') return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState;module.exports={async compileServerLauncher(ndk,abi){s.calls.push(['compile',ndk,abi]);await s.deploymentHooks.compile?.();s.launcherFiles.add('launcher');return {file:'launcher',async close(){s.calls.push(['launcherClose']);await s.deploymentHooks.close?.();s.launcherFiles.delete('launcher');}};}}" };
+      if (args.path.includes('nativeToolchain')) return { loader: 'js', contents: "const s=globalThis.__nativeRuntimeState;module.exports={resolveNativeToolchain(root,overrides){s.toolchainCalls.push([root,overrides]);return {adb:'adb-'+(root||'default'),sdkRoot:overrides?.sdkRoot??'sdk-'+(root||'default'),ndkRoot:overrides?.ndkRoot??'ndk-'+(root||'default')};},findLldbServer(ndk,abi){s.calls.push(['findLldbServer',ndk,abi]);return 'lldb-'+ndk+'-'+abi;}}" };
       if (args.path.includes('utils')) return { loader: 'js', contents: "let sequence=0;module.exports={randomString(){return 'session'+(++sequence);}}" };
       if (args.path.includes('logger')) return { loader: 'js', contents: "module.exports={logger:{log(){},warn(){}}}" };
       if (args.path === 'teen_process') return { loader:'js', contents:"const s=globalThis.__nativeRuntimeState;module.exports={async exec(command,args,opts){s.calls.push(['exec',command,args,opts]);if(s.emulatorError)throw s.emulatorError;return s.emulatorResult;}}" };
@@ -84,6 +84,184 @@ async function loadAndroidRuntime(options = {}) {
   runtime.queueMicrotask = queueMicrotask; vm.runInNewContext(result.outputFiles[0].text, runtime);
   return { api: module.exports, state, fireTimers(ms) { for (const timer of state.timerCallbacks) { if (timer.active && timer.ms === ms) { timer.active = false; timer.fn(); } } } };
 }
+
+/** 功能：取得可控异步门闩；输入无；输出promise和显式释放/拒绝函数；验证：Native准备与传输并发用例，不使用睡眠判时。 */
+function nativeGate() {
+  return Promise.withResolvers();
+}
+
+/** 功能：验证完整部署依赖及命令；输入一次启动的边界调用，输出本次部署路径；验证：两push一shell、管道权限边界和随机隔离路径。 */
+function assertNativeDeployment(calls) {
+  const pushes = calls.filter(call => call[0] === 'push');
+  assert.equal(pushes.length, 2);
+  const server = pushes.find(call => call[1].startsWith('lldb-'));
+  const launcher = pushes.find(call => call[1] === 'launcher');
+  assert.ok(server); assert.ok(launcher);
+  assert.match(server[2], /^\/data\/local\/tmp\/android-debug-session\d+$/);
+  assert.equal(launcher[2], `${server[2]}-launcher`);
+  const shells = calls.filter(call => call[0] === 'shell');
+  assert.equal(shells.length, 1);
+  const dir = `/data/data/com.example.app/android-debug/${server[2].split('android-debug-')[1]}`;
+  assert.equal(shells[0][1], `run-as com.example.app mkdir -p ${dir} && cat ${server[2]} | run-as com.example.app sh -c 'cat > ${dir}/lldb-server && chmod 700 ${dir}/lldb-server' && cat ${launcher[2]} | run-as com.example.app sh -c 'cat > ${dir}/server-launcher && chmod 700 ${dir}/server-launcher'`);
+  const completed = calls.filter(call => call[0] === 'pushDone');
+  assert.equal(completed.length, 2);
+  for (const call of completed) assert.ok(calls.indexOf(call) < calls.indexOf(shells[0]));
+  assert.equal(calls.filter(call => call[0] === 'launcherClose').length, 1);
+  assert.ok(calls.findIndex(call => call[0] === 'launcherClose') > calls.indexOf(shells[0]));
+  assert.ok(calls.findIndex(call => call[0] === 'start') > calls.findIndex(call => call[0] === 'launcherClose'));
+  return { dir, serverTmp: server[2], launcherTmp: launcher[2] };
+}
+
+/** 功能：验证准备重叠及配置透传；输入阻塞ADB/编译和显式工具链；输出成功句柄及释放后的空资源；验证：本用例断言两准备同时进入且只解析两次工具链。 */
+test('Native preparation overlaps ADB and compilation while preserving toolchain overrides', { timeout: 5000 }, async () => {
+  const { api, state } = await loadAndroidRuntime();
+  const adb = nativeGate(), compile = nativeGate(), adbStarted = nativeGate(), compileStarted = nativeGate();
+  state.deploymentHooks.adb = async () => { adbStarted.resolve(); await adb.promise; };
+  state.deploymentHooks.compile = async () => { compileStarted.resolve(); await compile.promise; };
+  const overrides = { sdkRoot: 'custom-sdk', ndkRoot: 'custom-ndk' };
+  let settled = false;
+  const pending = api.startLldbServer({ udid: 'serial', androidProjectRoot: 'project', androidNativeToolchain: overrides }, 'com.example.app', 'arm64-v8a');
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.all([adbStarted.promise, compileStarted.promise]);
+  assert.equal(state.calls.some(call => call[0] === 'push'), false);
+  compile.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.launcherFiles.size, 1); assert.equal(settled, false);
+  assert.equal(state.calls.some(call => call[0] === 'push' || call[0] === 'launcherClose'), false);
+  adb.resolve(); const server = await pending;
+  assertNativeDeployment(state.calls);
+  assert.equal(state.toolchainCalls.length, 2);
+  for (const [project, actual] of state.toolchainCalls) { assert.equal(project, 'project'); assert.equal(actual, overrides); }
+  assert.equal(state.creates[0].sdkRoot, 'custom-sdk');
+  assert.equal(state.calls.find(call => call[0] === 'findLldbServer')[1], 'custom-ndk');
+  assert.equal(state.calls.find(call => call[0] === 'compile')[1], 'custom-ndk');
+  assert.equal(state.launcherFiles.size, 0);
+  await server.stop(); assert.equal(state.remoteFiles.size, 0);
+});
+
+/** 功能：证明两次push重叠且全部成功后才部署；输入独立传输门闩；输出两push一shell和精确资源释放；验证：任一路未释放时不得安装、关闭launcher或启动。 */
+test('Native pushes begin together and deployment waits for both transfers', { timeout: 5000 }, async () => {
+  const { api, state } = await loadAndroidRuntime();
+  const gates = { server: nativeGate(), launcher: nativeGate() };
+  const entered = { server: nativeGate(), launcher: nativeGate() };
+  state.deploymentHooks.push = async (file) => { const role = file === 'launcher' ? 'launcher' : 'server'; entered[role].resolve(); await gates[role].promise; };
+  const pending = api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a');
+  await Promise.all([entered.server.promise, entered.launcher.promise]);
+  assert.equal(state.calls.filter(call => call[0] === 'push').length, 2);
+  gates.server.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.calls.some(call => ['shell', 'launcherClose', 'start'].includes(call[0])), false);
+  gates.launcher.resolve(); const server = await pending;
+  assertNativeDeployment(state.calls); assert.equal(state.remoteFiles.size, 4); assert.equal(state.launcherFiles.size, 0);
+  await server.stop(); await server.stop();
+  assert.equal(state.remoteFiles.size, 0); assert.equal(state.stopCalls, 1);
+});
+
+/** 功能：失败传输等待另一传输退出后回滚；输入两种失败方向及独立门闩；输出原始异常且不遗留成功产物；验证：清理前不得close/删除，完成后删除两暂存文件且不启动。 */
+test('Native failed push waits for the other transfer before cleanup in either direction', { timeout: 5000 }, async () => {
+  for (const failedRole of ['server', 'launcher']) {
+    const { api, state } = await loadAndroidRuntime();
+    const gates = { server: nativeGate(), launcher: nativeGate() };
+    const entered = { server: nativeGate(), launcher: nativeGate() };
+    const failure = new Error(`${failedRole} transfer failed`);
+    state.deploymentHooks.push = async file => { const role = file === 'launcher' ? 'launcher' : 'server'; entered[role].resolve(); await gates[role].promise; };
+    let settled = false;
+    const pending = api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a');
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = assert.rejects(pending, error => error === failure);
+    await Promise.all([entered.server.promise, entered.launcher.promise]);
+    gates[failedRole].reject(failure); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    assert.equal(state.calls.some(call => ['shell', 'launcherClose', 'start'].includes(call[0])), false);
+    assert.equal(state.launcherFiles.size, 1); assert.equal(state.remoteFiles.size, 2);
+    gates[failedRole === 'server' ? 'launcher' : 'server'].resolve(); await rejected;
+    const removals = state.calls.filter(call => call[0] === 'shell');
+    assert.equal(removals.length, 1); assert.match(removals[0][1], /rm -rf/);
+    assert.equal(state.calls.filter(call => call[0] === 'launcherClose').length, 1);
+    assert.ok(state.calls.findIndex(call => call[0] === 'pushDone') < state.calls.indexOf(removals[0]));
+    assert.equal(state.launcherFiles.size, 0); assert.equal(state.remoteFiles.size, 0); assert.equal(state.subprocesses.length, 0);
+  }
+});
+
+/** 功能：准备失败等待并清理成功launcher；输入ADB拒绝、延迟编译和可选close拒绝；输出所有异常且无远端副作用；验证：ADB失败不提前结束，成功编译后必调用close。 */
+test('Native ADB preparation failure waits for compilation and closes its launcher', { timeout: 5000 }, async () => {
+  for (const failClose of [false, true]) {
+    const { api, state } = await loadAndroidRuntime();
+    const compile = nativeGate(), entered = nativeGate();
+    const adbError = new Error('ADB preparation failed'), closeError = new Error('launcher close failed');
+    state.deploymentHooks.adb = async () => { throw adbError; };
+    state.deploymentHooks.compile = async () => { entered.resolve(); await compile.promise; };
+    // 清理边界可在完成删除后报告错误，以同时断言异常保留和没有成功产物遗留。
+    state.deploymentHooks.close = async () => { state.launcherFiles.delete('launcher'); if (failClose) throw closeError; };
+    let settled = false;
+    const pending = api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a');
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = assert.rejects(pending, error => failClose ? error.errors?.length === 2 && error.errors[0] === adbError && error.errors[1] === closeError : error === adbError);
+    await entered.promise; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false); compile.resolve(); await rejected;
+    assert.equal(state.calls.filter(call => call[0] === 'launcherClose').length, 1);
+    assert.equal(state.calls.some(call => ['push', 'shell', 'start'].includes(call[0])), false);
+    assert.equal(state.launcherFiles.size, 0); assert.equal(state.remoteFiles.size, 0);
+  }
+});
+
+/** 功能：编译失败不能越过正在传输的server提前清理；输入编译拒绝和server传输门闩；输出两原始错误及无残留；验证：传输结算前启动调用未结束、无shell，随后回滚。 */
+test('Native compile failure waits for an active server transfer and preserves both errors', { timeout: 5000 }, async () => {
+  const { api, state } = await loadAndroidRuntime();
+  const transfer = nativeGate(), entered = nativeGate();
+  const compileError = new Error('compile failed while pushing'), pushError = new Error('push failed after compile');
+  state.deploymentHooks.compile = async () => { throw compileError; };
+  state.deploymentHooks.push = async () => { entered.resolve(); await transfer.promise; };
+  let settled = false;
+  const pending = api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a');
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  const rejected = assert.rejects(pending, error => error.errors?.length === 2 && error.errors[0] === pushError && error.errors[1] === compileError);
+  await entered.promise; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false); assert.equal(state.calls.some(call => call[0] === 'shell'), false);
+  transfer.reject(pushError); await rejected;
+  assert.equal(state.calls.filter(call => call[0] === 'push').length, 1);
+  assert.equal(state.calls.filter(call => call[0] === 'shell' && call[1].includes('rm -rf')).length, 1);
+  assert.equal(state.calls.some(call => call[0] === 'launcherClose'), false);
+  assert.equal(state.remoteFiles.size, 0); assert.equal(state.launcherFiles.size, 0); assert.equal(state.subprocesses.length, 0);
+});
+
+/** 功能：聚合独立准备/传输及清理全部异常；输入编译与server push双错、两push双错或部署错误；输出按身份完整保留错误；验证：不被finally覆盖，关闭失败仍回滚部署且不启动。 */
+test('Native preparation deployment and cleanup retain every failure', { timeout: 5000 }, async () => {
+  for (const scenario of ['compile-push', 'both-push', 'copy', 'close-only', 'prepare-both']) {
+    const { api, state } = await loadAndroidRuntime();
+    const serverError = new Error('server transfer failed'), launcherError = new Error('launcher transfer failed');
+    const compileError = new Error('compilation failed'), adbError = new Error('ADB preparation failed');
+    const closeError = new Error('launcher cleanup failed'), removeError = new Error('deployment cleanup failed');
+    const expected = [];
+    if (scenario === 'prepare-both') {
+      state.deploymentHooks.adb = async () => { throw adbError; };
+      state.deploymentHooks.compile = async () => { throw compileError; };
+      expected.push(adbError, compileError);
+    } else {
+      if (scenario === 'compile-push' || scenario === 'both-push') {
+        state.deploymentHooks.push = async file => { throw file === 'launcher' ? launcherError : serverError; };
+        expected.push(serverError);
+        if (scenario === 'compile-push') { state.deploymentHooks.compile = async () => { throw compileError; }; expected.push(compileError); }
+        else expected.push(launcherError);
+      }
+      if (scenario === 'copy') state.failCopy = true;
+      if (scenario !== 'compile-push') {
+        state.deploymentHooks.close = async () => { state.launcherFiles.delete('launcher'); throw closeError; };
+        expected.push(closeError);
+      }
+      // 模拟删除已完成但命令返回错误，保证仍检查成功产物均已释放。
+      state.deploymentHooks.remove = async () => { state.remoteFiles.clear(); throw removeError; };
+      expected.push(removeError);
+    }
+    await assert.rejects(api.startLldbServer({ udid: 'serial' }, 'com.example.app', 'arm64-v8a'), error => {
+      assert.equal(error.errors?.length, expected.length + (scenario === 'copy' ? 1 : 0));
+      for (const original of expected) assert.ok(error.errors.includes(original));
+      if (scenario === 'copy') assert.equal(error.errors.filter(value => value.message === 'copy failed').length, 1);
+      return true;
+    });
+    assert.equal(state.calls.filter(call => call[0] === 'launcherClose').length, ['compile-push', 'prepare-both'].includes(scenario) ? 0 : 1);
+    assert.equal(state.calls.filter(call => call[0] === 'shell' && call[1].includes('rm -rf')).length, scenario === 'prepare-both' ? 0 : 1);
+    assert.equal(state.remoteFiles.size, 0); assert.equal(state.launcherFiles.size, 0); assert.equal(state.subprocesses.length, 0);
+  }
+});
 
 test('Native deployment rejects shell metacharacters before device operations', async () => {
   const loaded = await loadAndroidRuntime();
@@ -113,22 +291,30 @@ test('Native startup ignores unrelated inotify directory events', async () => {
   assert.equal(loaded.state.stopCalls, 0);
 });
 
-/** 功能点：同包名Attach后Launch不覆盖忙碌服务；受影响对象：startLldbServer部署/启动/stop；复现路径：第一个服务未停止时启动第二个；测试范围：暂存、包内二进制、socket隔离及单独停止；执行入口：npm test；预期结果：路径不重用且仅停止自身；判据：两组真实生产调用路径不同、stop次数准确。 */
+/** 功能：确认同包两会话不覆盖忙碌二进制；输入首服务存活时的第二次启动；输出独立路径/socket及各自stop；验证：精确两组部署命令、仅删自身产物和完整资源释放。 */
+// 入口范围：同设备同包Attach后Launch路径隔离；node --test tests/native-runtime.test.js，不执行设备操作。
 test('Attach then Launch keeps both Native deployments isolated while the first server is alive', async () => {
   const loaded = await loadAndroidRuntime(), device = { udid: 'serial', androidProjectRoot: 'project-one' };
   const first = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
-  const firstCalls = loaded.state.calls.filter(call => call[0] === 'shell').map(call => call[1]);
+  const firstDeployment = assertNativeDeployment(loaded.state.calls);
+  const boundary = loaded.state.calls.length;
   const second = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
-  const pushes = loaded.state.calls.filter(call => call[0] === 'push');
-  const copies = loaded.state.calls.filter(call => call[0] === 'shell' && call[1].includes('cat '));
-  assert.notEqual(pushes[0][2], pushes[2][2]); assert.notEqual(copies[0][1], copies[2][1]);
+  const secondDeployment = assertNativeDeployment(loaded.state.calls.slice(boundary));
+  assert.notEqual(firstDeployment.serverTmp, secondDeployment.serverTmp);
+  assert.notEqual(firstDeployment.launcherTmp, secondDeployment.launcherTmp);
+  assert.notEqual(firstDeployment.dir, secondDeployment.dir);
+  assert.match(firstDeployment.dir, /android-debug\/session1$/); assert.match(secondDeployment.dir, /android-debug\/session3$/);
   assert.notEqual(first.socket, second.socket); assert.equal(loaded.state.stopCalls, 0);
-  assert.match(firstCalls[0], /android-debug\/session1/); assert.match(copies[2][1], /android-debug\/session3/);
-  assert.doesNotMatch(copies.map(call => call[1]).join('\n'), /android-debug\/lldb\/bin/);
+  assert.doesNotMatch(loaded.state.calls.filter(call => call[0] === 'shell').map(call => call[1]).join('\n'), /android-debug\/lldb\/bin/);
+  assert.equal(loaded.state.remoteFiles.size, 8); assert.equal(loaded.state.launcherFiles.size, 0);
   await second.stop(); assert.equal(loaded.state.stopCalls, 1);
   const removed = loaded.state.calls.filter(call => call[0] === 'shell' && call[1].includes('rm -rf'));
-  assert.equal(removed.length, 1); assert.match(removed[0][1], /android-debug\/session3/); assert.doesNotMatch(removed[0][1], /android-debug\/session1/);
-  await first.stop(); assert.equal(loaded.state.stopCalls, 2);
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0][1], `run-as com.example.app rm -rf ${secondDeployment.dir} && rm -f ${secondDeployment.serverTmp} ${secondDeployment.launcherTmp}`);
+  assert.doesNotMatch(removed[0][1], /android-debug\/session1/);
+  assert.equal(loaded.state.remoteFiles.size, 4);
+  assert.ok(loaded.state.remoteFiles.has(`${firstDeployment.dir}/lldb-server`));
+  await first.stop(); assert.equal(loaded.state.stopCalls, 2); assert.equal(loaded.state.remoteFiles.size, 0);
 });
 
 test('Android runtime uses project toolchains and preserves ABI selection', async () => {
@@ -138,12 +324,17 @@ test('Android runtime uses project toolchains and preserves ABI selection', asyn
   assert.equal(await loaded.api.getBestAbi({ androidProjectRoot: 'project-one' }, ['arm64-v8a']), 'arm64-v8a');
 });
 
+/** 功能：保留真实就绪、stop幂等及部署失败回滚；输入正常事件后再次注入copy失败；输出匹配socket和无残留资源；验证：精确部署调用、一次stop和失败清理。 */
 test('LLDB deployment waits for startup acknowledgement and awaits stop', async () => {
   const loaded = await loadAndroidRuntime(); const device = { androidProjectRoot: 'project-one', udid: 'serial' };
   const result = await loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a');
-  assert.deepEqual(loaded.state.calls.slice(1, 4).map(x => x[0]), ['push', 'shell', 'shell']); assert.equal(loaded.state.calls[3][1].includes('chmod 700'), true); assert.equal(result.socket, '/com.example.app/platform-session2.sock');
+  assertNativeDeployment(loaded.state.calls); assert.equal(result.socket, '/com.example.app/platform-session2.sock');
+  assert.equal(loaded.state.nativeReadyEvents[0], `ANDROID_NATIVE_LISTENING\t${result.socket}\n`);
   await result.stop(); await result.stop(); assert.equal(loaded.state.stopCalls, 1); assert.equal(loaded.state.stopResolved, true);
+  assert.equal(loaded.state.remoteFiles.size, 0); assert.equal(loaded.state.launcherFiles.size, 0);
   loaded.state.failCopy = true; await assert.rejects(() => loaded.api.startLldbServer(device, 'com.example.app', 'arm64-v8a'), /copy failed/); loaded.state.failCopy = false;
+  assert.equal(loaded.state.remoteFiles.size, 0); assert.equal(loaded.state.launcherFiles.size, 0);
+  assert.equal(loaded.state.subprocesses.length, 1);
 });
 
 

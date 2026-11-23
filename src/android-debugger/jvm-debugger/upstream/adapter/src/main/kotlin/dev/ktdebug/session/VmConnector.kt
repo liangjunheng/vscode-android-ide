@@ -19,24 +19,28 @@ class ConnectException2(message: String) : Exception(message)
 /** Connects JDI to a JVM: attach to `-agentlib:jdwp` sockets, or launch a JVM and attach to it. */
 object VmConnector {
 
-    fun attach(host: String, port: Int, timeoutMs: Int, onRetry: (String) -> Unit = {}): VirtualMachine {
+    /** 功能：等待尚未监听的调试端口，已连接后的IO失败立即传播；输入目标及可选总期限；输出JDI虚拟机；验证：jvm-connection-reset.test.js。 */
+    fun attach(host: String, port: Int, timeoutMs: Int?, onRetry: (String) -> Unit = {}): VirtualMachine {
         val connector = Bootstrap.virtualMachineManager().attachingConnectors()
             .firstOrNull { it.name() == "com.sun.jdi.SocketAttach" }
             ?: throw ConnectException2("This JDK has no socket attaching connector (com.sun.jdi.SocketAttach)")
-        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(1000)
+        val deadline = timeoutMs?.takeIf { it > 0 }?.let { System.currentTimeMillis() + it }
         var lastError: Exception? = null
         var announced = false
-        while (System.currentTimeMillis() < deadline) {
+        while (deadline == null || System.currentTimeMillis() < deadline) {
             try {
-                return attachOnce(connector, host, port, (deadline - System.currentTimeMillis()).coerceIn(1000, 10_000))
+                val attemptTimeout = deadline?.let { (it - System.currentTimeMillis()).coerceIn(1000, 10_000) } ?: 10_000
+                return attachOnce(connector, host, port, attemptTimeout)
             } catch (e: IOException) {
                 lastError = e
                 val handshake = e.message?.contains("handshake", ignoreCase = true) == true
                 if (handshake) {
-                    throw ConnectException2(
-                        "Connected to $host:$port but the JDWP handshake failed. Either the port is not a JDWP " +
-                            "debug port, or another debugger is already attached (JDWP allows one debugger at a time)."
-                    )
+                    val detail = "${e.javaClass.name}:${e.message ?: ""}"
+                    Log.warn("JDWP handshake failed at $host:$port ($detail)", e)
+                    throw ConnectException2("JDWP handshake failed at $host:$port ($detail)").also { it.initCause(e) }
+                }
+                if (e !is ConnectException) {
+                    throw ConnectException2("Could not attach to JVM at $host:$port (${e.message ?: e.javaClass.simpleName}).").also { it.initCause(e) }
                 }
                 if (!announced) {
                     onRetry("Waiting for JVM debug port $host:$port (${e.message ?: e.javaClass.simpleName}) …\n")

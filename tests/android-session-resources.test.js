@@ -1,49 +1,72 @@
-/** 功能点：Coordinator 会话资源账本。
- * 受影响对象：AndroidDebugSession、租约、子引擎及 Native server。
- * 复现路径：加载真实会话类并在资源边界注入可控 Promise。
- * 测试范围：关闭等待、异常聚合、外部资源隔离、取消晚到租约。
- * 执行入口：npm test。
- * 预期结果：精确逆序释放且失败不跳过其余资源，不保留已删除的磁盘锁架构。
- * 判据：实际释放序列与取消结果符合断言。
+/**
+ * 功能点：直接调试会话的资源归属与清理。
+ * 受影响对象：registerAndroidDebugging返回owner、真实tracker及DebugDevice资源边界。
+ * 复现路径：内存设备准备真实provider配置，以宿主termination或owner关闭结束。
+ * 测试范围：独立转发、重复关闭、真实退出屏障、清理错误与Launch/Attach停止策略。
+ * 执行入口：node --test tests/android-session-resources.test.js。
+ * 预期结果：只关闭本次资源，等待指定会话termination，错误不被吞掉。
+ * 判据：端口关闭次数、应用操作及Promise结算顺序精确一致。
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const vm = require('node:vm');
-const { transformSync } = require('esbuild');
+const { fixture, turn } = require('./fixture/android-public.cjs');
 
-/** 功能：加载生产会话类；输入无；输出真实类；验证：本文件全部用例。 */
-function sessionClass() {
-  const module = { exports: {} };
-  vm.runInNewContext(transformSync(fs.readFileSync('src/android-debugger/coordinator/androidCoordinator.ts', 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: () => ({}), AbortController, AggregateError });
-  return module.exports.AndroidDebugSession;
-}
-
-test('session close waits for actual resource completion and preserves another session', async () => {
-  const Session = sessionClass(), order = [], gate = Promise.withResolvers();
-  const coordinator = { onEvent: () => ({ dispose() { order.push('unsubscribe'); } }) };
-  const first = new Session(coordinator, 'S', () => {}, () => order.push('closed'));
-  const other = new Session(coordinator, 'T', () => {}, () => {});
-  first.own(async () => { order.push('lease'); }); first.own(async () => { order.push('engine'); await gate.promise; });
-  let done = false; const closing = first.close().then(() => { done = true; }); await Promise.resolve();
-  assert.equal(done, false); assert.deepEqual(order, ['engine']); assert.equal(other.signal.aborted, false);
-  gate.resolve(); await closing; assert.deepEqual(order, ['engine', 'lease', 'unsubscribe', 'closed']); await other.close();
+// 功能：资源独立归属；输入两个运行；输出各自关闭一次且不停止Attach目标。
+test('独立运行各持有一次转发且重复dispose不重复释放', async () => {
+  const f = fixture();
+  await f.resolve({ name: '甲' }); await f.resolve({ name: '乙' });
+  await f.owner.dispose(); await f.owner.dispose();
+  assert.equal(f.calls.filter(row => row[0] === 'forward-close').length, 2);
+  assert.equal(f.calls.some(row => ['stop', 'clear'].includes(row[0])), false);
+  await f.close(); assert.equal(f.ended.listeners.size, 0);
 });
 
-test('cancelled late lease is released before claim rejects and is never registered twice', async () => {
-  const Session = sessionClass(), gate = Promise.withResolvers(), order = [];
-  const coordinator = { onEvent: () => ({ dispose() {} }), claim: () => gate.promise };
-  const session = new Session(coordinator, 'S', () => {}, () => {});
-  const claim = session.claim(42), failed = assert.rejects(claim);
-  session.cancel(); gate.resolve({ leaseId: '1', port: 8700, cleanup: async () => { order.push('release'); } });
-  await failed; await session.close(); assert.deepEqual(order, ['release']);
+// 功能：关闭等待宿主实际termination；输入延后终止；输出资源不提前回收。
+test('stopDebugging返回不等于宿主termination', async () => {
+  const f = fixture({ stop: async () => undefined });
+  const config = await f.resolve(), { session } = f.track(config);
+  let settled = false; const closing = f.owner.dispose().then(() => { settled = true; });
+  await turn(); assert.equal(settled, false); assert.equal(f.stops[0], session);
+  assert.equal(f.calls.some(row => row[0] === 'forward-close'), false);
+  f.ended.fire({ id: 'foreign' }); await turn(); assert.equal(settled, false);
+  f.ended.fire(session); await closing;
+  assert.equal(f.calls.filter(row => row[0] === 'forward-close').length, 1);
+  await f.close();
 });
 
-test('independent cleanup failures remain visible and do not skip later resources', async () => {
-  const Session = sessionClass(), order = [];
-  const session = new Session({ onEvent: () => ({ dispose() {} }) }, 'S', () => {}, () => {});
-  session.own(async () => { order.push('lease'); throw new Error('lease failed'); });
-  session.own(async () => { order.push('server'); throw new Error('server failed'); });
-  await assert.rejects(session.close(), error => error.errors.length === 2 && error.errors.every(item => /failed/.test(item.message)));
-  assert.deepEqual(order, ['server', 'lease']); assert.equal(session.close(), session.close());
+// 功能：清理错误保留身份；输入转发关闭错误；输出聚合错误并继续清除Launch状态。
+test('资源关闭失败聚合原错误且仍清理应用', async () => {
+  const failure = new Error('端口关闭失败'), f = fixture({ closeError: failure });
+  await f.resolve({ request: 'launch' });
+  await assert.rejects(f.owner.dispose(), error => error.errors[0].errors.includes(failure));
+  assert.equal(f.calls.filter(row => row[0] === 'clear').length, 1);
+  assert.equal(f.calls.filter(row => row[0] === 'stop').length, 1);
+  await f.close();
+});
+
+// 功能：Dual子会话退出归属于本次运行；输入真实子tracker及termination；输出只停止自有根并释放两项资源。
+test('Dual子会话退出只清理所属运行不接管foreign会话', async () => {
+  const f = fixture(), config = await f.resolve({ mode: 'dual' }), { session, tracker } = f.track(config);
+  tracker.onDidSendMessage({ type: 'response', command: 'attach', success: true });
+  tracker.onDidSendMessage({ type: 'response', command: 'configurationDone', success: true });
+  tracker.onDidSendMessage({ type: 'event', event: 'continued' }); await turn();
+  assert.equal(f.starts.length, 1);
+  const child = f.track(f.starts[0].config, 'owned-child', session); assert.ok(child.tracker);
+  f.ended.fire({ id: 'foreign' }); await turn(); assert.equal(f.stops.length, 0);
+  f.ended.fire(child.session); await f.owner.dispose();
+  assert.deepEqual(f.stops, [session]);
+  assert.equal(f.calls.filter(row => row[0] === 'native-close').length, 1);
+  assert.equal(f.calls.filter(row => row[0] === 'forward-close').length, 1);
+  await f.close();
+});
+
+// 功能：断开与销毁策略由真实tracker观察；输入公开disconnect/terminate；输出仅显式销毁才停止Attach。
+for (const [command, args, stops] of [['disconnect', { terminateDebuggee: false }, 0], ['disconnect', { terminateDebuggee: true }, 1], ['terminate', {}, 1]]) test('Attach清理策略：' + command + JSON.stringify(args), async () => {
+  const f = fixture(), config = await f.resolve(), { session, tracker } = f.track(config);
+  tracker.onWillReceiveMessage({ type: 'request', command, arguments: args });
+  f.ended.fire(session); await f.owner.dispose();
+  assert.equal(f.calls.filter(row => row[0] === 'stop').length, stops);
+  assert.equal(f.calls.some(row => row[0] === 'clear'), false);
+  assert.equal(f.calls.filter(row => row[0] === 'forward-close').length, 1);
+  await f.close();
 });

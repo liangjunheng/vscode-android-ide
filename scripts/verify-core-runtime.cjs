@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 
 // 共享回归：Node >=22 执行 node --test tests/core-runtime-verifier.test.js tests/vsix-content.test.js；
 // 成功证据为真实四平台资源通过，缺文件、篡改 DLL、架构错误、目录和链接均拒绝。
+// 此门禁仅校验 ADB 发布资产；无服务源码及 JVM 资源的隔离根也须通过，见 core-runtime-verifier 测试。
 const ROOT = path.resolve(__dirname, '..');
 const EXPECTED = {
   'win32-x64': { platform: 'windows', architecture: 'x64', executable: 'adb.exe', companion: ['AdbWinApi.dll', 'AdbWinUsbApi.dll'] },

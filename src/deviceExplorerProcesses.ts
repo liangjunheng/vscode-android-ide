@@ -1,6 +1,6 @@
 import { AdbSmartSocket, SocketFactory } from './adbSmartSocket';
 
-export type DebuggerState = 'default' | 'waiting' | 'attached' | 'error';
+export type DebuggerState = 'unknown' | 'default' | 'waiting' | 'attached' | 'error';
 export interface ExplorerProcess { pid: number; name?: string; packageName?: string; abi?: string; vm?: string; userId?: number; debugger: DebuggerState; error?: string; }
 export interface HeloMetadata { pid: number; name?: string; packageName?: string; abi?: string; vm?: string; userId?: number; }
 
@@ -37,7 +37,7 @@ function processAbi(executable: string | undefined, abi64: string, abi: string):
 
 // 元数据共享回归：Node>=22，node --test tests/device-explorer-processes.test.js；使用真实AdbSmartSocket与Duplex协议对端，无真实设备写操作。
 // HELO fallback shares one PID-specific snapshot验证单次shell、多PID exe/ABI隔离及VM未知；metadata EOF fallback preserves errors / metadata fallback cancellation releases sockets验证非零/取消与连接关闭。
-// watch fallback loads fresh metadata for new PIDs验证每批新增PID取新快照、stop回收；track snapshot and HELO metadata survive协议用例断言零shell回退。
+// watch shell metadata stays fresh for new PIDs 验证后台每批新快照与零 JDWP；track snapshot and HELO metadata survive 验证显式 list 保留 HELO 且不查 shell。
 interface DeviceMetadata { ps: string; processes: Map<number, { executable?: string; vm?: string }>; abi64: string; abi: string; }
 
 // 解析设备查询分段与PID记录，exe/VM仅归属对应PID，缺失字段保持未知；回归见元数据共享映射。
@@ -117,8 +117,8 @@ export class DeviceExplorerProcesses {
     } finally { await stop?.(); }
   }
 
-  // tracker事件创建/释放真实PID资源，每批新增PID共享当批快照而非整个watch的旧快照；移除会取消查询。
-  // 元数据共享回归的watch fallback loads fresh metadata for new PIDs断言新增PID重新查询，stop等待全部连接回收。
+  // 功能：后台仅按批读取 shell 元数据，不建立 JDWP；输入 tracker PID，先发布未知行再补充真实字段。
+  // 输出：查询失败保留行错误并通知 onError，取消/移除/stop 回收连接；验证见后台 watch 协议回归。
   watch(onUpdate: (rows: ExplorerProcess[]) => void, onError: (error: Error) => void, signal?: AbortSignal): () => Promise<void> {
     const controller = new AbortController(); const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) { abort(); }
@@ -126,15 +126,28 @@ export class DeviceExplorerProcesses {
     const owned = new Set<Promise<void>>();
     const publish = () => { if (!controller.signal.aborted) { onUpdate([...records.values()].map(record => record.row)); } };
     const stopTracker = this.adb.trackJdwp(this.serial, pids => {
-      let metadata: Promise<string> | undefined;
+      let metadata: Promise<DeviceMetadata> | undefined;
+      const batch = new AbortController(), children: AbortController[] = [];
+      // 同批仍有存活 PID 时保留共享读取，全部移除或取消才中止 shell。
+      const cancelMetadata = () => { if (children.every(child => child.signal.aborted)) { batch.abort(); } };
       const active = new Set(pids);
       for (const [pid, record] of records) { if (!active.has(pid)) { record.controller.abort(); records.delete(pid); } }
       for (const pid of pids) {
         if (records.has(pid)) { continue; }
         const child = new AbortController(); const cancel = () => child.abort(controller.signal.reason); controller.signal.addEventListener('abort', cancel, { once: true });
-        const record = { controller: child, row: { pid, debugger: 'error' as DebuggerState }, done: Promise.resolve() };
+        children.push(child); child.signal.addEventListener('abort', cancelMetadata, { once: true });
+        const record = { controller: child, row: { pid, debugger: 'unknown' } as ExplorerProcess, done: Promise.resolve() };
         records.set(pid, record);
-        record.done = this.describe(pid, child.signal, () => metadata ??= this.loadDeviceMetadata(controller.signal)).then(row => { child.signal.throwIfAborted(); record.row = row; publish(); }, error => { if (!child.signal.aborted) { onError(error instanceof Error ? error : new Error(String(error))); } }).finally(() => { controller.signal.removeEventListener('abort', cancel); owned.delete(record.done); });
+        record.done = (metadata ??= this.loadDeviceMetadata(batch.signal).then(parseDeviceMetadata)).then(snapshot => {
+          if (child.signal.aborted) { return; }
+          const process = snapshot.processes.get(pid);
+          record.row = { ...parseProcessSnapshot(snapshot.ps, pid), abi: processAbi(process?.executable, snapshot.abi64, snapshot.abi), vm: process?.vm, debugger: 'unknown' };
+          publish();
+        }, error => {
+          if (child.signal.aborted) { return; }
+          record.row = { pid, debugger: 'error', error: String(error) }; publish();
+          onError(error instanceof Error ? error : new Error(String(error)));
+        }).finally(() => { child.signal.removeEventListener('abort', cancelMetadata); controller.signal.removeEventListener('abort', cancel); owned.delete(record.done); });
         owned.add(record.done);
       }
       publish();

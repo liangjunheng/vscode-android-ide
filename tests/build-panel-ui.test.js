@@ -1,3 +1,12 @@
+/**
+ * 功能点：构建面板行为、布局与扩展注册接线。
+ * 受影响对象：extension.activate/deactivate、构建栏、RunningDeviceView、LogcatView。
+ * 复现路径：Node>=22，执行真实页面脚本与activate，隔离调试注册边界。
+ * 测试范围：UI消息与状态、双向接线、registerAndroidDebugging及registerJvmDebugger参数和停用释放。
+ * 执行入口：node --test tests/build-panel-ui.test.js。
+ * 预期结果：UI契约不变，包信息延迟读取，停用等待调试注册返回的dispose。
+ * 判据：消息、布局、注册参数及释放断言全部满足。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -234,20 +243,21 @@ test('build panel bridge routes selected serial and publishes snapshots', async 
   assert.ok(css.includes('min-width:0'));
   assert.ok(css.includes('@media(max-width:260px)'));
 });
-// npm test：实际activate断言已移除命令不再注册，同时保留构建动作、状态、控制器和调试工厂。
+// 执行真实activate/deactivate；保留构建双向接线，核对注册参数、延迟包读取与异步释放。
 test('build panel integration owns controller and connects both directions', async () => {
-  const calls = [], registrations = [], commandNames = [], module = { exports: {} }, subscriptions = [];
-  let running, build, logcat;
+  const calls = [], commandNames = [], module = { exports: {} }, subscriptions = [];
+  let running, build, logcat, finishDisposal;
   class Running { constructor(ext, action) { running = this; this.action = action; } publishBuildState(m) { calls.push(m); } }
-  // 模拟只读当前Gradle包名，断言Native工厂只在需要时按workspace调用。
-  class Build { constructor(post, ext, cache) { build = this; this.post = post; this.cache = cache; } async initialize() { calls.push(['initialize']); } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
-  const debugFactory = {}, jvmRegistrations = [];
+  // 模拟当前Gradle包信息，供调试注册按工作区延迟读取；本用例断言调用时序。
+  class Build { constructor(post, ext, cache) { build = this; this.post = post; this.cache = cache; } async initialize() { calls.push(['initialize']); } async handle(m, serial) { calls.push([m.action, serial]); } currentApplicationId() { return this.applicationId; } currentNativeDebugMetadata(workspaceRoot) { calls.push(['selected-package', workspaceRoot]); if (this.metadataError) throw this.metadataError; return this.applicationId ? { packageName: this.applicationId } : undefined; } dispose() {} }
+  const jvmRegistrations = [], debuggingContexts = [], packageResolvers = [];
   const extensionContext = { extensionPath: 'extension-root', subscriptions, workspaceState: { get() {}, async update() {} } };
-  const factoryContexts = [], packageResolvers = [];
-  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} }, debug: { registerDebugAdapterDescriptorFactory: (type, factory) => { registrations.push([type, factory]); return { dispose() {} }; }, onDidTerminateDebugSession: () => ({ dispose() {} }) } };
+  // 返回可控释放结果；停用必须调用返回对象并等待其完成，不启动调试引擎。
+  const debugging = { dispose() { calls.push(['dispose-debugging', this]); return new Promise(resolve => { finishDisposal = resolve; }); } };
+  const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback, inspect: () => undefined }), onDidChangeConfiguration: () => ({ dispose() {} }) }, commands: { registerCommand(name) { commandNames.push(name); } }, window: { registerWebviewViewProvider() {} } };
   Object.assign(vscode.workspace, { findFiles: async () => [], onDidCreateFiles: () => ({ dispose() {} }), onDidDeleteFiles: () => ({ dispose() {} }), onDidRenameFiles: () => ({ dispose() {} }), onDidChangeWorkspaceFolders: () => ({ dispose() {} }) });
   vscode.commands.executeCommand = async () => {};
-  const deps = { './android-debugger/coordinator/androidCoordinator': { AndroidCoordinator: class { async dispose() {} } }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class { constructor(ext, selection, action) { logcat = this; this.action = action; } publishBuildState(message) { this.message = message; } } }, './extendedControls': {}, './android-debugger/adapter': { createAndroidDebugAdapterFactory: (context, packageResolver) => { factoryContexts.push(context); packageResolvers.push(packageResolver); return debugFactory; } }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger: context => { jvmRegistrations.push(context); } } };
+  const deps = { './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './androidBuild': { AndroidBuildController: Build }, './runningDevices': { RunningDeviceView: Running }, './deviceManager': { registerDeviceManager() {} }, './logcat': { LogcatView: class { constructor(ext, selection, action) { logcat = this; this.action = action; } publishBuildState(message) { this.message = message; } } }, './extendedControls': {}, './android-debugger/debugging': { registerAndroidDebugging: (context, selectedPackage) => { debuggingContexts.push(context); packageResolvers.push(selectedPackage); return debugging; } }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger: context => { jvmRegistrations.push(context); } } };
   const source = fs.readFileSync(path.join(__dirname, '../src/extension.ts'), 'utf8');
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, require: id => id === './runtimeContext' ? require('./runtime-context-loader.cjs')() : deps[id] });
   module.exports.activate(extensionContext);
@@ -257,16 +267,25 @@ test('build panel integration owns controller and connects both directions', asy
   assert.equal(commandNames.includes('android-ide.openProfiler'), false);
   assert.ok(commandNames.includes('android-ide.showLogcat'));
 
-  // 回归扩展调试接线：android-tools与android-debug共享准确工厂，避免六模式外部入口静默缺失。
-  assert.deepEqual(registrations.map(item => item[0]).sort(), ['android-debug', 'android-tools'].sort());
-  assert.ok(registrations.every(item => item[1] === debugFactory));
+  // 扩展只调用两个注册边界；公开配置与引擎工厂由调试模块自行管理。
+  assert.deepEqual(debuggingContexts, [extensionContext]);
   assert.deepEqual(jvmRegistrations, [extensionContext]);
-  assert.equal(factoryContexts[0], extensionContext);
+  assert.equal(packageResolvers.length, 1);
+  assert.equal(typeof packageResolvers[0], 'function');
   assert.equal(calls.some(call => call[0] === 'selected-package'), false);
   build.applicationId = 'com.selected.gradle';
   assert.deepEqual(packageResolvers[0]({ uri: { fsPath: 'workspace-root' } }), { packageName: 'com.selected.gradle' });
   assert.deepEqual(calls.at(-1), ['selected-package', 'workspace-root']);
+  build.applicationId = 'com.other.gradle';
+  assert.deepEqual(packageResolvers[0]({ uri: { fsPath: 'other-root' } }), { packageName: 'com.other.gradle' });
+  assert.deepEqual(calls.at(-1), ['selected-package', 'other-root']);
+  const reads = calls.filter(call => call[0] === 'selected-package').length;
   assert.equal(packageResolvers[0](undefined), undefined);
+  assert.equal(calls.filter(call => call[0] === 'selected-package').length, reads);
+  build.applicationId = undefined;
+  assert.equal(packageResolvers[0]({ uri: { fsPath: 'workspace-root' } }), undefined);
+  build.metadataError = new Error('metadata unavailable');
+  assert.throws(() => packageResolvers[0]({ uri: { fsPath: 'workspace-root' } }), error => error === build.metadataError);
   await running.action({ action: 'build' }, 'phone');
   assert.deepEqual(calls.at(-1), ['build', 'phone']);
   for (const side of [running, logcat]) {
@@ -278,6 +297,16 @@ test('build panel integration owns controller and connects both directions', asy
       assert.equal(logcat.message, calls.at(-1));
     }
   }
+  let deactivated = false;
+  const closing = module.exports.deactivate().then(() => { deactivated = true; });
+  assert.deepEqual(calls.at(-1), ['dispose-debugging', debugging]);
+  await Promise.resolve();
+  assert.equal(deactivated, false);
+  finishDisposal();
+  await closing;
+  assert.equal(deactivated, true);
+  await module.exports.deactivate();
+  assert.equal(calls.filter(call => call[0] === 'dispose-debugging').length, 1);
 });
 // npm test：脚本尚未收到宿主消息时使用页面初始配置，隐藏状态不会在初始化期间错误显示选中。
 test('build panel initial mirror state reflects restored markup before messages', () => {

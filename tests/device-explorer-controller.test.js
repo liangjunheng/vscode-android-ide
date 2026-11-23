@@ -10,12 +10,19 @@ const { transformSync } = require('esbuild');
 const source = fs.readFileSync(path.join(__dirname, '../src/deviceExplorer.ts'), 'utf8');
 const debuggerSource = fs.readFileSync(path.join(__dirname, '../src/android-debugger/index.ts'), 'utf8');
 
-// Node>=22以VM加载TS及可记录后端；workspaceFiles供原过滤器，currentApplicationId注入Build只读选择，directoryEntries可挂起目录读取供取消回归。
-// 真实临时目录及create/remove/push/pull/onPost替身服务locateApp与toolbar具名回归；node --test tests/device-explorer-controller.test.js验证目录快照、落地字节、取消、错误和ACK释放锁。
+/** 功能点：Device Explorer控制器的消息作用域与资源归属，含调试启动交接回归。
+ * 受影响对象：DeviceExplorerController、ProcessesController、startAndroidDebugging、startup登记及宿主会话监听。
+ * 复现路径：Node>=22，加载真实控制器、临时文件目录与内存设备边界，进入Files/Processes并发送消息；调试边界独立登记start与termination。
+ * 测试范围：既有文件/进程/取消回归及三模式Attach、拒绝、配置选择期间失效和宿主监听清理。
+ * 执行入口：node --test tests/device-explorer-controller.test.js；完整入口npm test。
+ * 预期结果：消息仅作用于拥有的资源，调试会话携带唯一ID，stop只终止精确对象，全部监听在关闭时释放。
+ * 判据：快照、字节、错误、调用顺序与监听集合全部符合各用例断言，不使用真实设备。
+ */
+// 功能：加载真实控制器与可记录后端；输入文件/进程/选择边界；输出临时目录、宿主集合监听及可等待关闭入口，供本文件用例使用。
 async function fixture(options = {}) {
   const temp = await fsp.mkdtemp(path.join(os.tmpdir(), 'device-explorer-controller-test-'));
-  const posts = [], calls = [], updates = [];
-  let stopCount = 0;
+  const posts = [], calls = [], updates = [], debugStarts = new Set(), debugEnds = new Set();
+  let stopCount = 0, debugSequence = 0;
   const config = { filter: false, downloadDirectory: temp, launch: [], debuggerExtensions: [] };
   const files = {
     serial: 'phone',
@@ -36,10 +43,27 @@ async function fixture(options = {}) {
     commands: { executeCommand: async (...args) => calls.push(['command', ...args]) },
     env: { clipboard: { writeText: async value => calls.push(['clipboard', value]) } },
     window: { showErrorMessage: async message => { calls.push(['errorNotification', message]); }, showInformationMessage: async message => { calls.push(['information', message]); }, showInputBox: async () => options.input, showWarningMessage: async (message, opts, ...items) => options.confirm === undefined ? items.at(-1) : options.confirm, showOpenDialog: async opts => options.openDialog === undefined ? [vscode.Uri.file(temp)] : options.openDialog, showQuickPick: async (list, settings) => { calls.push(['picker', Array.from(list), settings]); return options.quickPick ? options.quickPick(list, settings) : list[0]; } },
-    debug: { onDidStartDebugSession: listener => { vscode._debugListener = listener; return { dispose() { if (vscode._debugListener === listener) vscode._debugListener = undefined; } }; }, startDebugging: async (...args) => { calls.push(['debug', ...args]); if (options.debugResult ?? true) vscode._debugListener?.({ configuration: args[1] }); return options.debugResult ?? true; } },
+    debug: {
+      // 功能：登记start监听；输入真实入口监听器；输出集合中的精确注销操作，覆盖并发订阅而非单槽覆盖。
+      onDidStartDebugSession(listener) { debugStarts.add(listener); return { dispose: () => debugStarts.delete(listener) }; },
+      // 功能：登记termination监听；输入真实入口监听器；输出精确注销操作，供取消清理边界使用。
+      onDidTerminateDebugSession(listener) { debugEnds.add(listener); return { dispose: () => debugEnds.delete(listener) }; },
+      // 功能：接受或拒绝启动；输入宿主配置；输出唯一ID及集合start事件，不省略会话身份。
+      async startDebugging(...args) {
+        calls.push(['debug', ...args]);
+        if (options.debugResult ?? true) {
+          const session = { id: 'explorer-session-' + ++debugSequence, configuration: args[1] };
+          for (const listener of [...debugStarts]) listener(session);
+        }
+        return options.debugResult ?? true;
+      },
+      // 功能：停止精确观察对象；输入会话；输出对应termination事件，不把任意会话视为已退出。
+      async stopDebugging(session) { calls.push(['debugStop', session]); for (const listener of [...debugEnds]) listener(session); },
+    },
   };
   const debuggerModule = { exports: {} };
-  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' ? require('./auto-config-loader.cjs')() : require(id), Promise });
+  const startup = require('./debug-startup-loader.cjs')();
+  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, AbortController, console, require: id => id === './startup' ? startup : id === 'vscode' ? vscode : id === './autoConfig' ? require('./auto-config-loader.cjs')() : require(id), Promise });
   const deps = { vscode, './projectLocalConfig': { readProjectLocalConfig: function() { return { downloadDirectory: config.downloadDirectory }; } }, './android-debugger': debuggerModule.exports, './deviceExplorerFiles': { DeviceExplorerFiles: class { constructor(serial,access) { Object.assign(this, files); this.runAs=access?.runAs; } } }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { constructor() { Object.assign(this, processState); } } } };
   const processesModule = { exports: {} };
   vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/processes.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code, { module: processesModule, exports: processesModule.exports, require: id => Object.hasOwn(deps, id) ? deps[id] : require(id), Buffer, process, AbortController, Promise });
@@ -49,7 +73,7 @@ async function fixture(options = {}) {
   const Controller = module.exports.DeviceExplorerController;
   const resolveDebugProject = Object.hasOwn(options, 'resolveDebugProject') ? options.resolveDebugProject : async (packageName, workspaceRoot, signal) => { calls.push(['debugProject', packageName, workspaceRoot, signal]); return { androidProjectRoot: temp, androidModuleRoot: path.join(temp, 'app'), androidVariant: 'debug', androidSourceRoots: [path.join(temp, 'generated-sources')], ...(options.nativeModules !== undefined ? { androidNativeModules: options.nativeModules } : {}) }; };
   const controller = new Controller(message => { posts.push(message); options.onPost?.(message, controller); }, Object.hasOwn(options, 'currentApplicationId') ? options.currentApplicationId : () => 'com.example.app', resolveDebugProject);
-  return { controller, posts, calls, processState, config, temp, vscode, get stopCount() { return stopCount; }, async close() { await controller.dispose(); await fsp.rm(temp, { recursive: true, force: true }); } };
+  return { controller, posts, calls, processState, config, temp, vscode, get stopCount() { return stopCount; }, async close() { await controller.dispose(); await fsp.rm(temp, { recursive: true, force: true }); assert.equal(debugStarts.size, 0, 'start监听泄漏'); assert.equal(debugEnds.size, 0, 'termination监听泄漏'); } };
 }
 
 // 验证设备隐藏、同串号复用和串号切换都会关闭旧作用域并发布正确状态。

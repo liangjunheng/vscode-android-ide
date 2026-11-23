@@ -1,3 +1,12 @@
+/**
+ * 功能点：镜像配置持久化及Build/Explorer接线。
+ * 受影响对象：extension.activate、配置监听与延迟项目读取器。
+ * 复现路径：Node>=22，加载真实activate，隔离registerAndroidDebugging和registerJvmDebugger。
+ * 测试范围：初始化、配置恢复与失败、监听释放、布局及项目读取错误传播。
+ * 执行入口：node --test tests/mirror-configuration.test.js。
+ * 预期结果：配置与只读闭包保持原契约，不加载调试引擎。
+ * 判据：既有配置、资源归属、布局和延迟读取断言全部满足。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -27,7 +36,7 @@ function fixture(initializeError) {
     constructor(ext, action, preference) { this.preference = preference; f.instances.push(this); }
     async applyDeviceViewMode(visible) { if (f.rejectApply) throw new Error('stream failed'); f.applied.push(visible); }
   }
-  const deps = { './android-debugger/coordinator/androidCoordinator': { AndroidCoordinator: class { async dispose() {} } }, './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class {
+  const deps = { './android-debugger/debugging': { registerAndroidDebugging: () => ({ async dispose() {} }) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class {
     // 保存只读provider但激活时不取值，wiring回归验证Build尚未创建时无访问。
     constructor(post, currentApplicationId, resolveDebugProject) { this.currentApplicationId = currentApplicationId; this.resolveDebugProject = resolveDebugProject; f.explorer = this; }
     async dispose() {}

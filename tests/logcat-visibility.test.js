@@ -287,6 +287,35 @@ test('Logcat project processes emit exact Studio separators once and preserve re
   f.view.dispose(); await settled(); assert.equal(watch.stops, 1);
 });
 
+/**
+ * 功能点：Logcat 接受后台 unknown 状态，不把未查询调试状态视为采集错误。
+ * 受影响对象：LogcatView 的进程 watcher、项目进程分类、PROCESS STARTED 分隔行及错误状态消息。
+ * 复现路径：Node>=22/esbuild，processFixture 自动选择 phone 并启动 watch，先发送无元数据 unknown，再补包名和 UID。
+ * 测试范围：初始无身份不生成系统行，元数据补齐后仅生成一次 STARTED，重复 unknown 不报错且移除仍生成 ENDED。
+ * 执行入口：node --test tests/logcat-visibility.test.js；仅设计，本任务不执行。
+ * 预期结果：unknown 不产生错误 status，不阻断包名分类，也不伪造提前开始或结束。
+ * 判据：消息数量、分隔文本与错误列表均严格匹配；unknown 导致错误或重复分隔即失败。
+ */
+// 功能：输入真实后台行形态并检查 Logcat 输出；协议独占性由 device-explorer-processes 回归单独覆盖。
+test('Logcat unknown debugger rows classify only after shell identity without errors', async () => {
+  const f = await processFixture(), watch = f.watches[0];
+  try {
+    const statuses = f.messages.filter(message => message.type === 'status').length;
+    watch.update([{ pid: 11, debugger: 'unknown' }]); f.provider.flush();
+    assert.equal(f.messages.filter(message => message.type === 'batch').length, 0);
+    watch.update([{ pid: 11, debugger: 'unknown', packageName: 'com.example.app', name: 'com.example.app', userId: 0 }]);
+    watch.update([{ pid: 11, debugger: 'unknown', packageName: 'com.example.app' }]); f.provider.flush();
+    const batches = f.messages.filter(message => message.type === 'batch');
+    assert.equal(batches.length, 1); assert.equal(batches[0].items.length, 1);
+    assert.match(batches[0].items[0].msg, /PROCESS STARTED \(11\) for package com\.example\.app/);
+    assert.equal(f.messages.filter(message => message.type === 'status').length, statuses);
+    assert.deepEqual(f.errors, []);
+    watch.update([]); f.provider.flush();
+    assert.match(f.messages.findLast(message => message.type === 'batch').items[0].msg, /PROCESS ENDED \(11\)/);
+  } finally { f.view.dispose(); await settled(); }
+  assert.equal(watch.stops, 1);
+});
+
 // hide/select/restart/dispose 均释放 tracker，丢弃旧队列但不虚构 ENDED，旧快照/错误和旧 stdout 不得串入新设备。
 test('Logcat process ownership releases on hide selection restart and disposal without synthetic endings', async () => {
   const f = await processFixture();

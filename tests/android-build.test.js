@@ -13,7 +13,14 @@ vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src/an
 const autoApi = autoModule.exports;
 const tasks = 'app:assembleDebug - APK\n:app:installDebug - install\napp:assembleRelease\napp:installRelease\nassemble - aggregate\napp:test - tests\n';
 
-// 创建临时工程及真实 EventEmitter 子进程替身；可配置tasks供current application ID多模块回归，npm test断言关闭、失败、取消和选择隔离，不执行用户Gradle。
+// 功能点：Build 的调试启动取消、清理互斥及 Run 子进程关闭边界。
+// 受影响对象：AndroidBuildController.stop/handle/execute、真实 index/startup、宿主启动与终止监听及 OwnedProcess。
+// 复现路径：刷新受控工程，显式报告独立 connected，挂起宿主启动，Stop 后报告两个匹配会话，结算宿主并逐个终止；另在 Run 子进程 close 前停止。
+// 测试范围：同步和微任务快照、立即取消、cleanup 等待、重叠操作拒绝、重复 Stop、foreign 隔离及 Run 的真实 close 屏障。
+// 执行入口：node --test tests/android-build.test.js；npm test。
+// 预期结果：Stop 立即发布 busy=false/running=false/stopping=true，清理完成后 Stopped 且监听归零；Run 不提前越过 close。
+// 判据：快照、Promise 状态、停止次数和精确对象、监听数及后续命令全部符合断言，不代替真实宿主或设备验证。
+// 创建临时工程及真实 EventEmitter 子进程替身；只替换设备和宿主边界，真实启动取消模块保持可执行。
 function fixture(t, platform = 'linux') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'device-tools-build-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -55,10 +62,13 @@ function fixture(t, platform = 'linux') {
     debug: {
       onDidStartDebugSession: listener => { (f.debugStartListeners ??= new Set()).add(listener); return { dispose() { f.debugStartListeners.delete(listener); } }; },
       onDidTerminateDebugSession: listener => { f.debugTerminationListeners.add(listener); return { dispose() { f.debugTerminationListeners.delete(listener); } }; },
+      // 功能：模拟宿主会话及独立连接结算；输入映射配置；输出转换后的真实类型事件，终止不等同连接成功。
       startDebugging: async (...args) => {
         f.debugCalls.push(args);
         if (f.debugResult) {
-          const session = { configuration: { ...args[1], ...(f.resolvedPackage ? { packageName: f.resolvedPackage } : {}) } };
+          const config = args[1];
+          const session = { id: 'debug-' + f.debugCalls.length, configuration: { ...config, type: config.type === 'android-debug' ? (config.mode === 'java' ? 'android-jvm' : 'android-tools') : config.type, ...(f.resolvedPackage ? { packageName: f.resolvedPackage } : {}) } };
+          startup.reportDebugConnection(session.configuration, Promise.resolve());
           f.session = session;
           for (const listener of [...f.debugStartListeners]) listener(session);
           if (f.terminateImmediately) for (const listener of [...f.debugTerminationListeners]) listener(session);
@@ -80,7 +90,9 @@ function fixture(t, platform = 'linux') {
     return { moduleRoot: path.join(selection.projectRoot, ...selection.modulePath.slice(1).split(':')), roots: [], ...f.sourceModel };
   } };
   const debuggerModule = { exports: {} };
-  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, require: id => id === 'vscode' ? vscode : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : require(id), Promise });
+  const startup = require('./debug-startup-loader.cjs')();
+  f.startup = startup;
+  vm.runInNewContext(transformSync(debuggerSource, { loader: 'ts', format: 'cjs' }).code, { module: debuggerModule, exports: debuggerModule.exports, AbortController, console, require: id => id === './startup' ? startup : id === 'vscode' ? vscode : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : require(id), Promise });
   const debugApi = { ...debuggerModule.exports, startAndroidDebugging: async (folder, config, target) => {
     (f.debugRequests ??= []).push({ folder, config, target });
     return debuggerModule.exports.startAndroidDebugging(folder, config, target);
@@ -376,7 +388,9 @@ test('android-build stop during cache commit waits for storage and never publish
   const stop = f.action('stop').then(() => { stopped = true; });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(stopped, false);
-  assert.equal(f.last().busy, true);
+  assert.equal(f.last().busy, false);
+  assert.equal(f.last().running, false);
+  assert.equal(f.last().stopping, true);
   assert.equal(f.messages.some(message => message.status === 'Ready'), false);
   release(); await stop; await cancelled;
   assert.equal(f.last().status, 'Stopped');
@@ -596,7 +610,7 @@ test('android-build metadata and launcher failures remain visible', async t => {
   await assert.rejects(f.action('run', undefined, 'phone'), /JSON|Unexpected|property/i);
   fs.unlinkSync(f.metadata);
   await assert.rejects(f.action('run', undefined, 'phone'), /No APK metadata/);
-  f.configs = [{ name: 'External', type: 'adapter', request: 'attach' }];
+  f.configs = [{ name: 'Android: Native Debug Launch', type: 'adapter', request: 'attach' }];
   await f.action('debug', undefined, 'phone');
   assert.equal(f.debugCalls.at(-1)[1].packageName, undefined);
   await f.action('stop');
@@ -647,7 +661,7 @@ test('android-build preserves explicit Android and external options without mode
     const requested = f.debugCalls.at(-1)[1];
     const forwarded = f.debugRequests.at(-1);
     assert.equal(forwarded.config.serial, 'explicit-serial'); assert.equal(forwarded.config.target, 'explicit-target');
-    assert.deepEqual(Object.keys(forwarded.target).sort(), ['packageName', 'serial', 'signal']);
+    assert.deepEqual(Object.keys(forwarded.target).sort(), ['onStartupCleanup', 'packageName', 'serial', 'signal']);
     assert.equal(forwarded.target.serial, 'phone'); assert.equal(forwarded.target.packageName, 'com.user.chosen');
     assert.equal(forwarded.target.signal instanceof AbortSignal, true);
     for (const key of ['packageName', 'apkPath', 'androidProjectRoot', 'preLaunchTask', 'request', 'mode']) assert.equal(requested[key], selected[key]);
@@ -662,16 +676,18 @@ test('android-build preserves explicit Android and external options without mode
   await f.controller.dispose();
 });
 
-// 启动事件和终止事件在startDebugging完成前连续发生也必须释放状态；取消后detach只发生一次。
+// 启动事件与真实连接分开报告；立即终止和启动取消仍必须释放状态，取消后 detach 只发生一次。
 test('android-build immediate termination and startup cancellation release owned resources', async t => {
   const f = fixture(t); await f.action('refresh'); f.terminateImmediately = true;
-  await assert.rejects(f.action('debug', undefined, 'phone'), /terminated during startup/);
+  await assert.rejects(f.action('debug', undefined, 'phone'), /did not report a live start/);
   assert.equal(f.controller.debugSession, undefined); assert.equal(f.controller.launched, undefined);
   assert.equal(f.debugStartListeners.size, 0); assert.equal(f.debugTerminationListeners.size, 0);
   assert.equal(f.stoppedDebug, undefined);
   f.terminateImmediately = false;
-  f.onDebugStart = () => f.controller.operation.controller.abort();
-  await assert.rejects(f.action('debug', undefined, 'phone'), /cancelled/);
+  let cancelledCleanup;
+  f.onDebugStart = () => { cancelledCleanup = f.controller.operation; cancelledCleanup.controller.abort(); };
+  await assert.rejects(f.action('debug', undefined, 'phone'), error => error?.name === 'AbortError' || /cancelled/.test(String(error)));
+  await cancelledCleanup.debugCleanup;
   assert.equal(f.stoppedDebug, f.session);
   assert.equal(f.debugTerminationListeners.size, 0); assert.equal(f.debugStartListeners.size, 0);
   f.onDebugStart = undefined; await f.action('debug', undefined, 'phone'); await f.action('stop');
@@ -742,10 +758,10 @@ test('android-build debug starts built-in sessions with source roots and preserv
   const callsBeforeCancel = f.calls.length, debugBeforeCancel = f.debugCalls.length;
   f.choose = false; await f.action('debug', undefined, 'phone'); assert.equal(f.last().status, 'Debug cancelled');
   assert.equal(f.calls.length, callsBeforeCancel); assert.equal(f.debugCalls.length, debugBeforeCancel);
-  const modelCount = f.modelCalls.length;
+  const modelCount = f.modelCalls.length, navigationCount = f.commands.length;
   f.choose = true; await f.action('debug', undefined, 'phone');
   assert.equal(f.modelCalls.length, modelCount);
-  assert.equal(f.commands.length, 1);
+  assert.equal(f.commands.length, navigationCount + 1);
   assert.equal(f.debugCalls.at(-1)[1].name, 'Android: Native Debug Attach');
   assert.equal(f.debugCalls.at(-1)[1].request, 'attach');
   assert.equal(f.debugCalls.at(-1)[1].androidProjectRoot, undefined);
@@ -806,7 +822,7 @@ test('android-build provider preserves native graph identity while built-in Nati
     await f.action('stop');
   }
   const modelCount = f.modelCalls.length;
-  f.configs = [{ name: 'External', type: 'third-party', request: 'attach', custom: 'preserved' }];
+  f.configs = [{ name: 'Android: Native Debug Launch', type: 'third-party', request: 'attach', custom: 'preserved' }];
   await f.action('debug', undefined, 'phone');
   assert.equal(f.modelCalls.length, modelCount); assert.equal(Object.hasOwn(f.debugCalls.at(-1)[1], 'androidNativeModules'), false);
   await f.action('stop'); await f.controller.dispose();
@@ -969,6 +985,259 @@ for (const platform of ['linux', 'win32']) test('android-build cancel and reentr
   assert.equal(stopped, true);
   assert.equal(f.last().status, 'Stopped');
   f.hold = false; await f.controller.dispose();
+});
+
+// 以一次事件循环检查点观察 Promise 状态，不结算外部门闩，也不等待定时器或轮询。
+async function pendingState(promise) {
+  return Promise.race([promise.then(() => 'fulfilled', () => 'rejected'), new Promise(resolve => setImmediate(() => resolve('pending')))]);
+}
+
+// 永久 pending 的宿主不能阻塞 UI 取消；清理仍独占操作且逐个等待精确会话退出。
+test('android-build pending debug stop releases UI immediately but owns host and every exact termination', async t => {
+  const f = fixture(t); await f.action('refresh');
+  const entered = Promise.withResolvers(), host = Promise.withResolvers(), stoppedFirst = Promise.withResolvers(), stoppedSecond = Promise.withResolvers();
+  const stopped = [];
+  // 功能：只挂起宿主接受；输入启动配置；输出真实 registry 的连接报告及可控宿主门闩，终止仍由独立事件驱动。
+  f.vscode.debug.startDebugging = (_folder, config) => {
+    f.pendingConfig = config; f.startup.reportDebugConnection(config, Promise.resolve());
+    entered.resolve(); return host.promise;
+  };
+  f.vscode.debug.stopDebugging = async session => { stopped.push(session); (stopped.length === 1 ? stoppedFirst : stoppedSecond).resolve(); };
+  const starting = f.action('debug', undefined, 'phone');
+  const rejected = assert.rejects(starting, /cancelled/);
+  await entered.promise;
+  const calls = f.calls.length;
+  const first = { id: 'pending-first', configuration: { ...f.pendingConfig } }, second = { id: 'pending-second', configuration: { ...f.pendingConfig } };
+  const foreign = { id: 'foreign', configuration: { ...f.pendingConfig, serial: 'other-phone' } };
+  const report = session => { for (const listener of [...f.debugStartListeners]) listener(session); };
+  const terminate = session => { for (const listener of [...f.debugTerminationListeners]) listener(session); };
+  const stop = f.action('stop');
+  assert.equal(f.last().busy, false); assert.equal(f.last().running, false); assert.equal(f.last().stopping, true);
+  await Promise.resolve();
+  assert.equal(f.last().busy, false); assert.equal(f.last().running, false); assert.equal(f.last().stopping, true);
+  assert.equal(await pendingState(starting), 'rejected'); await rejected;
+  assert.equal(await pendingState(stop), 'pending');
+  report(first); await stoppedFirst.promise;
+  report(second); report(second); report(foreign); await stoppedSecond.promise;
+  const duplicate = f.action('stop');
+  for (const action of ['debug', 'run', 'build', 'refresh', 'runMode']) await assert.rejects(f.action(action, 'run', 'phone'), /already running/);
+  assert.deepEqual(stopped, [first, second]);
+  assert.equal(f.calls.length, calls);
+  terminate(foreign); assert.equal(await pendingState(stop), 'pending');
+  host.resolve(true); assert.equal(await pendingState(stop), 'pending');
+  terminate(second); assert.equal(await pendingState(stop), 'pending');
+  terminate(first); await Promise.all([stop, duplicate]);
+  assert.deepEqual(stopped, [first, second]);
+  assert.equal(f.last().status, 'Stopped'); assert.equal(f.last().stopping, false);
+  assert.equal(f.last().busy, false); assert.equal(f.last().running, false);
+  assert.equal(f.debugStartListeners.size, 0); assert.equal(f.debugTerminationListeners.size, 0);
+  await f.controller.dispose();
+});
+
+/** 功能：验证已运行调试的停止也等待真实termination；输入已返回的stopDebugging与延迟终止事件；输出前台立即停止且清理完成后才解除互斥；验证：本文件定向入口。 */
+test('android-build running debug stop waits for the exact termination rather than stop request completion', async t => {
+  const f = fixture(t); await f.action('refresh'); await f.action('debug', undefined, 'phone');
+  const entered = Promise.withResolvers();
+  f.vscode.debug.stopDebugging = async session => { assert.equal(session, f.session); entered.resolve(); };
+  const stopping = f.action('stop');
+  assert.equal(f.last().running, false); assert.equal(f.last().busy, false); assert.equal(f.last().stopping, true);
+  await entered.promise; assert.equal(await pendingState(stopping), 'pending');
+  for (const listener of [...f.debugTerminationListeners]) listener({ id: 'foreign', configuration: {} });
+  assert.equal(await pendingState(stopping), 'pending');
+  for (const listener of [...f.debugTerminationListeners]) listener(f.session);
+  await stopping;
+  assert.equal(f.last().status, 'Stopped'); assert.equal(f.last().stopping, false);
+  assert.equal(f.debugTerminationListeners.size, 0); await f.controller.dispose();
+});
+
+// Run 的 UI 停止不代表底层 child 已退出，重复 Stop 与重叠 Run 均不得绕过 close 屏障。
+for (const platform of ['linux', 'win32']) test('android-build Run stop retains the real child close barrier on ' + platform, async t => {
+  const f = fixture(t, platform); await f.action('refresh'); f.hold = true; f.closeOnKill = false;
+  const starting = f.action('run', undefined, 'phone'); const rejected = assert.rejects(starting, /cancelled/);
+  // Run 的首个设备探测同步登记 child，后续安装和启动必须在取消后保持未执行。
+  const child = f.held; assert.ok(child);
+  const stop = f.action('stop'), duplicate = f.action('stop');
+  assert.equal(f.last().busy, false); assert.equal(f.last().running, false); assert.equal(f.last().stopping, true);
+  await assert.rejects(f.action('run', undefined, 'phone'), /already running/);
+  assert.equal(await pendingState(stop), 'pending'); assert.equal(await pendingState(starting), 'pending');
+  child.finish(null, 'SIGTERM'); await Promise.all([stop, duplicate, rejected]);
+  assert.equal(f.calls.some(call => call.args.includes(':app:installDebug') || call.args.includes('monkey')), false);
+  if (platform === 'win32') assert.equal(f.calls.filter(call => call.command === 'taskkill').length, 1);
+  assert.equal(f.last().status, 'Stopped'); assert.equal(f.last().stopping, false);
+  f.hold = false; await f.controller.dispose();
+});
+
+// 功能点：Windows 本地真实子进程上的同一 Run 停止与进程归属隔离，不验证真实 ADB 或设备 Run 端到端。
+// 受影响对象：AndroidBuildController.handle/execute/stop、OwnedProcess、真实 taskkill、index/startup 及前台快照。
+// 复现路径：仅 Windows；唯一临时 wrapper 经 refresh 初始化，Run 首个 sdk-adb get-state 换为 Node helper，owned/foreign 均输出 READY 后连续 Stop 两次。
+// 测试范围：同步释放 busy/running、保留 stopping、重复停止、原生 close 先于 Stopped、取消拒绝、foreign 存活和禁止后续 install/monkey。
+// 执行入口：node --test --test-name-pattern="real Windows Run stop kills only its owned child" tests/android-build.test.js；npm test。
+// 预期结果：真实 taskkill 只终止精确 owned PID 一次，Stop 等待其退出，foreign 前台进程仍可探测；所有自建句柄最终关闭。
+// 判据：快照、命令/PID/次数、原生事件顺序、Promise 结果及退出码全部断言；超时只作失败诊断，finally 清理自建进程后再 dispose 和删除临时目录。
+/** 功能：验证真实 Windows Run 取消；输入受控任务数组和两个 stdin 长驻 helper；输出精确停止及隔离断言；验证：上述定向入口，非 Windows 才跳过。 */
+test('android-build real Windows Run stop kills only its owned child', { skip: process.platform !== 'win32' }, async () => {
+  const realCp = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'device tools real run stop '));
+  const children = [], calls = [], states = [], events = [];
+  const helper = "process.stdin.resume(); process.stdout.write('READY\\n');";
+  let controller, owned, channel;
+  let toolingDisposed = false;
+
+  /** 功能：限制诊断等待；输入待结算 Promise 和阶段名；输出原结果或超时失败，由外层 finally 清理自建进程；验证：本测试所有异步阶段。 */
+  async function deadline(promise, stage) {
+    let timer;
+    try {
+      return await Promise.race([promise, new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('本地 Run 停止诊断超时：' + stage)), 15000);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  /** 功能：立即观察异步拒绝但不丢失失败；输入操作 Promise；输出显式成功或失败记录供断言；验证：Run 和两次 Stop 的结算断言。 */
+  function outcome(promise) {
+    return promise.then(value => ({ status: 'fulfilled', value }), error => ({ status: 'rejected', error }));
+  }
+
+  /** 功能：登记真实句柄及原生关闭事件；输入本测试 spawn 的 child 和标签；输出 close/READY 屏障及退出记录；验证：事件顺序、退出状态和 finally 清理。 */
+  function track(child, label) {
+    const closed = Promise.withResolvers(), ready = Promise.withResolvers();
+    const record = { child, label, closed: closed.promise, ready: ready.promise, close: undefined, error: undefined };
+    children.push(record);
+    let stdout = '';
+    child.stdout?.on('data', chunk => {
+      stdout += chunk.toString();
+      if (stdout.includes('READY\n')) ready.resolve({ ready: true });
+    });
+    child.once('error', error => { record.error = error; ready.resolve({ ready: false, error }); });
+    child.once('close', (code, signal) => {
+      record.close = { code, signal };
+      events.push(label + ':close');
+      ready.resolve({ ready: false, error: record.error ?? new Error(label + ' 在 READY 前关闭') });
+      closed.resolve(record.close);
+    });
+    return record;
+  }
+
+  /** 功能：加载真实 TypeScript 到独立 VM；输入源码相对路径及显式边界依赖；输出真实模块导出，fs/process 保持原生；验证：本测试通过正式 controller 入口调用。 */
+  function loadTs(relative, dependencies) {
+    const module = { exports: {} };
+    vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src', relative), 'utf8'), { loader: 'ts', format: 'cjs' }).code, {
+      module, exports: module.exports, process, Buffer, AbortController, console,
+      require: id => Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
+    });
+    return module.exports;
+  }
+
+  /** 功能：仅替换首个设备探测并透传真实 taskkill；输入生产 spawn 命令和参数；输出登记的真实 child，其他命令立即失败；验证：精确命令、PID 和零安装/启动断言。 */
+  function spawn(command, args, options) {
+    calls.push({ command, args: Array.from(args), options });
+    if (command === 'sdk-adb' && owned === undefined && args.length === 3 && args[2] === 'get-state') {
+      assert.equal(owned, undefined, '只能替换 Run 的首个 get-state');
+      assert.deepEqual(Array.from(args), ['-s', 'local-run-stop', 'get-state']);
+      assert.equal(options.cwd, root); assert.equal(options.shell, false); assert.equal(options.detached, false);
+      owned = track(realCp.spawn(process.execPath, ['-e', helper], options), 'owned');
+      return owned.child;
+    }
+    if (command === 'taskkill') {
+      assert.ok(owned?.child.pid);
+      assert.equal(calls.filter(call => call.command === 'taskkill').length, 1, '重复 Stop 不得重复终止');
+      assert.deepEqual(Array.from(args), ['/pid', String(owned.child.pid), '/t', '/f']);
+      assert.equal(options.shell, false);
+      return track(realCp.spawn(command, args, options), 'taskkill').child;
+    }
+    assert.fail('取消后不得执行安装、monkey 或其他命令：' + command + ' ' + args.join(' '));
+  }
+
+  try {
+    const wrapper = path.join(root, 'gradlew.bat');
+    fs.writeFileSync(wrapper, '@exit /b 97\r\n');
+    // 通道仅记录宿主输出生命周期；输入真实日志，输出保留文本和销毁状态；验证：清理阶段 dispose 断言。
+    channel = { text: '', disposed: false, replace(text) { this.text = text; }, show() { assert.fail('Run 停止不应打开输出面板'); }, dispose() { this.disposed = true; } };
+    // 工作区仅暴露此临时 wrapper；输入发现请求，输出唯一工程；验证：refresh 的项目和目标断言。
+    const vscode = {
+      workspace: { isTrusted: true, workspaceFolders: [{ uri: { fsPath: root } }], findFiles: async () => [{ fsPath: wrapper }] },
+      window: { createOutputChannel: () => channel },
+    };
+    const startup = require('./debug-startup-loader.cjs')();
+    const debugApi = loadTs('android-debugger/index.ts', { vscode, './startup': startup, './autoConfig': autoApi });
+    const projectModel = loadTs('androidProjectModel.ts', {});
+    let queried = 0;
+    const tooling = { GradleToolingClient: class {
+      /** 功能：提供初始化任务边界；输入唯一工程和未取消信号；输出真实格式任务字符串数组；验证：refresh 仅查询一次且选择 Debug。 */
+      async query(projectRoot, signal) {
+        assert.equal(projectRoot, root); assert.equal(signal.aborted, false); queried++;
+        return [':app:assembleDebug', ':app:installDebug'];
+      }
+      /** 功能：记录 Tooling 释放；输入 controller 销毁请求；输出已释放标志；验证：finally 的资源断言。 */
+      async dispose() { toolingDisposed = true; }
+    } };
+    const api = loadTs('androidBuild.ts', {
+      vscode, child_process: { spawn }, './sdk': { adbPath: () => 'sdk-adb' },
+      './android-debugger': debugApi, './android-debugger/autoConfig': autoApi,
+      './androidProjectModel': projectModel, './gradleTooling': tooling,
+    });
+    // 状态出口只记录原始快照和 Stopped 发布顺序，不修改控制器内部 operation/child；验证：同步快照及 close 顺序断言。
+    controller = new api.AndroidBuildController(message => {
+      states.push(message);
+      if (message.status === 'Stopped') events.push('Stopped');
+    }, '');
+    await deadline(controller.handle({ type: 'buildPanel', action: 'refresh' }), 'refresh');
+    assert.equal(queried, 1); assert.equal(states.at(-1).projects.length, 1);
+    assert.equal(states.at(-1).project, root); assert.equal(states.at(-1).target, ':app:Debug');
+    assert.equal(states.at(-1).status, 'Ready'); assert.equal(calls.length, 0);
+
+    const foreign = track(realCp.spawn(process.execPath, ['-e', helper], { cwd: root, shell: false, windowsHide: true, detached: false }), 'foreign');
+    const starting = controller.handle({ type: 'buildPanel', action: 'run' }, 'local-run-stop');
+    const startingResult = outcome(starting);
+    assert.ok(owned, '正常 Run 入口必须登记首个真实 child');
+    const ready = await deadline(Promise.all([owned.ready, foreign.ready]), 'owned/foreign READY');
+    for (const result of ready) assert.equal(result.ready, true, String(result.error));
+    assert.ok(owned.child.pid); assert.ok(foreign.child.pid); assert.notEqual(owned.child.pid, foreign.child.pid);
+    assert.equal(owned.close, undefined); assert.equal(foreign.close, undefined);
+    assert.equal(states.at(-1).busy, true);
+
+    const stopResult = outcome(controller.handle({ type: 'buildPanel', action: 'stop' }));
+    assert.equal(states.at(-1).busy, false); assert.equal(states.at(-1).running, false); assert.equal(states.at(-1).stopping, true);
+    const duplicateResult = outcome(controller.handle({ type: 'buildPanel', action: 'stop' }));
+    assert.equal(states.at(-1).busy, false); assert.equal(states.at(-1).running, false); assert.equal(states.at(-1).stopping, true);
+    assert.equal(owned.close, undefined); assert.equal(events.includes('Stopped'), false);
+    const results = await deadline(Promise.all([startingResult, stopResult, duplicateResult, owned.closed]), 'Run 取消及两次 Stop');
+    assert.equal(results[0].status, 'rejected');
+    await assert.rejects(starting, /cancelled/);
+    assert.equal(results[1].status, 'fulfilled', String(results[1].error));
+    assert.equal(results[2].status, 'fulfilled', String(results[2].error));
+    assert.ok(owned.child.exitCode !== null || owned.child.signalCode !== null, 'owned 必须确实退出');
+    assert.deepEqual(owned.close, { code: owned.child.exitCode, signal: owned.child.signalCode });
+    assert.ok(events.indexOf('owned:close') >= 0);
+    assert.ok(events.indexOf('Stopped') > events.indexOf('owned:close'), JSON.stringify(events));
+    assert.equal(states.at(-1).status, 'Stopped'); assert.equal(states.at(-1).stopping, false);
+    assert.equal(states.at(-1).busy, false); assert.equal(states.at(-1).running, false);
+    const kills = calls.filter(call => call.command === 'taskkill');
+    assert.equal(kills.length, 1); assert.deepEqual(kills[0].args, ['/pid', String(owned.child.pid), '/t', '/f']);
+    assert.equal(children.find(record => record.label === 'taskkill').close.code, 0);
+    assert.equal(calls.length, 2);
+    assert.equal(calls.some(call => call.args.includes(':app:installDebug') || call.args.includes('monkey')), false);
+    assert.equal(foreign.close, undefined); assert.equal(foreign.child.exitCode, null); assert.equal(foreign.child.signalCode, null);
+    assert.equal(process.kill(foreign.child.pid, 0), true, '前台 foreign helper 必须仍存活');
+  } finally {
+    try {
+      // 输入仅限本测试保存的 child 句柄；输出逐个 kill 并等待原生 close；验证：超时和断言失败也不能遗留长驻 helper。
+      const cleaned = await Promise.allSettled(children.map(async record => {
+        if (record.child.pid && record.child.exitCode === null && record.child.signalCode === null) record.child.kill('SIGKILL');
+        await deadline(record.closed, record.label + ' 清理 close');
+      }));
+      const failures = cleaned.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, '本地 Run 停止进程清理失败');
+    } finally {
+      try {
+        if (controller) {
+          await deadline(controller.dispose(), 'controller dispose');
+          assert.equal(channel.disposed, true);
+          assert.equal(toolingDisposed, true);
+        }
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    }
+  }
 });
 
 // npm test：Windows wrapper 在带空格 cwd 执行，adb 保留绝对命令名且不经过 cmd。

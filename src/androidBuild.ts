@@ -12,7 +12,7 @@ interface Project { id: string; label: string; root: string; wrapper: string; ta
 interface ApkMetadata { applicationId: string; elements?: unknown; }
 interface Target { id: string; label: string; module: string; variant: string; assemble: string; install: string; }
 interface RunMode { id: string; label: string; action: 'run' | 'debug'; config?: vscode.DebugConfiguration; }
-interface Operation { controller: AbortController; done: Promise<void>; action?: string; }
+interface Operation { controller: AbortController; done: Promise<void>; action?: string; debugCleanup?: Promise<void>; }
 interface OwnedProcess { child: ChildProcess; closed: Promise<void>; termination?: Promise<void>; }
 interface GradleProjectCache { projects: { root: string; tasks: string[] }[]; }
 const GRADLE_CACHE_KEY = 'android-ide.gradleProjects.v1';
@@ -197,10 +197,10 @@ export class AndroidBuildController implements vscode.Disposable {
     const target = targets.find(item => item.id === this.targetId);
     const applicationLabel = target ? (target.module || ':').replace(/^:/, '') + ' | ' + target.variant : project?.label || 'Application';
     const runModes = getAndroidDebugConfigurations().map((config, index) => ({ id: 'debug-' + index, label: config.name, action: 'debug' as const }));
-    const busy = !!this.operation;
-    const gradleLoading = this.operation?.action === 'refresh';
+    const busy = !this.stopping && !!this.operation && !this.operation.controller.signal.aborted;
+    const gradleLoading = busy && this.operation?.action === 'refresh';
     this.snapshot = { type: 'buildState', projects: projects.map(p => ({ id: p.id, label: p.label })), project: this.projectId,
-      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy, gradleLoading, running: !!this.launched || !!this.debugSession, status, ...(error ? { error } : {}) };
+      targets, target: this.targetId, runMode: this.runModeId, runModes: [{ id: 'run', label: applicationLabel, action: 'run' as const }, ...runModes], busy, stopping: !!this.stopping, gradleLoading, running: !this.stopping && (!!this.launched || !!this.debugSession), status, ...(error ? { error } : {}) };
     this.post(this.snapshot);
   }
 
@@ -301,10 +301,11 @@ export class AndroidBuildController implements vscode.Disposable {
   }
 
   // 由统一调试选择器展示内置Native和外部配置；取消不触发安装或调试。回归：android-build.test.js。
-  private async debugConfiguration(project: Project): Promise<vscode.DebugConfiguration | undefined> {
+  private async debugConfiguration(project: Project, signal: AbortSignal): Promise<vscode.DebugConfiguration | undefined> {
     const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
-    return selectAndroidDebugConfiguration(folder);
+    return selectAndroidDebugConfiguration(folder, undefined, signal);
   }
+
 
   // 将面板选择的六个内置项映射为稳定调试配置；默认run项保持普通应用启动链。
   private selectedRunMode(): RunMode {
@@ -389,7 +390,7 @@ export class AndroidBuildController implements vscode.Disposable {
     if (!serial || !/^[\w.:-]+$/.test(serial)) throw new Error('Select an online device serial first.');
     const selectedMode = action === 'run' ? this.selectedRunMode() : undefined;
     const effectiveAction = selectedMode?.action ?? action;
-    const selectedConfig = effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project) : undefined;
+    const selectedConfig = effectiveAction === 'debug' ? selectedMode?.config ?? await this.debugConfiguration(project, operation.controller.signal) : undefined;
     const config = selectedConfig ? omitAuto(selectedConfig) : undefined;
     this.check(operation);
     if (effectiveAction === 'debug' && !config) return 'Debug cancelled';
@@ -414,39 +415,31 @@ export class AndroidBuildController implements vscode.Disposable {
     const debugConfig = { ...config!, ...debugProjectRoot, ...(config!.packageName === undefined && packageName ? { packageName } : {}) };
     const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
     this.state('Starting Android debugger');
-    let started: vscode.DebugSession | undefined;
     let owned: vscode.DebugSession | undefined;
-    let terminated = false;
-    const startListener = vscode.debug.onDidStartDebugSession(session => {
-      if (session.configuration.name === debugConfig.name && session.configuration.type === debugConfig.type && session.configuration.serial === serial && (packageName === undefined || session.configuration.packageName === packageName)) started = session;
-    });
+    const ended = new Set<string>();
     const termination = vscode.debug.onDidTerminateDebugSession(session => {
-      if (session !== started && session !== owned) return;
-      terminated = true;
-      if (session === owned) {
+      ended.add(session.id);
+      if (session.id === owned?.id) {
         this.debugSession = undefined;
         this.debugTermination?.dispose();
         this.debugTermination = undefined;
-        if (!this.disposed) this.state('Stopped');
+        if (!this.disposed) this.state(this.stopping ? 'Stopping; resources are being released' : 'Stopped');
       }
     });
     try {
-      const session = await startAndroidDebugging(folder, debugConfig, { serial, ...(packageName ? { packageName } : {}), signal: operation.controller.signal });
-      this.check(operation);
-      if (terminated) throw new Error('Android debug session terminated during startup');
+      const session = await startAndroidDebugging(folder, debugConfig, { serial, ...(packageName ? { packageName } : {}), signal: operation.controller.signal, onStartupCleanup: cleanup => { operation.debugCleanup = cleanup; } });
       owned = session;
-      this.debugSession = owned;
+      if (ended.has(session.id)) throw new Error('Android debug session terminated during startup');
+      if (operation.controller.signal.aborted) {
+        await vscode.debug.stopDebugging(session);
+        operation.controller.signal.throwIfAborted();
+      }
+      this.debugSession = session;
       this.debugTermination?.dispose();
       this.debugTermination = termination;
       return 'Debug started';
-    } catch (error) {
-      // 启动事件之后取消/拒绝也要回收已创建的所属会话，立即终止的会话则不能重复detach。
-      if (started && !terminated) await vscode.debug.stopDebugging(started);
-      if (this.debugSession === owned) this.debugSession = undefined;
-      throw error;
     } finally {
-      startListener.dispose();
-      if (this.debugTermination !== termination) termination?.dispose();
+      if (this.debugTermination !== termination) termination.dispose();
     }
   }
 
@@ -487,29 +480,46 @@ export class AndroidBuildController implements vscode.Disposable {
     this.operation = operation;
     this.state(message.action === 'refresh' ? 'Discovering Gradle tasks' : message.action + ': ' + this.targetId);
     operation.done = (async () => {
-      try { const status = await this.execute(operation, message.action, serial); this.check(operation); this.operation = undefined; this.state(status); }
-      catch (error) {
-        if (message.action === 'refresh') { this.projects = []; this.cachedProjects = undefined; this.projectId = ''; this.targetId = ''; }
-        this.operation = undefined;
-        this.state(error instanceof Cancelled ? 'Cancelled' : 'Failed', error instanceof Cancelled ? undefined : String(error));
+      try {
+        const status = await this.execute(operation, message.action, serial);
+        this.check(operation);
+        if (this.operation === operation) { this.operation = undefined; this.state(status); }
+      } catch (error) {
+        if (this.operation === operation) {
+          if (message.action === 'refresh') { this.projects = []; this.cachedProjects = undefined; this.projectId = ''; this.targetId = ''; }
+          this.operation = undefined;
+          const cancelled = operation.controller.signal.aborted || error instanceof Cancelled;
+          this.state(this.stopping ? 'Stopping; resources are being released' : cancelled ? 'Cancelled' : 'Failed', cancelled ? undefined : String(error));
+        }
         throw error;
       }
     })();
     return operation.done;
   }
 
-  // 并发停止共享清理Promise；Debug只detach，只有Run写入launched才force-stop自己启动的包。
+  /** 功能：立即取消前台操作并发布停止清理状态，等待精确所属资源结束；输入状态按钮操作；输出幂等清理结果，不误杀外部应用；验证：android-build.test.js及浏览器停止回归。 */
   // 回归：node --test tests/android-build.test.js，验证Attach/Stop零force-stop、Run保留定向停止以及启动中取消回收会话。
   private stop(): Promise<void> {
     if (this.stopping) return this.stopping;
-    this.stopping = (async () => {
-      const operation = this.operation;
+    const operation = this.operation;
+    const child = this.child;
+    this.stopping = Promise.resolve().then(async () => {
       if (operation) {
-        operation.controller.abort();
-        if (this.child) await this.terminate(this.child);
-        try { await operation.done; } catch (error) { if (!(error instanceof Cancelled)) throw error; }
+        if (child) await this.terminate(child);
+        try { await operation.done; } catch (error) { if (!operation.controller.signal.aborted) throw error; }
+        await operation.debugCleanup;
       }
-      if (this.debugSession) { await vscode.debug.stopDebugging(this.debugSession); this.debugSession = undefined; }
+      if (this.debugSession) {
+        const session = this.debugSession;
+        let exited!: () => void;
+        const terminated = new Promise<void>(resolve => { exited = resolve; });
+        const listener = vscode.debug.onDidTerminateDebugSession(value => { if (value === session || value.id === session.id) exited(); });
+        try {
+          await vscode.debug.stopDebugging(session);
+          await terminated;
+          if (this.debugSession === session) this.debugSession = undefined;
+        } finally { listener.dispose(); }
+      }
       this.debugTermination?.dispose();
       this.debugTermination = undefined;
       if (this.launched) {
@@ -518,8 +528,16 @@ export class AndroidBuildController implements vscode.Disposable {
         await this.run(cleanup, adbPath(), ['-s', app.serial, 'shell', 'am', 'force-stop', app.packageName], app.cwd);
         this.launched = undefined;
       }
+    }).then(() => {
+      this.stopping = undefined;
       this.state('Stopped');
-    })().finally(() => { this.stopping = undefined; });
+    }, error => {
+      this.stopping = undefined;
+      this.state('Stop failed; resources may still be active', String(error));
+      throw error;
+    });
+    operation?.controller.abort(new Cancelled());
+    this.state('Stopping; resources are being released');
     return this.stopping;
   }
 

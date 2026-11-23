@@ -1,409 +1,164 @@
-import * as fs from 'node:fs';
-
+import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { getAndroidDebugConfigurations } from '../index';
+import type { DebugDevice } from '../device';
 import * as android from './upstream/src/android';
-import * as targetCommand from './upstream/src/targetCommand';
-import * as targetPicker from './upstream/src/targetPicker';
-import { AndroidDebugConfigurationProvider } from './upstream/src/debugConfigProvider';
-import type { AndroidNativeDebugConfiguration } from './contracts';
-import type { AndroidSessionHost } from '../sessionAdapter';
+import type { NativeConnection } from './contracts';
 import { nativeToolchainOverrides, resolveNativeToolchain, validateNativeAbis } from './nativeToolchain';
-import { selectNativeLibraries } from './nativeSymbols';
+import { nativeLibraryCommands, selectNativeLibraries } from './nativeSymbols';
 import { NativeForwardLease } from './forwardLease';
-import { omitAuto } from '../autoConfig';
-import { AndroidCoordinator } from '../coordinator/androidCoordinator';
 
-/** 当前选中Gradle项目在对应工作区的只读包名来源；未知返回undefined，真实错误传播。 */
-export interface NativeProjectMetadata { packageName?: string; abiSupported?: string[]; }
-export type NativePackageResolver = (folder: vscode.WorkspaceFolder | undefined) => string | NativeProjectMetadata | undefined;
+/** 当前项目的只读包名与 ABI 来源；未知返回 undefined，读取错误直接传播。 */
+export type NativePackageResolver = (folder?: vscode.WorkspaceFolder) => string | { packageName?: string; abiSupported?: string[] } | undefined;
 
-/** 校验Native工具链/ABI/APK，不把普通目录中的库当作项目编译符号；缺少符号不阻止附加。
- * native-codelldb.test.js覆盖两阶段、工具链修正、项目产物加载及取消零资源。 */
-export async function validateNativeDebugConfiguration(config: vscode.DebugConfiguration, folder?: vscode.WorkspaceFolder, strictPaths = false, corrected = false, allowPrompt = true): Promise<void> {
-  try {
-    const native = config.native && typeof config.native === 'object' && !Array.isArray(config.native) ? { ...config.native } : {};
-    config.native = native;
-    const overrides = nativeToolchainOverrides(native);
-    resolveNativeToolchain(config.androidProjectRoot || folder?.uri.fsPath, overrides);
-    validateNativeAbis(native, config.androidAbiSupported);
-    if (config.packageName !== undefined && (typeof config.packageName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(config.packageName))) throw new Error('A valid package name is required.');
-    if (config.launchActivity !== undefined && (typeof config.launchActivity !== 'string' || !config.launchActivity.trim())) throw new Error('Invalid Native launchActivity: expected a non-empty activity name');
-    if (config.apkPath !== undefined) {
-      if (typeof config.apkPath !== 'string' || !config.apkPath.trim()) throw new Error('Invalid Native apkPath: expected a file path');
-      if (strictPaths && !config.apkPath.includes('$' + '{')) {
-        let stat: fs.Stats;
-        try { stat = fs.statSync(config.apkPath); } catch (error) { throw new Error('Invalid Native APK path: ' + config.apkPath, { cause: error }); }
-        if (!stat.isFile()) throw new Error('Invalid Native APK path: ' + config.apkPath);
-      }
-    }
-  } catch (error) {
-    const field = nativeCorrectionField(error);
-    if (allowPrompt && !corrected && field && await promptNativeCorrection(config, field)) return validateNativeDebugConfiguration(config, folder, strictPaths, true, allowPrompt);
-    const detail = error instanceof Error ? error.message : String(error);
-    const action = await vscode.window.showErrorMessage('Android Native configuration is invalid: ' + detail + '. Correct launch.json and start again.', 'Open launch.json');
-    if (action === 'Open launch.json' && typeof vscode.commands?.executeCommand === 'function') await vscode.commands.executeCommand('workbench.action.debug.configure');
-    throw error;
-  }
+/** 功能：解析最终路径；输入路径及明确基目录；输出绝对路径，拒绝控制字符、变量和隐式工作目录。 */
+function absolutePath(value: unknown, base?: string): string {
+  if (typeof value !== 'string' || !value.trim() || /[\x00-\x1f\x7f]/.test(value) || value.includes('${')) throw new Error('Invalid or unresolved Native path');
+  if (path.isAbsolute(value)) return path.normalize(value);
+  if (!base || !path.isAbsolute(base)) throw new Error('Relative Native path requires an absolute project root');
+  // Windows 盘符相对路径与根相对路径不能借项目根解释。
+  if (path.win32.parse(value).root) throw new Error('Invalid Native relative path');
+  return path.resolve(base, value);
 }
 
-/** 将校验错误映射到可交互修正的 launch.json 字段；不可修正错误返回 undefined。 */
-function nativeCorrectionField(error: unknown): 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath' | undefined {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/SDK root/i.test(message)) return 'sdkRoot';
-  if (/NDK root|Android NDK/i.test(message)) return 'ndkRoot';
-  if (/abiSupported/i.test(message)) return 'abiSupported';
-  if (/Invalid Native ABI/i.test(message)) return 'abi';
-  if (/APK path|apkPath/i.test(message)) return 'apkPath';
-  return undefined;
+/** 功能：检查引擎字符串列表；输入配置值与字段名；输出结构错误，不改变用户命令语义。 */
+function stringArray(value: unknown, name: string): asserts value is string[] {
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || /[\0\r\n]/.test(item))) throw new Error('Invalid Native ' + name + ': expected a string array without command separators');
 }
 
-/** 仅对无效 SDK/NDK、ABI 或 APK 输入并写回当前会话副本，支持逗号分隔 ABI；不询问符号目录，取消返回 false，不写配置文件。
- * 前置：对应字段校验失败；Node>=22 执行 node --test tests/native-codelldb.test.js，断言 NDK 修正和符号缺失无输入。 */
-async function promptNativeCorrection(config: vscode.DebugConfiguration, field: 'sdkRoot' | 'ndkRoot' | 'abiSupported' | 'abi' | 'apkPath'): Promise<boolean> {
-  if (typeof vscode.window?.showInputBox !== 'function') return false;
-  const native = (config.native && typeof config.native === 'object' && !Array.isArray(config.native)) ? { ...config.native } : {};
-  const current = native[field];
-  const value = await vscode.window.showInputBox({
-    prompt: field === 'abiSupported' ? 'Enter supported Android ABIs separated by commas' : 'Enter Android Native ' + field,
-    value: Array.isArray(current) ? current.join(',') : typeof current === 'string' ? current : '',
-    ignoreFocusOut: true,
-  });
-  if (!value?.trim()) return false;
-  if (field === 'abiSupported') native.abiSupported = value.split(',').map(item => item.trim()).filter(Boolean);
-  else if (field === 'abi') native.abi = value.trim();
-  else { native[field] = value.trim(); if (field === 'apkPath') config.apkPath = value.trim(); }
-  config.native = native;
-  return true;
-}
-
-const registrations = new WeakMap<vscode.ExtensionContext, NativeLldbConfigurationProvider>();
-
-/** 只初始化原设备/命令上下文，不在扩展激活时探测SDK/NDK；native-codelldb.test.js验证无工具链也可激活。 */
-export function initializeNativeUpstream(context: vscode.ExtensionContext): void {
-  targetPicker.activate(context);
-  targetCommand.activate(context);
-}
-
-/** 将已解析设备变成真实serial；native-codelldb.test.js验证非法身份在启动child前失败。 */
-export function targetSerial(config: AndroidNativeDebugConfiguration): string {
-  const serial = config.serial || (typeof config.target === 'object' ? config.target.udid : config.target);
-  if (!serial || ['select', 'last-selected'].includes(serial) || !/^[\w.:-]+$/.test(serial)) throw new Error('Select a valid Android device serial');
-  return serial;
-}
-
-/** 校验可替换变量后的PID及重复字段一致性；native-codelldb.test.js验证正整数和冲突拒绝。 */
-export function processId(config: AndroidNativeDebugConfiguration): number {
-  const raw = config.pid ?? config.processId;
-  if (!/^\d+$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) <= 0 || (config.pid !== undefined && config.processId !== undefined && Number(config.pid) !== Number(config.processId))) throw new Error('Attach requires one valid Android process id');
-  return Number(raw);
-}
-
-/** 使用原LLDB provider生成远程命令，并持有其创建的socket；native-codelldb.test.js验证重复解析不重复开server及失败清理。 */
-export class NativeLldbConfigurationProvider implements vscode.DebugConfigurationProvider {
-  private readonly servers = new Map<string, { cleanup: () => Promise<void>; closing?: Promise<void> }>();
-  private readonly preparing = new Set<Promise<vscode.DebugConfiguration | null>>();
-  private closing?: Promise<void>;
-
-  constructor(private readonly coordinator: AndroidCoordinator) {}
-
-  /** 普通lldb原样通过；已准备且仍由本provider拥有的Android连接不重复解析。回归同文件外部/重复provider用例。 */
-  async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
-    if (!config.androidTarget) return config;
-    if (this.closing) throw new Error('Native provider is closing');
-    if (config.androidLldbServerSocket) {
-      if (!this.servers.has(config.androidLldbServerSocket)) throw new Error('Android LLDB server is not owned by this provider');
-      return config;
-    }
-    const serial = typeof config.androidTarget === 'object' ? config.androidTarget.udid : config.androidTarget;
-    targetSerial({ ...config, serial } as AndroidNativeDebugConfiguration);
-    config.androidTarget = { udid: serial, androidProjectRoot: config.androidProjectRoot ?? folder?.uri.fsPath };
-    if (!config.androidPackageName) {
-      config.androidPackageName = (await this.coordinator.clients(serial, config.signal)).find(client => client.pid === Number(config.pid))?.packageName;
-      if (!config.androidPackageName) throw new Error('A valid package name is required.');
-    }
-    return config;
-  }
-
-  /** 功能：校验实际设备状态后准备CodeLLDB远程连接；输入目标配置、取消信号和Coordinator快照；输出原Native模块持有的服务与平台命令，非在线目标拒绝启动；验证：native-codelldb.test.js、native-runtime.test.js和coordinator-device-host.test.js。 */
-  async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
-    if (!config.androidTarget) return config;
-    if (this.closing) throw new Error('Native provider is closing');
-    const preparing = this.prepare(folder, config, token);
-    this.preparing.add(preparing);
-    try { return await preparing; } finally { this.preparing.delete(preparing); }
-  }
-
-  /** 功能：准备已登记的独占Native服务；输入设备配置与取消信号；输出连接配置，关闭期间回滚迟到部署；验证：native-codelldb.test.js。 */
-  private async prepare(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
-    for (const name of ['initCommands', 'exitCommands', 'symbolSearchPaths']) if (config[name] !== undefined && (!Array.isArray(config[name]) || config[name].some((value: unknown) => typeof value !== 'string'))) throw new Error('Native ' + name + ' must be a string array');
-    if (config.androidLldbServerSocket && this.servers.has(config.androidLldbServerSocket)) return config;
-    try {
-      const target = config.androidTarget;
-      const serial = typeof target === 'object' ? target.udid : target;
-      const toolchain = resolveNativeToolchain(config.androidProjectRoot ?? folder?.uri.fsPath, nativeToolchainOverrides(config.androidNativeToolchain));
-      if (!config.androidAbi || config.androidAbi === 'select') config.androidAbi = (await this.coordinator.abis(serial, config.androidPackageName, config.signal))[0];
-      validateNativeAbis({ abi: config.androidAbi });
-      const selected = (await this.coordinator.devices(config.signal)).find(device => device.serial === serial);
-      if (!selected || selected.state !== 'device') throw new Error('Android device is not online: ' + serial);
-      if (this.closing || config.signal?.aborted || token?.isCancellationRequested) throw new Error('Native server startup cancelled');
-      const device = { udid: selected.serial, state: selected.state, androidProjectRoot: config.androidProjectRoot ?? folder?.uri.fsPath, androidNativeToolchain: { sdkRoot: toolchain.sdkRoot, ndkRoot: toolchain.ndkRoot } };
-      const server = await android.startLldbServer(device, config.androidPackageName, config.androidAbi);
-      config.androidLldbServerSocket = server.socket;
-      const resource = { cleanup: server.stop };
-      this.servers.set(server.socket, resource);
-      const forwarding = await NativeForwardLease.create(serial, await android.getDeviceAdb(device));
-      resource.cleanup = async () => {
-        const results = await Promise.allSettled([server.stop(), forwarding.close()]);
-        const errors = results.filter((value): value is PromiseRejectedResult => value.status === 'rejected').map(value => value.reason);
-        if (errors.length) throw new AggregateError(errors, 'Native server and forward cleanup failed');
-      };
-      if (this.closing || config.signal?.aborted || token?.isCancellationRequested) {
-        await this.release(server.socket);
-        throw new Error('Native server startup cancelled');
-      }
-      config.exitCommands = [...(config.exitCommands ?? []), 'platform disconnect', 'log disable lldb platform'];
-      config.initCommands = [
-        forwarding.command,
-        'platform select remote-android',
-        `platform connect unix-abstract-connect://[${serial}]${server.socket}`,
-        'settings set plugin.jit-loader.gdb.enable off',
-        'process handle SIGBUS SIGSEGV --pass true --stop false --notify false',
-        'breakpoint set --shlib libart.so --name art_sigsegv_fault',
-        'breakpoint set --shlib libart.so --name art_sigbus_fault',
-        ...(config.initCommands ?? []),
-      ];
-      return config;
-    } catch (error) {
-      if (config.androidLldbServerSocket) {
-        try { await this.release(config.androidLldbServerSocket); } catch (cleanup) { throw new AggregateError([error, cleanup], 'Native provider and server cleanup failed'); }
-      }
-      throw error;
-    }
-  }
-
-  /** 功能：按唯一资源记录停止自有服务；输入所属socket；输出并发共享的清理结果，成功后删除登记，失败保留证据；验证：native-codelldb.test.js取消回滚和并发释放回归。 */
-  async release(socket?: string): Promise<void> {
-    if (!socket) return;
-    const resource = this.servers.get(socket);
-    if (!resource) return;
-    resource.closing ??= Promise.resolve().then(async () => {
-      await resource.cleanup();
-      this.servers.delete(socket);
-    });
-    await resource.closing;
-  }
-
-  /** 功能：禁止新部署并等待在途准备后释放全部服务；输入provider生命周期；输出幂等清理及聚合错误；验证：native-codelldb.test.js在途部署关闭回归。 */
-  dispose(): Promise<void> {
-    return this.closing ??= Promise.resolve().then(async () => {
-      await Promise.allSettled([...this.preparing]);
-      const results = await Promise.allSettled([...this.servers.keys()].map(socket => this.release(socket)));
-      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
-      if (errors.length) throw new AggregateError(errors, 'Native server cleanup failed');
-    });
-  }
-}
-
-/** 统一 Android 三模式的两阶段 provider，旧类型保留 Native-only；native-codelldb.test.js 覆盖六组合和符号选择隔离。 */
-export class NativeAndroidConfigurationProvider implements vscode.DebugConfigurationProvider {
-  private readonly delegate = new AndroidDebugConfigurationProvider();
-  private readonly coordinator: AndroidCoordinator;
-
-  constructor(symbolState: vscode.Memento, selectedPackage: NativePackageResolver = () => undefined, debugType: 'android-tools' | 'android-debug' = 'android-tools', coordinator: AndroidCoordinator) {
-    this.symbolState = symbolState; this.selectedPackage = selectedPackage; this.debugType = debugType; this.coordinator = coordinator;
-  }
-  private readonly symbolState: vscode.Memento;
-  private readonly selectedPackage: NativePackageResolver;
-  private readonly debugType: 'android-tools' | 'android-debug';
-
-  /** 返回当前debugger类型的内置配置供Run and Debug显示，不探测工具链；native-codelldb.test.js断言名称、复制隔离和零设备调用。 */
-  provideDebugConfigurations(_folder?: vscode.WorkspaceFolder, _token?: vscode.CancellationToken): vscode.DebugConfiguration[] { return getAndroidDebugConfigurations().filter(config => config.type === this.debugType); }
-
-  /** 按三模式建立设备上下文：Java 仅共享 SDK，Native/Dual 保留 ABI/符号且旧类型仅 Native；同文件六组合、无 NDK 与取消回归。 */
-  async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
-    config = omitAuto(config);
-    if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
-    if (config.type === 'android-tools' && [config.androidMode, config.mode].some(mode => mode !== undefined && mode !== 'native')) throw new Error('Only Android Native debugging is available');
-    if (config.type === 'android-debug' && !['native', 'java', 'dual'].includes(config.mode ?? 'native')) throw new Error('Unsupported Android debug mode');
-    if (!['launch', 'attach'].includes(config.request)) throw new Error('Android request must be launch or attach');
-    const mode = config.mode ?? config.androidMode ?? 'native';
-    if (mode !== 'native') validateJavaPort(config);
-    if (mode === 'java') {
-      const selected = !config.packageName && config.request === 'launch' && !config.apkPath ? this.selectedPackage(folder) : undefined;
-      const result: vscode.DebugConfiguration = { ...config, mode, androidProjectRoot: config.androidProjectRoot || folder?.uri.fsPath, packageName: config.packageName || (typeof selected === 'string' ? selected : selected?.packageName) };
-      let serial = result.serial || (typeof result.target === 'object' ? result.target.udid : result.target);
-      if (!serial || ['select', 'last-selected'].includes(serial)) {
-        const devices = (await this.coordinator.devices()).filter(device => device.state === 'device');
-        const picked = await vscode.window.showQuickPick(devices.map(device => ({ label: device.serial, serial: device.serial })), { placeHolder: 'Select Android device' });
-        if (!picked) return null;
-        serial = picked.serial;
-      }
-      result.serial = targetSerial({ ...result, serial } as AndroidNativeDebugConfiguration);
-      result.target = { udid: result.serial, androidProjectRoot: result.androidProjectRoot };
-      return result;
-    }
-    await validateNativeDebugConfiguration(config, folder);
-    const selected = !config.packageName && config.request === 'launch' && !config.apkPath ? this.selectedPackage(folder) : undefined;
-    const metadata: NativeProjectMetadata | undefined = typeof selected === 'string' ? { packageName: selected } : selected;
-    const packageName = config.packageName || metadata?.packageName;
-    const native = { ...config.native };
-    const supported = native.abiSupported ?? config.androidAbiSupported ?? metadata?.abiSupported;
-    if (supported !== undefined) native.abiSupported = supported;
-    validateNativeAbis(native, config.androidAbiSupported);
-    let serial = config.serial || (typeof config.target === 'object' ? config.target.udid : config.target);
-    if (!serial || ['select', 'last-selected'].includes(serial)) {
-      const devices = (await this.coordinator.devices()).filter(device => device.state === 'device');
-      const picked = await vscode.window.showQuickPick(devices.map(device => ({ label: device.serial, serial: device.serial })), { placeHolder: 'Select Android device' });
-      if (!picked) return null;
-      serial = picked.serial;
-    }
-    serial = targetSerial({ ...config, serial } as AndroidNativeDebugConfiguration);
-    const resolved = await this.delegate.resolveDebugConfiguration(folder, { ...config, serial, ...(packageName ? { packageName } : {}), mode, androidMode: config.type === 'android-tools' ? 'native' : undefined, native, target: { udid: serial }, androidProjectRoot: config.androidProjectRoot || folder?.uri.fsPath }, token!);
-    const toolchain = nativeToolchainOverrides(native);
-    if (resolved) {
-      (resolved as Record<string, unknown>).androidNativeToolchain = toolchain;
-      if (resolved.target && typeof resolved.target === 'object') (resolved.target as Record<string, unknown>).androidNativeToolchain = toolchain;
-    }
-    return resolved;
-  }
-
-  /** 解析身份和ABI后自动加载有调试信息的项目编译库，同名自动取最新产物；清除宽泛搜索路径及旧白名单，Java不发现Native符号。
-   * native-codelldb.test.js验证项目产物全集、重复选择、取消零server和精确LLDB命令；native-project-libraries.test.js验证来源及ELF信息。 */
-  async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration | null> {
-    config = omitAuto(config);
-    const javaOnly = config.mode === 'java';
-    if (config.mode !== 'native') validateJavaPort(config);
-    if (!javaOnly) await validateNativeDebugConfiguration(config, folder, true, false, false);
-    const identity = await resolveAttachIdentity(config, javaOnly, this.coordinator.clients.bind(this.coordinator));
-    if (!identity) return null;
-    const result = identity;
-    if (!javaOnly) {
-      if (!result.packageName && result.apkPath) result.packageName = await android.getPackageNameFromApk(result.apkPath, result.androidProjectRoot, nativeToolchainOverrides(result.native));
-      if (!result.packageName) throw new Error('A valid package name is required.');
-      if (!result.native.abi || result.native.abi === 'select') {
-        const abis = await this.coordinator.abis(targetSerial(result as AndroidNativeDebugConfiguration), result.packageName, result.signal);
-        const supported = result.native.abiSupported;
-        const candidates = abis.filter(abi => !supported || supported.includes(abi));
-        if (!candidates.length) throw new Error('Cannot find appropriate ABI to use');
-        result.native.abi = candidates[0];
-      }
-      result.resumeProcess = result.mode === 'native' ? (result.resumeProcess ?? result.request === 'launch') : false;
-      targetPicker.resetCurrentTarget();
-      targetCommand.resetAbiResolutionInfo();
-      targetCommand.resetProcessPickerInfo();
-    }
-    if (result.request === 'attach') { result.pid = processId(result as AndroidNativeDebugConfiguration); result.processId = result.pid; }
-    if (javaOnly) return result;
-    const paths = result.native?.symbolSearchPaths ?? [];
-    if (!Array.isArray(paths) || paths.some((value: unknown) => typeof value !== 'string')) throw new Error('Native symbolSearchPaths must be a string array');
-    const libraries = await selectNativeLibraries(paths, {
-      projectRoot: result.androidProjectRoot || folder?.uri.fsPath, packageName: result.packageName, abi: result.native?.abi,
-      storage: this.symbolState, token,
-    });
-    if (!libraries) return null;
-    result.androidNativeLibraries = libraries;
-    result.native.symbolSearchPaths = [];
-    return result;
-  }
-}
-
-/** 进程不存在时提示用户并取消 Attach；设备离线、未授权和 ADB 故障继续向上报告。 */
-function notifyMissingAttachProcess(packageName: string): null {
-  void vscode.window.showWarningMessage('Android Attach failed: process for ' + packageName + ' is not running. Start the application and attach again.');
-  return null;
-}
-
-/** 功能：校验父会话嵌套Java端口，仅接受0到65535的整数。
- * 输入：java.port，可省略；字符串和范围外数值无效。
- * 输出：无返回值；非法输入抛出错误并阻断设备查询。
- * 验证：node --test tests/native-codelldb.test.js。 */
-function validateJavaPort(config: vscode.DebugConfiguration): void {
-  const port = config.java?.port;
-  if (port !== undefined && (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535)) throw new Error('Invalid Android JVM port; use 0 for a dynamic port');
-}
-
-/** attach 优先显式 PID，其次包名精确进程，最后交互选择；取消返回 null、不读 Build；同文件断言两种 PID、取消及 Java 无 NDK。 */
-async function resolveAttachIdentity(config: vscode.DebugConfiguration, javaOnly: boolean, clients: (serial: string, signal?: AbortSignal) => Promise<Array<{ pid: number; packageName: string }>>): Promise<vscode.DebugConfiguration | null> {
-  if (config.request !== 'attach') return config;
-  let pid = config.pid ?? config.processId;
-  const serial = targetSerial(config as AndroidNativeDebugConfiguration);
-  if (pid === undefined) {
-    if (config.packageName) {
-      const match = (await clients(serial, config.signal)).find(client => client.packageName === config.packageName);
-      if (!match) return notifyMissingAttachProcess(config.packageName);
-      pid = String(match.pid);
-    } else {
-      const processes = await clients(serial, config.signal);
-      pid = (await vscode.window.showQuickPick(processes.map(client => ({ label: client.packageName || String(client.pid), description: String(client.pid), pid: String(client.pid) })), { placeHolder: 'Pick Android Process' }))?.pid;
-    }
-    if (pid === undefined) return null;
-  }
-  const exact = processId({ ...config, pid } as AndroidNativeDebugConfiguration);
-  let packageName = config.packageName;
-  if (!packageName) {
-    packageName = (await clients(serial, config.signal)).find(client => client.pid === exact)?.packageName;
-  }
-  if (!packageName || !/^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+$/.test(packageName)) throw new Error('A valid package name is required.');
-  return { ...config, pid: exact, processId: exact, packageName };
-}
-
-/** 无DAP请求可承载的后台清理失败必须可见，不能吞错；native-codelldb.test.js验证错误通知。 */
-function reportCleanup(error: unknown): void { void vscode.window.showErrorMessage('Native debugger cleanup failed: ' + describeFailure(error)); }
-
-/** 展开聚合错误中的每个实际失败，保留DAP/通知诊断；native-codelldb.test.js验证启动与多重清理错误均可见。 */
-function describeFailure(error: unknown): string { return error instanceof AggregateError ? error.message + ': ' + error.errors.map(describeFailure).join('; ') : String(error); }
-
-/** 功能：提供目标解析与Native准备服务；输入已注册provider和共享控制面；输出统一会话宿主，不创建Dual引擎；验证：native-codelldb.test.js。 */
-export function createAndroidSessionHost(lldb: NativeLldbConfigurationProvider, coordinator: AndroidCoordinator): AndroidSessionHost {
+/** 功能：桥接取消通知；输入当前连接信号；输出只供符号发现使用的宿主令牌，不进入引擎配置。 */
+function cancellationToken(signal: AbortSignal): vscode.CancellationToken {
   return {
-    processId: config => processId(config as AndroidNativeDebugConfiguration),
-    describe: describeFailure,
-    report: reportCleanup,
-    dispose: () => lldb.dispose(),
-    releaseNative: socket => lldb.release(socket),
-    async resolveSession(config) {
-      config = omitAuto(config);
-      if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted');
-      if (config.type === 'android-tools' && [config.androidMode, config.mode].some(mode => mode !== undefined && mode !== 'native')) throw new Error('Only Android Native debugging is available');
-      if (config.type === 'android-debug' && !['native', 'java', 'dual'].includes(config.mode ?? 'native')) throw new Error('Unsupported Android debug mode');
-      const serial = targetSerial(config as AndroidNativeDebugConfiguration);
-      const javaOnly = config.mode === 'java';
-      if (javaOnly) validateJavaPort(config);
-      const selected = typeof config.target === 'object' ? config.target : { udid: serial };
-      const target = { ...selected, udid: serial, androidProjectRoot: config.androidProjectRoot, androidNativeToolchain: (selected as Record<string, unknown>).androidNativeToolchain ?? nativeToolchainOverrides(config.native) };
-      const result: vscode.DebugConfiguration = { ...config, target, native: { ...config.native } };
-      const resolved = await resolveAttachIdentity(result, javaOnly, coordinator.clients.bind(coordinator));
-      if (!resolved) throw new Error('Android process selection was cancelled');
-      return resolved;
-    },
-    async prepareNative(config, folder) {
-      const resolved = await lldb.resolveDebugConfiguration(folder, config);
-      if (!resolved) throw new Error('Android Native target selection was cancelled');
-      const ready = await lldb.resolveDebugConfigurationWithSubstitutedVariables(folder, resolved);
-      if (!ready) throw new Error('Android Native server configuration was rejected');
-      delete ready.androidNativeToolchain;
-      return ready;
+    get isCancellationRequested() { return signal.aborted; },
+    // 订阅者显式释放监听，连接本身不留下额外取消资源。
+    onCancellationRequested(listener, thisArgs, disposables) {
+      const notify = (): void => { listener.call(thisArgs, undefined); };
+      signal.addEventListener('abort', notify, { once: true });
+      const subscription = { dispose: () => signal.removeEventListener('abort', notify) };
+      disposables?.push(subscription);
+      return subscription;
     },
   };
 }
 
-/** 注册原设备/ABI解析器与内置动态入口，将当前 workspaceState 交给父 provider 保存项目级选择，不使用全局存储。
- * Node>=22 执行 node --test tests/native-codelldb.test.js，验证统一六项唯一动态入口、注册幂等、项目符号自动加载及实际Android项目根隔离。 */
-export function registerNativeProviders(context: vscode.ExtensionContext, selectedPackage?: NativePackageResolver, coordinator?: AndroidCoordinator): NativeLldbConfigurationProvider {
-  const existing = registrations.get(context); if (existing) return existing;
-  initializeNativeUpstream(context);
-  const sharedCoordinator = coordinator ?? new AndroidCoordinator(context.extensionPath);
-  const lldb = new NativeLldbConfigurationProvider(sharedCoordinator);
-  const androidProvider = new NativeAndroidConfigurationProvider(context.workspaceState, selectedPackage, 'android-tools', sharedCoordinator);
-  const unified = new NativeAndroidConfigurationProvider(context.workspaceState, selectedPackage, 'android-debug', sharedCoordinator);
-  context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('android-tools', androidProvider),
-    vscode.debug.registerDebugConfigurationProvider('android-debug', unified),
-    vscode.debug.registerDebugConfigurationProvider('android-debug', unified, vscode.DebugConfigurationProviderTriggerKind.Dynamic), vscode.debug.registerDebugConfigurationProvider('lldb', lldb), lldb,
-    vscode.debug.onDidTerminateDebugSession(session => { if (session.type === 'lldb') void lldb.release(session.configuration.androidLldbServerSocket).catch(reportCleanup); }),
-    vscode.commands.registerCommand('android-tools.pickAndroidProcess', targetCommand.pickAndroidProcess),
-    vscode.commands.registerCommand('android-tools.getBestAbi', targetCommand.getBestAbi),
-    vscode.commands.registerCommand('android-tools.getBestMappedAbi', targetCommand.getBestMappedAbi));
-  registrations.set(context, lldb);
-  return lldb;
+/** 功能：提供本次符号选择的临时存储；输入无持久化存储的连接；输出独立 Memento，不共享项目或连接资源。 */
+function symbolStorage(): vscode.Memento {
+  const values = new Map<string, unknown>();
+  return {
+    // 读取本次符号记录，缺失遵循 Memento 的默认值契约。
+    get: <T>(key: string, defaultValue?: T): T | undefined => values.has(key) ? values.get(key) as T : defaultValue,
+    // 仅更新本次连接的符号记录，不伪造工作区持久化。
+    update: async (key, value) => { if (value === undefined) values.delete(key); else values.set(key, value); },
+    // 返回本次存储键，不持有 server 或转发。
+    keys: () => [...values.keys()],
+  };
+}
+
+/** 功能：规范化用户 PID；输入数字或十进制数字字符串；输出正安全整数，拒绝隐式类型转换。 */
+function processId(value: unknown): number {
+  const result = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  if (typeof result !== 'number' || !Number.isSafeInteger(result) || result <= 0) throw new Error('Invalid Native PID: expected a positive safe integer');
+  return result;
+}
+
+/** 功能点：为确定的 Android 进程准备独立 Native 连接。
+ * 受影响对象：prepareNativeConnection、工具链、ABI、项目符号、LLDB 命令、server 与转发租约。
+ * 复现路径：主会话完成 Debug/Attach 身份解析后传入 PID、DebugDevice、最终配置及取消信号；Java 不调用此入口。
+ * 测试范围：身份与路径边界、SDK/NDK、ABI 交集、真实库命令、用户引擎选项、迟到取消、失败聚合及幂等关闭。
+ * 执行入口：node --test tests/native-codelldb.test.js。
+ * 预期结果：返回可交给 CodeLLDB 的 attach 配置，关闭与回滚只回收本次 server 和转发，不管理应用或 JVM。
+ * 判据：目标不可被用户选项覆盖；无私有字段及 signal 泄露；资源只关闭一次且全部错误可见。
+ * 功能：顺序准备连接；输入已解析目标与可选 workspaceState；输出真实 LLDB 配置及显式 close，失败统一回滚。 */
+export async function prepareNativeConnection(input: vscode.DebugConfiguration, pid: number, device: DebugDevice, signal: AbortSignal, folder?: vscode.WorkspaceFolder, storage?: vscode.Memento): Promise<NativeConnection> {
+  signal.throwIfAborted();
+  if (input.type === 'android-jvm' || input.mode === 'java') throw new Error('Java configuration must not prepare a Native connection');
+  if (typeof pid !== 'number' || processId(pid) !== pid) throw new Error('Native connection requires a positive integer PID');
+  // 先验证原始结构，所有用户 PID 别名均须与已解析目标一致。
+  nativeToolchainOverrides(input.native);
+  const native = { ...input.native };
+  for (const source of [input, native]) for (const key of ['pid', 'processId']) {
+    if (source[key] !== undefined && processId(source[key]) !== pid) throw new Error('Invalid or conflicting Native PID');
+  }
+  const serial = device.serial;
+  if (typeof serial !== 'string' || !/^[\w.:-]+$/.test(serial) || ['auto', 'select', 'last-selected'].includes(serial)) throw new Error('Invalid Native device serial');
+  if (input.serial !== undefined && input.serial !== serial) throw new Error('Conflicting Native device serial');
+  const packageName = input.packageName;
+  if (typeof packageName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(packageName)) throw new Error('A valid package name is required');
+  const base = folder ? absolutePath(folder.uri.fsPath) : undefined;
+  const androidRoot = device.projectRoot === undefined
+    ? input.androidProjectRoot === undefined ? base : absolutePath(input.androidProjectRoot, base)
+    : absolutePath(device.projectRoot, base);
+  for (const source of [input, native]) {
+    if (source.androidProjectRoot !== undefined && absolutePath(source.androidProjectRoot, base ?? androidRoot) !== androidRoot) throw new Error('Conflicting Native Android project root');
+  }
+  // Android 根用于设备和工具链；显式 Native 根用于源码、符号与相对路径，不要求与 Java 根相同。
+  const explicitRoot = native.projectRoot ?? input.projectRoot;
+  const projectRoot = explicitRoot === undefined ? androidRoot : absolutePath(explicitRoot, base ?? androidRoot);
+  const options = { ...input, ...native };
+  for (const key of ['initCommands', 'exitCommands', 'postRunCommands', 'sourcePaths', 'symbolSearchPaths']) {
+    for (const source of [input, native]) if (source[key] !== undefined) stringArray(source[key], key);
+    if (options[key] !== undefined) options[key] = [...options[key]];
+  }
+  for (const key of ['sourcePaths', 'symbolSearchPaths']) {
+    if (options[key] !== undefined) options[key] = options[key].map((value: string) => absolutePath(value, projectRoot));
+  }
+  if (options.sourceMap !== undefined) {
+    if (!options.sourceMap || typeof options.sourceMap !== 'object' || Array.isArray(options.sourceMap)) throw new Error('Invalid Native sourceMap');
+    options.sourceMap = Object.fromEntries(Object.entries(options.sourceMap).map(([from, to]) => [absolutePath(from, projectRoot), absolutePath(to, projectRoot)]));
+  }
+  const stopOnEntry = options.stopOnEntry ?? false;
+  if (typeof stopOnEntry !== 'boolean') throw new Error('Native stopOnEntry must be a boolean');
+  const overrides = nativeToolchainOverrides(native);
+  for (const key of ['sdkRoot', 'ndkRoot'] as const) if (overrides[key] !== undefined) overrides[key] = absolutePath(overrides[key], projectRoot);
+  validateNativeAbis(native);
+  const toolchain = resolveNativeToolchain(androidRoot, overrides);
+  const supported = await device.abis(packageName, signal);
+  signal.throwIfAborted();
+  validateNativeAbis({ abiSupported: supported });
+  const candidates = supported.filter((abi: string) => !native.abiSupported || native.abiSupported.includes(abi));
+  const abi = native.abi === undefined || native.abi === 'select' ? candidates[0] : native.abi;
+  if (!abi || !candidates.includes(abi)) throw new Error('Cannot find appropriate ABI to use');
+  const libraries = await selectNativeLibraries(options.symbolSearchPaths ?? [], { projectRoot, packageName, abi, storage: storage ?? symbolStorage(), token: cancellationToken(signal) });
+  signal.throwIfAborted();
+  if (!libraries) throw new Error('Native symbol selection cancelled');
+  const libraryCommands = nativeLibraryCommands(libraries);
+  if (!libraries.length) void vscode.window.showWarningMessage('未找到当前项目和 ABI 的 Native 调试库，不会加载项目符号；尚未确认调试器连接成功。');
+  signal.throwIfAborted();
+  const selected = await android.getDeviceFromUDID(serial, androidRoot, toolchain);
+  if (selected.state !== 'device') throw new Error('Android device is not online: ' + serial);
+  const target = { ...selected, udid: serial, androidProjectRoot: androidRoot, androidNativeToolchain: toolchain };
+  let server: Awaited<ReturnType<typeof android.startLldbServer>> | undefined;
+  let forwarding: NativeForwardLease | undefined;
+  let closing: Promise<void> | undefined;
+  /** 功能：一次结算两项明确资源；输入无；输出共享关闭 Promise，保留每项清理失败且不终止应用。 */
+  const close = (): Promise<void> => closing ??= Promise.resolve().then(async () => {
+    const results = await Promise.allSettled([Promise.resolve().then(() => server?.stop()), Promise.resolve().then(() => forwarding?.close())]);
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) throw new AggregateError(errors, 'Native server and forward cleanup failed');
+  });
+  try {
+    server = await android.startLldbServer(target, packageName, abi);
+    signal.throwIfAborted();
+    if (typeof server.socket !== 'string' || !/^\/?[\w./-]+$/.test(server.socket)) throw new Error('Invalid Native server socket');
+    const adb = await android.getDeviceAdb(target);
+    signal.throwIfAborted();
+    forwarding = await NativeForwardLease.create(serial, adb);
+    signal.throwIfAborted();
+    const config: vscode.DebugConfiguration = {
+      ...options, type: 'lldb', request: 'attach', pid, processId: pid, serial, packageName, androidPackageName: packageName,
+      projectRoot, androidProjectRoot: androidRoot, androidAbi: abi, androidLldbServerSocket: server.socket,
+      platform: 'remote-android', stopOnEntry,
+      initCommands: [forwarding.command, 'platform select remote-android', `platform connect unix-abstract-connect://[${serial}]${server.socket}`,
+        'settings set plugin.jit-loader.gdb.enable off', 'process handle SIGBUS SIGSEGV --pass true --stop false --notify false',
+        'breakpoint set --shlib libart.so --name art_sigsegv_fault', 'breakpoint set --shlib libart.so --name art_sigbus_fault', ...(options.initCommands ?? [])],
+      postRunCommands: [...libraryCommands, ...(options.postRunCommands ?? [])],
+      exitCommands: [...(options.exitCommands ?? []), 'platform disconnect', 'log disable lldb platform'],
+    };
+    for (const key of ['signal', 'native', 'java', 'android', 'mode', 'androidMode', 'target', 'androidTarget', 'apkPath', 'launchActivity', 'resumeProcess',
+      'androidNativeToolchain', 'androidNativeLibraries', 'androidAbiSupported', 'androidAbiMap', 'androidSourceRoots', 'androidJdwpPort',
+      'abi', 'abiSupported', 'abiMap', 'sdkRoot', 'ndkRoot', 'hostName', 'port', 'adapterJvmArgs', 'classPaths', 'modulePaths', 'projectName', 'stepFilters']) delete config[key];
+    return { config, close };
+  } catch (error) {
+    try { await close(); } catch (cleanup) { throw new AggregateError([error, cleanup], 'Native connection preparation and rollback failed'); }
+    throw error;
+  }
 }

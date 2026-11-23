@@ -357,7 +357,28 @@ test('process cards retain metadata missing values and empty states safely',()=>
   b.api.receive({type:'explorerState',serial:'s',tab:'processes'});assert.equal(b.root.children[1].children[1].children[0].textContent,'No processes');
   const long='com.example.'+'long'.repeat(80)+'<img>';b.api.receive({type:'explorerProcesses',processes:[{pid:42,name:long,abi:'arm64-v8a',vm:'ART',userId:0,debugger:'waiting'}]});let card=b.root.children[1].children[1].children[0];assert.equal(card.className,'process-card');
   assert.equal(card.children[0].children[0].textContent,long);assert.equal(card.children[0].children[0].children.length,0);assert.equal(card.children[0].children[1].textContent,'PID 42');assert.deepEqual(Array.from(card.children[1].children,field=>field.children[0].textContent),['ABI','VM','User ID','Debugger']);assert.deepEqual(Array.from(card.children[1].children,field=>field.children[1].textContent),['arm64-v8a','ART','0','Waiting']);
-  let prevented=false;card.onkeydown({key:'Enter',preventDefault(){prevented=true;}});assert.equal(prevented,true);assert.equal(b.api.state.processSelected,42);b.api.receive({type:'explorerProcesses',processes:[{pid:9,packageName:'fallback'}]});card=b.root.children[1].children[1].children[0];assert.equal(card.children[0].children[0].textContent,'fallback');assert.deepEqual(Array.from(card.children[1].children,field=>field.children[1].textContent),['-','-','-','Default']);b.api.receive({type:'explorerProcesses',processes:[],error:'Device disconnected'});assert.equal(errorText(b),'Device disconnected');
+  let prevented=false;card.onkeydown({key:'Enter',preventDefault(){prevented=true;}});assert.equal(prevented,true);assert.equal(b.api.state.processSelected,42);b.api.receive({type:'explorerProcesses',processes:[{pid:9,packageName:'fallback'}]});card=b.root.children[1].children[1].children[0];assert.equal(card.children[0].children[0].textContent,'fallback');assert.deepEqual(Array.from(card.children[1].children,field=>field.children[1].textContent),['-','-','-','-']);b.api.receive({type:'explorerProcesses',processes:[],error:'Device disconnected'});assert.equal(errorText(b),'Device disconnected');
+});
+
+/**
+ * 功能点：进程卡片未知调试状态不伪装为 Default。
+ * 受影响对象：DeviceProcessesView.render/draw、后台 watch 未知行及显式 list 已知状态。
+ * 复现路径：Node>=22，boot 加载真实前端，向活动进程面板依次投递未知、缺失及四种已知状态。
+ * 测试范围：unknown/undefined/null/空串显示“-”，default/waiting/attached/error 保持标签，卡片结构与五动作不变。
+ * 执行入口：node --test tests/device-explorer-ui.test.js；仅设计，本任务不执行。
+ * 预期结果：Debugger 字段准确显示状态，未知 VM/ABI/UID 仍显示“-”，PID 保留。
+ * 判据：逐状态文本和结构严格匹配；任意未知落入 Default 或交互结构变化均失败。
+ */
+// 功能：向真实卡片渲染器输入未知和已知状态，输出准确字段标签，不改布局或交互。
+test('process debugger labels distinguish unknown from explicit default', () => {
+  const b = boot(); b.api.receive({ type: 'explorerState', serial: 's', tab: 'processes', active: true });
+  for (const [debuggerState, expected] of [['unknown', '-'], [undefined, '-'], [null, '-'], ['', '-'], ['default', 'Default'], ['waiting', 'Waiting'], ['attached', 'Attached'], ['error', 'Error']]) {
+    b.api.receive({ type: 'explorerProcesses', processes: [{ pid: 42, debugger: debuggerState }] });
+    const card = b.root.querySelector('.process-card');
+    assert.equal(card.children.length, 3); assert.equal(card.children[0].children[1].textContent, 'PID 42');
+    assert.deepEqual(Array.from(card.children[1].children, field => field.children[1].textContent), ['-', '-', '-', expected]);
+    assert.equal(card.children[2].children.length, 5);
+  }
 });
 
 // 每卡片五个图标动作捕获该行PID，不依赖已选卡片；刷新位于标题栏。

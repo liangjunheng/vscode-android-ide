@@ -1,3 +1,12 @@
+/**
+ * 功能点：四平台 ADB 发布资源的严格校验，与已删除的 Coordinator 服务无关。
+ * 受影响对象：verifyCoreRuntime、平台清单、二进制、provenance、许可及目录边界。
+ * 复现路径：Node>=22，复制真实 platform-tools 到隔离目录并分别破坏文件、架构或路径。
+ * 测试范围：无服务源码/资源时通过，缺失、篡改、错误架构、目录、链接及清单错误时拒绝。
+ * 执行入口：node --test tests/core-runtime-verifier.test.js；也由 npm test 发现。
+ * 预期结果：仅依赖真实四平台 ADB 资产，现有完整性与路径校验不降低。
+ * 判据：完整资产通过，每个损坏场景抛错；不得依赖历史服务文件。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -60,6 +69,19 @@ for (const parent of ['resources', 'platform-tools']) {
     assert.throws(() => verifyCoreRuntime(root), /parent directory is not a real directory/);
   });
 }
+
+// 仅提供 ADB 资产的隔离根，证明发布门禁不读取服务源码、JAR 或服务许可。
+test('core runtime verifier accepts platform tools without coordinator assets', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'android-core-only-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.cpSync(path.resolve(__dirname, '../resources/platform-tools'), path.join(root, 'resources/platform-tools'), { recursive: true });
+  assert.equal(fs.existsSync(path.join(root, 'src')), false);
+  assert.equal(fs.existsSync(path.join(root, 'resources/jvm-debugger')), false);
+  const result = verifyCoreRuntime(root);
+  assert.deepEqual(result.hosts.sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
+  assert.equal(result.version, '37.0.1');
+  assert.equal(result.files, 18);
+});
 
 test('core runtime verifier accepts repository assets', () => {
   const result = verifyCoreRuntime(path.resolve(__dirname, '..'));

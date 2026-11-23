@@ -10,8 +10,10 @@ const root = path.resolve(__dirname, '..');
 /** 隔离构建上下文执行真实 esbuild 配置，捕获完成回调；不构建或覆盖并发构建产物。 */
 function loadAndroidDebugConfigurations() {
   const module = { exports: {} };
+  const startup = require('./debug-startup-loader.cjs')();
   const source = transformSync(fs.readFileSync(path.join(root, 'src/android-debugger/index.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code;
-  vm.runInNewContext(source, { module, exports: module.exports, require(id) {
+  vm.runInNewContext(source, { module, exports: module.exports, AbortController, console, require(id) {
+    if (id === './startup') return startup;
     if (id === 'vscode') return {
       workspace: { getConfiguration: () => ({ get: () => [] }) },
       window: { showQuickPick: async items => items[0] },

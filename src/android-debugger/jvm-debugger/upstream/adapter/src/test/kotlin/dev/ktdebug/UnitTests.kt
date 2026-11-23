@@ -147,9 +147,14 @@ class SessionConfigTest {
         val c = SessionConfig.from("attach", mapOf("host" to "10.0.0.5", "port" to 5006.0, "projectRoot" to "/tmp/x"))
         assertEquals("10.0.0.5", c.hostName)
         assertEquals(5006, c.port)
-        assertEquals(30_000, c.timeoutMs)
+        assertNull(c.timeoutMs)
         assertTrue(c.isAttach)
         assertTrue("kotlin.*" in c.stepFilters)
+    }
+
+    @Test
+    fun `explicit attach timeout remains configurable`() {
+        assertEquals(1_500, SessionConfig.from("attach", mapOf("timeout" to 1_500, "port" to 5006)).timeoutMs)
     }
 
     @Test

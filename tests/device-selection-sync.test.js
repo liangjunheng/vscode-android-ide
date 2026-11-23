@@ -1,3 +1,12 @@
+/**
+ * 功能点：设备视图与Logcat双向选择同步。
+ * 受影响对象：extension.activate、RunningDeviceView及LogcatView。
+ * 复现路径：Node>=22，加载真实入口和两侧视图，隔离registerAndroidDebugging和registerJvmDebugger。
+ * 测试范围：切换、清空、隐藏、掉线、发现异常与重复选择。
+ * 执行入口：node --test tests/device-selection-sync.test.js。
+ * 预期结果：选择和资源释放保持同步，不启动真实设备或调试会话。
+ * 判据：既有消息、选择状态和调用次数断言全部满足。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -36,9 +45,8 @@ function fixture() {
   // tracker 是独立传输依赖；选择测试仍执行真实 LogcatView 的启动、停止和消息处理。
   const parserModule = load('logcatParser', {});
   const logcat = load('logcat', { vscode, './sdk': sdk, './logcatParser': parserModule, child_process: { spawn }, './deviceExplorerProcesses': { DeviceExplorerProcesses: class { watch() { return async () => {}; } } } });
-  // 调试适配器注册属于独立宿主依赖；仍执行真实 activate 和两侧设备选择，不加载无关调试会话。
-  // 设备选择同步只验证视图和日志接线；JVM debugger 注册属于独立宿主边界，使用空注册替身隔离。
-  load('extension', { './android-debugger/coordinator/androidCoordinator': { AndroidCoordinator: class { async dispose() {} } }, './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { async initialize() {} dispose() {} currentNativeDebugMetadata() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
+  // 仅隔离两个调试注册边界；仍执行真实activate和双侧选择，不加载调试会话。
+  load('extension', { './android-debugger/debugging': { registerAndroidDebugging: () => ({ async dispose() {} }) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} }, './deviceExplorer': { DeviceExplorerController: class { async setContext() {} async handle() {} async dispose() {} } }, vscode, './runningDevices': running, './logcat': logcat, './androidBuild': { AndroidBuildController: class { async initialize() {} dispose() {} currentNativeDebugMetadata() {} } }, './deviceManager': { registerDeviceManager() {} }, './extendedControls': {} }).activate({ extensionPath: path.join(__dirname, '..'), subscriptions: [] });
   f.running = f.views['android-ide.runningDevice']; f.logcat = f.views['android-ide.logcat'];
   f.running.pickMode = () => 'screencap'; f.running.startScreencap = () => { f.mirrors.push(f.running.serial); f.running.loop = {}; };
   // 创建实际 HTML 与宿主消息入口，默认均可见；可在测试中延迟创建或隐藏来覆盖生命周期。

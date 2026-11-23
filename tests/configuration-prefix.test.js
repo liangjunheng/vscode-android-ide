@@ -1,3 +1,12 @@
+/**
+ * 功能点：Gradle激活及配置、命令和视图前缀。
+ * 受影响对象：清单、extension.activate、设备命令与配置读取。
+ * 复现路径：Node>=22，加载真实入口，隔离registerAndroidDebugging和registerJvmDebugger。
+ * 测试范围：Gradle识别、编译输入、前缀一致性、本地配置与截图间隔。
+ * 执行入口：node --test tests/configuration-prefix.test.js。
+ * 预期结果：注册和配置符合清单，不加载调试引擎。
+ * 判据：既有激活、配置、命令和视图断言全部满足。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -131,10 +140,10 @@ test('runtime registers only android-ide commands and views', () => {
   class Provider { async initialize() {} }
   const deviceManager = load('deviceManager.ts', { vscode, './sdk': {} });
   const extension = load('extension.ts', {
-    vscode, './android-debugger/coordinator/androidCoordinator': { AndroidCoordinator: class { async dispose() {} } }, './deviceManager': deviceManager,
+    vscode, './android-debugger/debugging': { registerAndroidDebugging: () => ({ async dispose() {} }) }, './deviceManager': deviceManager,
     './runningDevices': { RunningDeviceView: Provider }, './deviceExplorer': { DeviceExplorerController: Provider },
     './androidBuild': { AndroidBuildController: Provider }, './logcat': { LogcatView: Provider },
-    './extendedControls': {}, './android-debugger/adapter': { createAndroidDebugAdapterFactory: () => ({}) }, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} },
+    './extendedControls': {}, './android-debugger/jvm-debugger/adapter': { registerJvmDebugger() {} },
   });
   extension.activate({ extensionPath: '', subscriptions: [] });
   const p = require('../package.json');

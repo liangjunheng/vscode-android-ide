@@ -1,7 +1,7 @@
-// 将模板中的auto哨兵移除为未提供字段；边界解析后由当前设备、APK、Gradle和调试会话继续动态获取。
+/** 功能：将配置声明中的auto还原为动态解析；输入用户配置；输出独立选项副本，不改写原配置或非法端口。 */
 export function omitAuto<T extends Record<string, any>>(config: T): T {
   const result = { ...config };
-  for (const key of ['apkPath', 'packageName', 'launchActivity', 'serial', 'target', 'pid', 'processId', 'androidProjectRoot', 'androidAdbPath', 'androidJdwpPort', 'hostName', 'preLaunchTask']) {
+  for (const key of ['apkPath', 'packageName', 'launchActivity', 'serial', 'target', 'pid', 'processId', 'projectRoot', 'sourcePaths', 'androidProjectRoot', 'androidAdbPath', 'androidJdwpPort', 'hostName', 'preLaunchTask']) {
     if (result[key] === 'auto') delete result[key];
   }
   const mutable = result as Record<string, any>;

@@ -11,8 +11,10 @@
     {
       "path": "adapter/pom.xml",
       "sourcePath": "adapter/pom.xml",
-      "bytes": 8066,
-      "sha256": "ff7d0c7a3082616c4966daa09af71d3494e4203c79e4d87d39e507864854fa1d"
+      "bytes": 8283,
+      "sha256": "f09efd258b0b967035db15f29cc01e21f8ce42f500b2ad0bc6e9907dde4cc5b1",
+      "upstreamSha256": "ff7d0c7a3082616c4966daa09af71d3494e4203c79e4d87d39e507864854fa1d",
+      "adaptation": "java -jar聚合包由ManifestResourceTransformer生成清单，排除依赖清单及全部版本模块描述符；保留服务合并和许可原文"
     },
     {
       "path": "adapter/src/fixtures/kotlin/fixture/App.kt",
@@ -145,8 +147,10 @@
     {
       "path": "adapter/src/main/kotlin/dev/ktdebug/session/SessionConfig.kt",
       "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/SessionConfig.kt",
-      "bytes": 5420,
-      "sha256": "f8eba2e032dbeca2e0749f70074dc2b2e4d825275d05b7b0644e2c0bd41a62f8"
+      "bytes": 5411,
+      "sha256": "e8d777fb457f9f56f7fdcd1d704c7b3d7538aec2b61f4e60b532392ddf949198",
+      "upstreamSha256": "f8eba2e032dbeca2e0749f70074dc2b2e4d825275d05b7b0644e2c0bd41a62f8",
+      "adaptation": "移除JDI attach默认固定总期限；显式timeout仍受限，缺省由每次SocketAttach有限等待驱动"
     },
     {
       "path": "adapter/src/main/kotlin/dev/ktdebug/session/SourceIndex.kt",
@@ -157,8 +161,10 @@
     {
       "path": "adapter/src/main/kotlin/dev/ktdebug/session/VmConnector.kt",
       "sourcePath": "adapter/src/main/kotlin/dev/ktdebug/session/VmConnector.kt",
-      "bytes": 10234,
-      "sha256": "c6649f53e479c08ee83025d9ce2873f8c4b4b1f006ddda381d64b22dc7a777a7"
+      "bytes": 10719,
+      "sha256": "0e6bfdc4f5540f2bdbc387e8431d2353f25ff655b9af07806dfd81616080f64c",
+      "upstreamSha256": "c6649f53e479c08ee83025d9ce2873f8c4b4b1f006ddda381d64b22dc7a777a7",
+      "adaptation": "移除默认固定总期限并仅等待连接拒绝；连接重置和其他IO错误立即保留原因返回失败；握手失败保留原始异常类与消息、cause和完整日志，不猜测占用原因"
     },
     {
       "path": "adapter/src/main/kotlin/dev/ktdebug/util/HitCondition.kt",
@@ -203,8 +209,10 @@
     {
       "path": "adapter/src/test/kotlin/dev/ktdebug/UnitTests.kt",
       "sourcePath": "adapter/src/test/kotlin/dev/ktdebug/UnitTests.kt",
-      "bytes": 7442,
-      "sha256": "00b628ecefc44e7b24a38ae91ce092756ac9ff47be2af374eba401ba3953def5"
+      "bytes": 7619,
+      "sha256": "11190929620b8d3f97d81b3580603ace4b779601da2b64ac30e3497ae3b247eb",
+      "upstreamSha256": "00b628ecefc44e7b24a38ae91ce092756ac9ff47be2af374eba401ba3953def5",
+      "adaptation": "移除JDI attach默认固定总期限回归并保留显式timeout覆盖"
     },
     {
       "path": "samples/spring-boot-kotlin-demo/.vscode/launch.json",

@@ -1,3 +1,12 @@
+/**
+ * 功能点：现役运行时资源的 VSIX 收集、归档与安装根激活契约。
+ * 受影响对象：当前 .vscodeignore、JVM/Gradle/ADB 资源、各自许可和生产 bundle。
+ * 复现路径：Node>=22，使用无 Coordinator 的隔离 fixture，并检查当前仓库及真实 VSIX。
+ * 测试范围：现役资源及许可原字节、私有文件排除、四平台清单和开发/发布激活一致性。
+ * 执行入口：node --test tests/vsix-content.test.js；仓库用例需要当前生产构建。
+ * 预期结果：无历史服务资产也可打包，现役资产严格保留；现存历史文件是否收录由 .vscodeignore 决定。
+ * 判据：缺失现役资源、许可变化、私有文件泄漏或激活不一致均失败。
+ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -14,7 +23,7 @@ function fixture(t) {
   const manifest = { name: 'android-runtime-fixture', version: '1.0.0', publisher: 'fixture', engines: { vscode: '^1.95.0' }, description: 'Package content regression', main: './dist/extension.js', activationEvents: ['onStartupFinished'], license: 'MIT', repository: { type: 'git', url: 'https://github.com/microsoft/vscode-extension-samples.git' } };
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
   fs.copyFileSync(path.join(__dirname, '../.vscodeignore'), path.join(root, '.vscodeignore'));
-  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'resources/jvm-debugger/kotlin-debug-adapter.jar', 'resources/jvm-debugger/android-debug-coordinator.jar', 'resources/gradle-tooling-server.jar', 'resources/gradle-tooling-LICENSE.txt', 'resources/jvm-debugger/LICENSE', 'resources/jvm-debugger/coordinator-LICENSE.txt', 'resources/jvm-debugger/coordinator-NOTICE.txt', 'resources/jvm-debugger/coordinator-LICENSE-sources.json', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
+  const included = ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist/extension.js', 'dist/THIRD_PARTY_NOTICES.txt', 'dist/runtime-js-dependencies.json', 'resources/platform-tools/runtime-manifest.json', 'resources/platform-tools/adb-runtime-provenance.json', 'resources/scrcpy/scrcpy-server.jar', 'resources/scrcpy/scrcpy-LICENSE.txt', 'resources/jvm-debugger/kotlin-debug-adapter.jar', 'resources/gradle-tooling-server.jar', 'resources/gradle-tooling-LICENSE.txt', 'resources/jvm-debugger/LICENSE', 'schemas/android-ide.local.schema.json', 'media/icon.png', 'media/icons/tool.svg', 'media/logcat/main.js', 'media/logcat/fonts/OFL.txt'];
   const excluded = ['.vscode/android-ide.local.json', '.test-artifacts/private.keystore', '.agents/private.json', '.env', 'src/extension.ts', 'tests/private.test.js', 'scripts/verify-runtime.mjs', 'android-profiler/materials/private.bin', 'android-debugger/native-debugger/upstream/src/debugMain.js', 'dist/extension.js.map', 'dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'media/screenshots/private.png', 'unknown-local-folder/private.txt', 'resources/lldb/win32-x64/bin/lldb-dap.exe', 'resources/lldb/win32-x64/bin/liblldb.dll', 'runtime/win32-x64/platform-tools/adb.exe', 'android-debugger/jvm/LICENSE', 'android-debugger/jvm/adapter.js'];
   for (const file of included.concat(excluded)) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
@@ -39,17 +48,18 @@ test('VSIX file collection includes runtime dependencies and excludes private pr
 });
 
 /**
- * 功能点：真实 VSIX 保留独立 coordinator LICENSE/NOTICE，不与上游适配器许可混合。
- * 受影响对象：.vscodeignore、fixture、vsce 打包器和独立许可资源。
- * 复现路径：Node>=22，在隔离 fixture 创建不同许可字节，再生成并读取真实 VSIX。
- * 测试范围：运行时资产存在、私有文件排除、原上游许可与 coordinator 两份独立原字节。
+ * 功能点：没有历史服务资源时，真实 VSIX 保留 JVM 与 Gradle 各自许可。
+ * 受影响对象：.vscodeignore、fixture、vsce 打包器和现役许可资源。
+ * 复现路径：Node>=22，在无 Coordinator 的隔离 fixture 创建不同许可字节，再生成并读取真实 VSIX。
+ * 测试范围：现役运行时资产存在、私有文件排除、JVM 上游许可与 Gradle 许可原字节。
  * 执行入口：node --test tests/vsix-content.test.js。
- * 预期结果：三个许可入口及来源清单均在包中且逐字节一致。
+ * 预期结果：无已删除服务资源也可生成归档，两个现役许可均在包中且逐字节一致。
  * 判据：归档存在性与原文比较全部通过；不使用构建、Java 或设备。
  */
 test('actual VSIX archive retains bundled backends tools resources and notices', async t => {
   const f = fixture(t);
-  const legalPaths = ['resources/jvm-debugger/LICENSE', 'resources/jvm-debugger/coordinator-LICENSE.txt', 'resources/jvm-debugger/coordinator-NOTICE.txt', 'resources/jvm-debugger/coordinator-LICENSE-sources.json'];
+  const legalPaths = ['resources/jvm-debugger/LICENSE', 'resources/gradle-tooling-LICENSE.txt'];
+  assert.equal(fs.readdirSync(path.join(f.root, 'resources/jvm-debugger')).some(name => /coordinator/i.test(name)), false, '夹具不提供历史服务资产');
   for (const name of legalPaths) fs.writeFileSync(path.join(f.root, name), Buffer.from(`${name}\r\n独立许可原文\r\n`));
   const output = path.join(f.root, 'fixture.vsix');
   await vsce.createVSIX({ cwd: f.root, packagePath: output, dependencies: false });
@@ -111,17 +121,11 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
   assert.ok(files.has('resources/platform-tools/runtime-manifest.json'));
   assert.ok(files.has('resources/platform-tools/adb-runtime-provenance.json'));
   assert.ok(files.has('resources/jvm-debugger/kotlin-debug-adapter.jar'));
-  assert.ok(files.has('resources/jvm-debugger/android-debug-coordinator.jar'));
   assert.ok(files.has('resources/gradle-tooling-server.jar'));
   assert.ok(files.has('resources/gradle-tooling-LICENSE.txt'));
   assert.match(fs.readFileSync(path.join(root, 'resources/gradle-tooling-LICENSE.txt'), 'utf8'), /Gradle Tooling API 9\.8\.1/);
   assert.ok(fs.existsSync(path.join(root, 'resources/jvm-debugger/LICENSE')));
   assert.ok(files.has('resources/jvm-debugger/LICENSE'));
-  for (const name of ['coordinator-LICENSE.txt', 'coordinator-NOTICE.txt', 'coordinator-LICENSE-sources.json']) {
-    const relative = 'resources/jvm-debugger/' + name;
-    assert.ok(files.has(relative), '缺失 coordinator 独立许可：' + name);
-    assert.ok(fs.statSync(path.join(root, relative)).size > 0, 'coordinator 独立许可为空：' + name);
-  }
   assert.deepEqual(fs.readFileSync(path.join(root, 'resources/jvm-debugger/LICENSE')), fs.readFileSync(path.join(root, 'src/android-debugger/jvm-debugger/upstream/LICENSE')));
   assert.equal([...files].some(name => name.startsWith('runtime/')), false);
   assert.equal(files.has('resources/scrcpy-server.jar'), false);
@@ -136,7 +140,7 @@ test('repository VSIX contains runtime assets and excludes source tools', async 
   for (const [host, info] of Object.entries(manifest.hosts)) {
     for (const entry of info.dependencies.platformTools.files) assert.ok(archive.has('extension/resources/platform-tools/' + host + '/' + entry.path), 'archive omitted: ' + host + '/' + entry.path);
   }
-  for (const name of ['LICENSE', 'coordinator-LICENSE.txt', 'coordinator-NOTICE.txt', 'coordinator-LICENSE-sources.json']) assert.ok(archive.has('extension/resources/jvm-debugger/' + name), 'VSIX 缺失独立许可：' + name);
+  for (const name of ['resources/jvm-debugger/kotlin-debug-adapter.jar', 'resources/jvm-debugger/LICENSE', 'resources/gradle-tooling-server.jar', 'resources/gradle-tooling-LICENSE.txt']) assert.ok(archive.has('extension/' + name), 'VSIX 缺失现役 JVM/Gradle 资源：' + name);
   assert.equal([...archive].some(name => name.startsWith('extension/runtime/')), false);
   for (const legacy of ['dist/kotlin-language-configuration.json', 'dist/kotlin.tmLanguage.json', 'dist/kotlin-debug-adapter.jar', 'android-debugger/jvm/adapter.js']) assert.equal(archive.has('extension/' + legacy), false, 'Legacy JVM archive leaked: ' + legacy);
   const unpacked = fs.mkdtempSync(path.join(os.tmpdir(), 'android-packaged-root-'));
@@ -188,7 +192,7 @@ async function activateBundle(source, extensionPath) {
     debug: {
       registerDebugAdapterDescriptorFactory: (id, factory) => { state.debuggers.push(id); factories.set(id, factory); return disposable(); },
       registerDebugConfigurationProvider: (id,provider,trigger) => { state.providers.push(id); if(trigger===2) { assert.equal(typeof provider.resolveDebugConfiguration,'function'); state.dynamicNames.push(...provider.provideDebugConfigurations().map(config=>config.name)); } return disposable(); },
-      registerDebugAdapterTrackerFactory: (id, tracker) => { assert.equal(id, 'android-jvm'); assert.equal(typeof tracker.createDebugAdapterTracker, 'function'); return disposable(); },
+      registerDebugAdapterTrackerFactory: (id, tracker) => { assert.ok(['android-jvm', 'lldb'].includes(id)); assert.equal(typeof tracker.createDebugAdapterTracker, 'function'); return disposable(); },
       onDidStartDebugSession: disposable,
       onDidTerminateDebugSession: disposable,
     },

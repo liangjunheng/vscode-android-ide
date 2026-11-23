@@ -34,9 +34,9 @@ class Socket extends Duplex {
   _read() {}
   _write(chunk, encoding, done) { this.writes.push(Buffer.from(chunk)); try { this.respond(this, Buffer.from(chunk)); done(); } catch (error) { done(error); } }
 }
-// 每条连接按服务选择准确响应，支持tracker空列表、HELO/Exit、shell v2和错误场景。
+// 功能：创建真实内存 ADB 对端；输入可控协议响应，输出 socket/命令/独占记录，不替换生产函数。
 function peer(options = {}) {
-  const sockets = [], commands = [], trackers = [], packets = [];
+  const sockets = [], commands = [], trackers = [], packets = [], owners = new Map(), rejections = [];
   const feed = (s, b) => options.split === false ? s.push(b) : [...b].forEach(byte => s.push(Buffer.from([byte])));
   const factory = () => { let phase = 0, service = '', pid;
     const socket = new Socket((s, data) => {
@@ -46,14 +46,34 @@ function peer(options = {}) {
         service = command;
         if (options.fail) { feed(s, Buffer.concat([Buffer.from('FAIL'), frame('permission denied')])); return; }
         if (service === 'track-jdwp') { trackers.push(s); feed(s, Buffer.concat([Buffer.from('OKAY'), frame(options.pids === undefined ? '123\n456\n' : options.pids)])); }
-        else if (service.startsWith('jdwp:')) { pid = Number(service.slice(5)); feed(s, Buffer.from('OKAY')); }
-        else if (service.startsWith('shell,v2,raw:')) { options.onShell?.(s, service); if (options.holdShell) return; const bad = options.shellError; const value = service.includes('ps -A') ? (typeof options.metadata === 'function' ? options.metadata() : options.metadata || '') : bad || (service.includes('force-stop') ? '' : 'Success\n'); feed(s, Buffer.concat([Buffer.from('OKAY'), shellFrame(bad ? 2 : 1, bad || value), shellFrame(3, Buffer.from([bad ? 1 : 0]))])); }
+        else if (service.startsWith('jdwp:')) {
+          pid = Number(service.slice(5));
+          if (options.exclusive && owners.has(pid)) { rejections.push(pid); feed(s, Buffer.concat([Buffer.from('FAIL'), frame('FAKE_ADB_EXCLUSIVE: ' + pid)])); return; }
+          if (options.exclusive) { owners.set(pid, s); s.once('close', () => { if (owners.get(pid) === s) owners.delete(pid); }); }
+          feed(s, Buffer.from('OKAY'));
+        }
+        else if (service.startsWith('shell,v2,raw:')) { options.onShell?.(s, service); if (options.holdShell) return; if (options.shellEof) { feed(s, Buffer.from('OKAY')); s.push(null); return; } const bad = options.shellError; const value = service.includes('ps -A') ? (typeof options.metadata === 'function' ? options.metadata() : options.metadata || '') : bad || (service.includes('force-stop') ? '' : 'Success\n'); feed(s, Buffer.concat([Buffer.from('OKAY'), shellFrame(bad ? 2 : 1, bad || value), shellFrame(3, Buffer.from([bad ? 1 : 0]))])); }
         else { throw Error('unexpected service ' + service); }
       } else if (data.equals(Buffer.from('JDWP-Handshake'))) { feed(s, data); }
-      else { packets.push(data); if (options.jdwpEof) { s.push(null); return; } if (options.noAck) return; feed(s, reply(data[9] === 0xc7 ? helo(pid) : Buffer.alloc(0), data.readUInt32BE(4), options.jdwpError || 0)); }
+      else {
+        assert.equal(data.readUInt32BE(0), data.length); assert.equal(data[8], 0);
+        packets.push(data); options.onPacket?.(s, data);
+        if (options.jdwpEof) { s.push(null); return; }
+        if (options.noAck || (options.holdHelo && data[9] === 0xc7) || options.holdQuery) return;
+        feed(s, reply(data[9] === 0xc7 ? helo(pid) : options.queryBody || Buffer.alloc(0), data.readUInt32BE(4), options.jdwpError || 0));
+      }
     }); sockets.push(socket); return socket;
   };
-  return { factory, sockets, commands, trackers, packets, feed };
+  return { factory, sockets, commands, trackers, packets, feed, owners, rejections };
+}
+
+// 功能：建立事件门闩；输出 Promise 与完成入口，以协议事件控制并发而不使用延时。
+function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
+// 功能：确认测试拥有的连接均已原生关闭并解除生产监听；输入对端，断言失败即资源泄漏。
+function assertReleased(p) {
+  assert.ok(p.sockets.every(socket => socket.destroyed && socket.closed));
+  for (const socket of p.sockets) for (const event of ['data', 'end', 'error', 'close', 'connect', 'timeout']) assert.equal(socket.listenerCount(event), 0, '残留监听：' + event);
+  assert.equal(p.owners.size, 0);
 }
 
 // 设备ps快照回退恢复进程名、包名和Android用户，覆盖HELO失败时的关键展示字段。
@@ -115,32 +135,163 @@ test('metadata fallback cancellation releases sockets', { timeout: 2000 }, async
   assert.ok(p.sockets.every(s => s.destroyed));
 });
 
-// watcher 的下一帧新增 PID 必须读当批快照，不能复用首次成功或失败的 Promise。
-for (const firstError of [false, true]) test('watch fallback loads fresh metadata for new PIDs ' + firstError, { timeout: 2000 }, async () => {
+/**
+ * 功能点：后台 watch 仅用 shell 元数据，不占用前台调试连接。
+ * 受影响对象：DeviceExplorerProcesses.watch、快照解析、AdbSmartSocket、Processes/Logcat 后台订阅者。
+ * 复现路径：Node>=22 且安装 esbuild；真实 TS 模块连接内存 Duplex；tracker 新增同批 PID，扣住 shell 或显式 JDWP 回复。
+ * 测试范围：初始未知/同批共享、下一批 fresh、shell 非零/EOF、移除/取消/stop、异常 tracker、独占并发与监听释放；list/kill 旧协议不变。
+ * 执行入口：node --test tests/device-explorer-processes.test.js；仅设计，本任务不执行。
+ * 预期结果：后台零 jdwp 服务与 HELO，包/PID/ABI/UID 按真实快照更新，VM 不猜测，错误显式，显式查询成功。
+ * 判据：全部严格断言成立且自有 socket 原生 close/监听清零；任意后台 JDWP、伪 Default/ART 或泄漏均失败；fake 规则不证明真机端口根因。
+ */
+// 功能：逐批推送新增 PID；成功和失败后的下一批都重新查询，不复用旧 Promise。
+for (const firstError of [false, true]) test('watch shell metadata stays fresh for new PIDs ' + firstError, { timeout: 2000 }, async () => {
   let snapshot = 'PID USER NAME ARGS\n123 u0_a123 com.example.first com.example.first\n';
-  const options = { pids: '123\n', jdwpEof: true, metadata: () => snapshot, shellError: firstError ? 'permission denied' : undefined };
-  const p = peer(options), errors = [];
-  let firstReady, secondReady;
-  const first = new Promise(resolve => { firstReady = resolve; });
-  const second = new Promise(resolve => { secondReady = resolve; });
+  const options = { pids: '123\n', metadata: () => snapshot, shellError: firstError ? 'permission denied' : undefined };
+  const p = peer(options), errors = [], first = deferred(), second = deferred();
   const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => {
-    if (rows.some(row => row.pid === 123 && row.error)) firstReady(rows);
-    if (rows.some(row => row.pid === 456 && row.name)) secondReady(rows);
+    if (rows.some(row => row.pid === 123 && (row.name || row.error))) first.resolve(rows);
+    if (rows.some(row => row.pid === 456 && row.name)) second.resolve(rows);
   }, error => errors.push(error));
   try {
-    const initial = await first;
+    const initial = await first.promise;
     assert.equal(initial[0].name, firstError ? undefined : 'com.example.first');
+    assert.equal(initial[0].debugger, firstError ? 'error' : 'unknown');
+    if (firstError) assert.match(initial[0].error, /permission denied/);
     options.shellError = undefined;
     snapshot = 'PID USER NAME ARGS\n456 u10_a234 com.example.second com.example.second\n';
     p.feed(p.trackers[0], frame('456\n'));
-    const rows = await second;
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].packageName, 'com.example.second');
-    assert.equal(rows[0].userId, 10);
+    const rows = await second.promise;
+    assert.equal(rows.length, 1); assert.equal(rows[0].pid, 456);
+    assert.equal(rows[0].packageName, 'com.example.second'); assert.equal(rows[0].userId, 10);
+    assert.equal(rows[0].debugger, 'unknown'); assert.equal(rows[0].error, undefined);
     assert.equal(p.commands.filter(c => c.startsWith('shell,v2,raw:')).length, 2);
-    assert.deepEqual(errors, []);
+    assert.equal(p.commands.some(c => c.startsWith('jdwp:')), false); assert.equal(p.packets.length, 0);
+    assert.equal(errors.length, firstError ? 1 : 0);
+    if (firstError) assert.match(String(errors[0]), /permission denied/);
   } finally { await stop(); }
-  assert.ok(p.sockets.every(s => s.destroyed));
+  assertReleased(p);
+});
+
+// 功能：扣住同批 shell，检查先发未知行、每批只查询一次，以及各 PID 包/ABI/UID 隔离和 VM 缺失。
+test('watch shares shell metadata and publishes unknown before real identity', { timeout: 2000 }, async () => {
+  const entered = deferred(), ready = deferred(), updates = [], errors = [];
+  const metadata = 'PID USER NAME ARGS\n123 u0_a1 com.example.first args\n456 u10_a2 com.example.second args\n789 u0_a3 com.example.third args\n__DEX_EXE__\n123\t/system/bin/app_process64\n456\t/system/bin/app_process32\n789\t/system/bin/unknown64\n__DEX_VM__\n__DEX_ABI64__\narm64-v8a\n__DEX_ABI__\narmeabi-v7a';
+  const p = peer({ pids: '123\n456\n789\n999\n', holdShell: true, onShell: s => entered.resolve(s) });
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => {
+    updates.push(rows); if (rows.filter(row => row.name).length === 3) ready.resolve(rows);
+  }, error => errors.push(error));
+  try {
+    const shell = await entered.promise;
+    assert.deepEqual(Array.from(updates[0], row => [row.pid, row.debugger, row.error, row.vm]), [[123, 'unknown', undefined, undefined], [456, 'unknown', undefined, undefined], [789, 'unknown', undefined, undefined], [999, 'unknown', undefined, undefined]]);
+    p.feed(p.trackers[0], frame('123\n456\n789\n999\n'));
+    p.feed(shell, Buffer.concat([Buffer.from('OKAY'), shellFrame(1, metadata), shellFrame(3, Buffer.from([0]))]));
+    const rows = await ready.promise;
+    assert.equal(rows[0].packageName, 'com.example.first'); assert.equal(rows[0].abi, '64-bit (arm64)'); assert.equal(rows[0].userId, 0);
+    assert.equal(rows[1].packageName, 'com.example.second'); assert.equal(rows[1].abi, '32-bit (armeabi-v7a)'); assert.equal(rows[1].userId, 10);
+    assert.equal(rows[2].abi, undefined); assert.equal(rows[3].name, undefined); assert.equal(rows[3].userId, undefined);
+    assert.ok(rows.every(row => row.debugger === 'unknown' && row.vm === undefined && row.error === undefined));
+    assert.equal(p.commands.filter(c => c.startsWith('shell,v2,raw:')).length, 1);
+    assert.equal(p.commands.some(c => c.startsWith('jdwp:')), false); assert.deepEqual(errors, []);
+  } finally { await stop(); }
+  assertReleased(p);
+});
+
+// 功能：真实 shell EOF/非零退出保持行错误并通知 onError，不把查询失败伪装成 unknown。
+for (const shellEof of [true, false]) test('watch shell failures retain errors and release sockets ' + shellEof, { timeout: 2000 }, async () => {
+  const ready = deferred(), errors = [], updates = [];
+  const p = peer({ pids: '123\n', shellEof, shellError: shellEof ? undefined : 'permission denied' });
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => updates.push(rows), error => { errors.push(error); ready.resolve(); });
+  try {
+    await ready.promise;
+    assert.equal(updates.at(-1)[0].debugger, 'error');
+    assert.match(updates.at(-1)[0].error, shellEof ? /ADB socket EOF/ : /permission denied/);
+    assert.equal(errors.length, 1); assert.match(String(errors[0]), shellEof ? /ADB socket EOF/ : /permission denied/);
+    assert.equal(p.commands.some(c => c.startsWith('jdwp:')), false);
+  } finally { await stop(); }
+  assertReleased(p);
+});
+
+// 功能：在真实 shell 读取中移除全部 PID、外部取消或 stop，完成事件确认关闭，无延时和轮询。
+for (const mode of ['remove', 'abort', 'stop']) test('watch pending metadata releases on ' + mode, { timeout: 2000 }, async () => {
+  const entered = deferred(), updates = [], errors = [], controller = new AbortController();
+  const p = peer({ pids: '123\n456\n', holdShell: true, onShell: s => entered.resolve(s) });
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => updates.push(rows), error => errors.push(error), controller.signal);
+  try {
+    const shell = await entered.promise, closed = new Promise(resolve => shell.once('close', resolve));
+    if (mode === 'remove') p.feed(p.trackers[0], frame(''));
+    else if (mode === 'abort') controller.abort();
+    else await stop();
+    await closed;
+    if (mode === 'remove') assert.equal(updates.at(-1).length, 0);
+    else assert.ok(updates.every(rows => rows.every(row => row.debugger === 'unknown')));
+    assert.deepEqual(errors, []); assert.equal(p.commands.some(c => c.startsWith('jdwp:')), false);
+  } finally { await stop(); }
+  assertReleased(p);
+});
+
+// 功能：同批仅移除一个 PID 不取消其他 PID 的共享读取；迟到快照不能复活被移除的进程。
+test('watch removed PID cannot publish foreign metadata into surviving rows', { timeout: 2000 }, async () => {
+  const entered = deferred(), removed = deferred(), ready = deferred(), updates = [], errors = [];
+  const p = peer({ pids: '123\n456\n', holdShell: true, onShell: s => entered.resolve(s) });
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => {
+    updates.push(rows); if (rows.length === 1) removed.resolve(); if (rows.some(row => row.name)) ready.resolve(rows);
+  }, error => errors.push(error));
+  try {
+    const shell = await entered.promise;
+    p.feed(p.trackers[0], frame('456\n')); await removed.promise; assert.equal(shell.destroyed, false);
+    p.feed(shell, Buffer.concat([Buffer.from('OKAY'), shellFrame(1, 'PID USER NAME ARGS\n123 u0_a1 com.example.removed args\n456 u10_a2 com.example.live args\n789 u0_a3 com.example.foreign args\n'), shellFrame(3, Buffer.from([0]))]));
+    const rows = await ready.promise;
+    assert.deepEqual(Array.from(rows, row => [row.pid, row.packageName, row.userId, row.debugger]), [[456, 'com.example.live', 10, 'unknown']]);
+    assert.ok(updates.slice(1).every(rows => rows.every(row => row.pid === 456))); assert.deepEqual(errors, []);
+    assert.equal(p.commands.filter(c => c.startsWith('shell,v2,raw:')).length, 1);
+  } finally { await stop(); }
+  assertReleased(p);
+});
+
+// 功能：tracker EOF/非法 PID 仍通知错误，stop 回收尚未完成的元数据；预取消不创建 socket。
+for (const malformed of [false, true]) test('watch tracker failures release pending shell on stop ' + malformed, { timeout: 2000 }, async () => {
+  const entered = deferred(), failed = deferred(), errors = [];
+  const p = peer({ pids: '123\n', holdShell: true, onShell: s => entered.resolve(s) });
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(() => {}, error => { errors.push(error); failed.resolve(error); });
+  try {
+    await entered.promise;
+    if (malformed) p.feed(p.trackers[0], frame('foreign\n')); else p.trackers[0].push(null);
+    assert.match(String(await failed.promise), malformed ? /Malformed JDWP process list/ : /ADB socket EOF/);
+  } finally { await stop(); }
+  assert.equal(errors.length, 1); assertReleased(p);
+  const cancelled = peer(), controller = new AbortController(); controller.abort();
+  await new DeviceExplorerProcesses('phone', cancelled.factory).watch(() => assert.fail('预取消不应发布'), () => assert.fail('预取消不应报错'), controller.signal)();
+  assert.equal(cancelled.sockets.length, 0);
+});
+
+// 功能：复用 task62 的按 PID 独占规则，扣住真实 shell 与显式 JDWP；后台全程零 JDWP，第二路真实请求成功。
+test('watch never occupies exclusive JDWP while an explicit real request succeeds', { timeout: 2000 }, async () => {
+  const entered = deferred(), queried = deferred(), ready = deferred(), errors = [], controller = new AbortController();
+  const p = peer({ pids: '123\n', exclusive: true, holdHelo: true, holdShell: true, holdQuery: true, onShell: s => entered.resolve(s), onPacket: (socket, packet) => queried.resolve({ socket, packet }) });
+  const adb = new AdbSmartSocket(p.factory);
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => { if (rows.some(row => row.name)) ready.resolve(rows); }, error => errors.push(error));
+  let request;
+  try {
+    const shell = await entered.promise;
+    assert.equal(p.commands.some(c => c.startsWith('jdwp:')), false); assert.equal(p.packets.length, 0); assert.equal(p.owners.size, 0);
+    request = adb.jdwpRequest('phone', 123, 1, 1, Buffer.alloc(0), controller.signal);
+    const observed = request.catch(error => error);
+    const { socket, packet } = await queried.promise;
+    assert.equal(p.owners.get(123), socket); assert.equal(packet.toString('hex'), '0000000b00000001000101');
+    await assert.rejects(adb.jdwpRequest('phone', 123, 1, 1), /FAKE_ADB_EXCLUSIVE: 123/);
+    assert.deepEqual(p.rejections, [123]);
+    p.feed(shell, Buffer.concat([Buffer.from('OKAY'), shellFrame(1, 'PID USER NAME ARGS\n123 u0_a1 com.example.concurrent args\n'), shellFrame(3, Buffer.from([0]))]));
+    const rows = await ready.promise;
+    assert.equal(rows[0].debugger, 'unknown'); assert.equal(rows[0].vm, undefined); assert.equal(rows[0].error, undefined);
+    assert.equal(p.owners.get(123), socket); assert.equal(socket.destroyed, false);
+    assert.equal(p.commands.filter(c => c.startsWith('jdwp:')).length, 2); assert.equal(p.packets.length, 1);
+    assert.equal(p.packets.some(packet => packet[9] === 0xc7), false);
+    p.feed(socket, reply(Buffer.from('explicit-query-success'), packet.readUInt32BE(4)));
+    assert.equal((await request).toString(), 'explicit-query-success'); await observed;
+    assert.deepEqual(errors, []);
+  } finally { controller.abort(); if (request) await request.catch(() => {}); await stop(); }
+  assertReleased(p);
 });
 
 // 同批两个PID共享真实快照却保持位数/用户/包名隔离；不把缺失VM或未知exe伪装成正常字段。
@@ -181,12 +332,19 @@ test('package actions use verified names and shell v2 exit status', { timeout: 2
   const bad = peer({ shellError: 'permission denied' }); await assert.rejects(new DeviceExplorerProcesses('phone',bad.factory).forceStop('com.example.app'), /permission denied/); assert.ok(bad.sockets.every(s => s.destroyed));
 });
 
-// tracker生命周期真实关闭并等待新增PID查询，不通过轮询检测完成；取消无残留监听。
+// 功能：真实 tracker 发布、清空进程并停止；事件门闩确认移除，stop 等待连接关闭且后台零 JDWP。
 test('watch publishes live processes and stop awaits all owned sockets', { timeout: 2000 }, async () => {
-  const p = peer({ pids:'123\n' }), rows = [], errors = [];
-  let ready; const first = new Promise(resolve => { ready = resolve; });
-  const stop = new DeviceExplorerProcesses('phone',p.factory).watch(value => { rows.push(value); if (value.some(r => r.name)) ready(); }, e => errors.push(e));
-  await first; p.feed(p.trackers[0],frame('')); await new Promise(resolve => setImmediate(resolve)); assert.equal(rows.at(-1).length,0); await stop(); assert.equal(errors.length,0); assert.ok(p.sockets.every(s=>s.destroyed));
+  const p = peer({ pids: '123\n', metadata: 'PID USER NAME ARGS\n123 u0_a1 com.example.live args\n' }), errors = [], first = deferred(), empty = deferred();
+  const stop = new DeviceExplorerProcesses('phone', p.factory).watch(rows => {
+    if (rows.some(row => row.name)) first.resolve(rows);
+    if (!rows.length) empty.resolve(rows);
+  }, error => errors.push(error));
+  try {
+    assert.equal((await first.promise)[0].debugger, 'unknown');
+    p.feed(p.trackers[0], frame('')); assert.equal((await empty.promise).length, 0);
+    assert.equal(errors.length, 0); assert.equal(p.commands.some(command => command.startsWith('jdwp:')), false);
+  } finally { await stop(); }
+  assertReleased(p);
 });
 
 // fail后的新read必须立即拒绝，4hex坏帧也必须失败，不能再次挂起到测试超时。

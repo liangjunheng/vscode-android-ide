@@ -1,5 +1,5 @@
 (function () {
-  // 独立进程列表按卡片完整展示六项信息，复用操作工厂；UI/layout浏览器回归验证单选、排序、字段与窄面板无横向滚动。
+  // 功能：输入进程状态与动作工厂，输出保留布局/交互的卡片；UI回归覆盖未知调试标签及原有操作。
   function renderProcesses({ state, action, renderParent, button, text }) {
     const wrap = document.createElement('div'); wrap.className = 'processes-view';
     const controls = document.createElement('div'); controls.className = 'process-controls';
@@ -17,7 +17,7 @@
     direction.className += ' process-sort-direction'; controls.appendChild(direction); wrap.appendChild(controls);
     const list = document.createElement('div'); list.className = 'process-list'; list.setAttribute('role', 'list');
     wrap.appendChild(list);
-    // 卡片只用textContent，过滤/排序不改原数组；UI/layout回归验证长名称换行、零UID、缺失字段、查询持久与操作归属。
+    // 功能：按当前查询/排序安全输出卡片，缺字段与未知状态显示“-”；UI回归覆盖零UID、状态标签与操作归属。
     function draw() {
       list.replaceChildren();
       const queryText = (state.processQuery || '').toLowerCase();
@@ -38,7 +38,8 @@
         const name = text('div', process.name || process.packageName || '<unknown-pid>', 'process-name'); name.title = name.textContent;
         header.appendChild(name); header.appendChild(text('span', 'PID ' + process.pid, 'process-pid')); card.appendChild(header);
         const details = document.createElement('dl'); details.className = 'process-details';
-        const debuggerState = process.debugger === 'waiting' ? 'Waiting' : process.debugger === 'attached' ? 'Attached' : process.debugger === 'error' ? 'Error' : 'Default';
+        // 仅明确的调试状态显示标签，后台未知或缺字段沿用“-”；未知状态回归覆盖全部标签。
+        const debuggerState = process.debugger === 'waiting' ? 'Waiting' : process.debugger === 'attached' ? 'Attached' : process.debugger === 'error' ? 'Error' : process.debugger === 'default' ? 'Default' : '-';
         for (const [label, value] of [['ABI', process.abi], ['VM', process.vm], ['User ID', process.userId], ['Debugger', debuggerState]]) {
           const field = document.createElement('div'); field.className = 'process-field';
           field.appendChild(text('dt', label)); field.appendChild(text('dd', value == null || value === '' ? '-' : value)); details.appendChild(field);
