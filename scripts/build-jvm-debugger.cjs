@@ -190,7 +190,8 @@ async function build({ test = false } = {}) {
   const slf4jLicense = toolingArchive.files.find(entry => entry.path === 'META-INF/LICENSE.txt');
   if (!slf4jLicense) fail('Tooling API SLF4J license missing');
   const apacheLicense = await fsp.readFile(path.join(ROOT, 'resources', 'licenses', 'Apache-2.0', 'legalcode.txt'), 'utf8');
-  await fsp.writeFile(path.join(ROOT, 'resources', 'gradle-tooling-LICENSE.txt'), 'Gradle Tooling API 9.8.1 — Apache-2.0\n\n' + apacheLicense + '\n\nSLF4J API and Simple 2.0.17 — MIT\n\n' + (await slf4jLicense.buffer()).toString('utf8'));
+  // 成品条目按 Shade 追加规则包含 API 与 Simple 两份完整 MIT 原文；不去重、不重写原文。
+  await fsp.writeFile(path.join(ROOT, 'resources', 'gradle-tooling-LICENSE.txt'), 'Gradle Tooling API 9.8.1 — Apache-2.0\n\n' + apacheLicense + '\n\nSLF4J API and Simple 2.0.17 — MIT（以下合并保留两依赖的完整许可原文）\n\n' + (await slf4jLicense.buffer()).toString('utf8'));
   await fsp.copyFile(toolingJar, path.join(ROOT, 'resources', 'gradle-tooling-server.jar'));
   await fsp.copyFile(path.join(UPSTREAM, 'LICENSE'), path.join(path.dirname(OUTPUT), 'LICENSE'));
   const bytes = await fsp.stat(OUTPUT);
