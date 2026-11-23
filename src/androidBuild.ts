@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
 import { adbPath } from './sdk';
+import { DebugDevice } from './android-debugger/device';
 import { getAndroidDebugConfigurations, selectAndroidDebugConfiguration, startAndroidDebugging } from './android-debugger';
 import { discoverVariantSources, NativeSourceModule } from './androidProjectModel';
 import { GradleToolingClient } from './gradleTooling';
@@ -429,7 +430,14 @@ export class AndroidBuildController implements vscode.Disposable {
     const packageName = config!.packageName ?? metadata?.applicationId;
     this.check(operation);
     const debugProjectRoot = builtIn && !config!.androidProjectRoot ? { androidProjectRoot: project.root } : {};
-    const debugConfig = { ...config!, ...debugProjectRoot, ...(config!.packageName === undefined && packageName ? { packageName } : {}) };
+    let debugConfig: vscode.DebugConfiguration = { ...config!, ...debugProjectRoot, ...(config!.packageName === undefined && packageName ? { packageName } : {}) };
+    if (action === 'debugLaunch') {
+      this.state('Building and installing debug APK');
+      await this.run(operation, project.wrapper, [target.install, '--console=plain'], project.root, { ...process.env, ANDROID_SERIAL: serial });
+      const device = new DebugDevice(serial, project.root);
+      const pid = await device.launch(packageName!, debugConfig.launchActivity, undefined, operation.controller.signal);
+      debugConfig = { ...debugConfig, request: 'attach', pid, processId: pid, packageName, androidLaunchPrepared: true };
+    }
     const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(project.root));
     this.state('Starting Android debugger');
     let owned: vscode.DebugSession | undefined;

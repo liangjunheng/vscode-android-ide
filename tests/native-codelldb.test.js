@@ -177,12 +177,14 @@ test('三、保留工具链必要检查和包 ABI 交集及库发现错误', asy
   assert.deepEqual(plain(f.calls.find(call => call[0] === 'server')[1].androidNativeToolchain), { adb: f.adb, sdkRoot: f.sdk, ndkRoot: f.ndk });
   await connection.close();
   const before = f.servers.length;
+  const stoppedBefore = f.stopped.length;
   f.abiFailure = new Error('package ABI read failed');
   await assert.rejects(f.connect(), error => error === f.abiFailure);
   f.abiFailure = undefined;
   f.libraryFailure = new Error('project library read failed');
   await assert.rejects(f.connect(), error => error === f.libraryFailure);
-  assert.equal(f.servers.length, before);
+  assert.equal(f.servers.length, before + 1);
+  assert.equal(f.stopped.length, stoppedBefore + 1);
 });
 
 // 前置：直接输入最终配置；真实符号算法和租约生成 CodeLLDB 命令，目标字段不可被 Native 选项替换。

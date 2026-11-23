@@ -101,7 +101,7 @@ function fixture(t, platform = 'linux') {
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, {
     module, exports: module.exports, Buffer, AbortController, console,
     process: { platform, env: {}, kill: pid => { assert.equal(pid, -f.held.pid); if (f.closeOnKill) f.held.finish(null, 'SIGTERM'); } },
-    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger' ? debugApi : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
+    require: id => id === 'vscode' ? vscode : id === 'child_process' ? cp : id === './sdk' ? { adbPath: () => 'sdk adb' } : id === './android-debugger/device' ? { DebugDevice: class { constructor(serial, projectRoot) { this.serial = serial; this.projectRoot = projectRoot; } async launch() { f.calls.push({ command: 'prepared-launch' }); return 777; } } } : id === './android-debugger' ? debugApi : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './androidProjectModel' ? projectModel : id === './gradleTooling' ? { GradleToolingClient: class {
       async query(root, signal) { if (f.toolingTasks) return f.toolingTasks; return f.parse(await f.controller.run({ controller: { signal } }, 'tooling-api', ['tasks'], root)); }
       async dispose() {}
     } } : require(id),
@@ -428,7 +428,7 @@ test('android-build actual Tooling API discovers the selected project variants',
   };
   const module = { exports: {} };
   vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, Buffer, process, AbortController,
-    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+    require: id => id === 'vscode' ? vscode : id === './gradleTooling' ? toolingModule.exports : id === './android-debugger/device' ? { DebugDevice: class { constructor(serial, projectRoot) { this.serial = serial; this.projectRoot = projectRoot; } async launch() { return 777; } } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(state => states.push(state), path.resolve(__dirname, '..'));
   t.after(() => controller.dispose());
   const times = [];
@@ -570,7 +570,12 @@ test('android-build debug toolbar routes all mode and request combinations', asy
       assert.equal(f.last().running, true);
       assert.equal(f.last().activeAction, request);
       assert.equal(f.debugCalls.at(-1)[1].mode, mode === 'jvm' ? 'java' : mode);
-      assert.equal(f.debugCalls.at(-1)[1].request, request === 'debugLaunch' ? 'launch' : 'attach');
+      assert.equal(f.debugCalls.at(-1)[1].request, 'attach');
+      if (request === 'debugLaunch') {
+        assert.ok(f.calls.some(call => call.args?.includes(':app:installDebug')));
+        assert.ok(f.calls.some(call => call.command === 'prepared-launch'));
+        assert.equal(f.debugCalls.at(-1)[1].pid, 777);
+      }
       await assert.rejects(f.action('debugMode', 'native'), /Stop the current/);
       for (const listener of [...f.debugTerminationListeners]) listener(f.session);
       assert.equal(f.last().running, false);
@@ -968,7 +973,7 @@ test('android-build real Windows source runner preserves generated init path wit
   const script = path.join(root, 'generated ! init.gradle'); fs.writeFileSync(script, '// fixture');
   fs.writeFileSync(path.join(root, 'gradlew.bat'), '@echo off\r\necho FIRST=%1\r\necho SECOND=%~2\r\nif not exist "%~2" exit /b 91\r\nif not "%~3"==":app:__dshSourceIndex" exit /b 92\r\n');
   const module = { exports: {} }, channel = { replace() {}, show() {}, dispose() {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? { workspace: { isTrusted: true }, window: { createOutputChannel: () => channel } } : id === './android-debugger/device' ? { DebugDevice: class { constructor(serial, projectRoot) { this.serial = serial; this.projectRoot = projectRoot; } async launch() { return 777; } } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './gradleTooling' ? { GradleToolingClient: class { async dispose() {} } } : id === './sdk' || id === './androidProjectModel' ? {} : require(id) });
   const controller = new module.exports.AndroidBuildController(() => {});
   const text = await controller.run({ controller: new AbortController() }, path.join(root, 'gradlew.bat'), ['--init-script', script, ':app:__dshSourceIndex'], root, process.env, script);
   assert.ok(text.includes('FIRST=--init-script')); assert.ok(text.includes('SECOND=' + script), JSON.stringify({ text, script })); await controller.dispose();
@@ -1127,7 +1132,7 @@ test('android-build real Windows Run stop kills only its owned child', { skip: p
     const module = { exports: {} };
     vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, '../src', relative), 'utf8'), { loader: 'ts', format: 'cjs' }).code, {
       module, exports: module.exports, process, Buffer, AbortController, console,
-      require: id => Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
+      require: id => id === './android-debugger/device' ? { DebugDevice: class { constructor(serial, projectRoot) { this.serial = serial; this.projectRoot = projectRoot; } async launch() { return 777; } } } : Object.hasOwn(dependencies, id) ? dependencies[id] : require(id),
     });
     return module.exports;
   }
@@ -1278,7 +1283,7 @@ test('android-build real Windows wrapper executes in a path with spaces', { skip
   const channel = { text: '', replace(s) { this.text = s; }, show() {}, dispose() {} };
   const vscode = { workspace: { isTrusted: true, findFiles: async () => [{ fsPath: path.join(root, 'gradlew.bat') }] }, window: { createOutputChannel: () => channel } };
   const module = { exports: {} };
-  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
+  vm.runInNewContext(transformSync(source, { loader: 'ts', format: 'cjs' }).code, { module, exports: module.exports, process, Buffer, AbortController, require: id => id === 'vscode' ? vscode : id === './sdk' ? {} : id === './android-debugger/device' ? { DebugDevice: class { constructor(serial, projectRoot) { this.serial = serial; this.projectRoot = projectRoot; } async launch() { return 777; } } } : id === './android-debugger' ? { getAndroidDebugConfigurations: () => [] } : id === './autoConfig' || id === './android-debugger/autoConfig' ? autoApi : id === './androidProjectModel' ? {} : id === './gradleTooling' ? { GradleToolingClient: class { async query() { return [':app:assembleDebug', ':app:installDebug']; } async dispose() {} } } : require(id) });
   const states = [], controller = new module.exports.AndroidBuildController(m => states.push(m));
   await controller.handle({ type: 'buildPanel', action: 'refresh' });
   assert.equal(states.at(-1).target, ':app:Debug');

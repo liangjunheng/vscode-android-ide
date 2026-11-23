@@ -73,6 +73,14 @@ class DebugRun {
     if (this.config.request === 'launch') {
       this.launched = true;
       this.pid = await this.device.launch(this.config.packageName, this.config.launchActivity, this.config.apkPath, signal);
+    } else if (this.config.androidLaunchPrepared === true) {
+      const raw = this.config.pid ?? this.config.processId;
+      if (!Number.isSafeInteger(Number(raw)) || Number(raw) <= 0) throw new Error('Prepared Android launch requires a valid PID');
+      const rows = await this.device.clients(signal);
+      const matching = rows.filter(row => row.pid === Number(raw) && row.packageName === this.config.packageName);
+      if (matching.length !== 1) throw new Error('Prepared Android launch process is no longer available');
+      this.pid = Number(raw);
+      this.launched = true;
     } else {
       const rows = await this.device.clients(signal);
       const raw = this.config.pid ?? this.config.processId;

@@ -117,32 +117,35 @@ export async function prepareNativeConnection(input: vscode.DebugConfiguration, 
   const candidates = supported.filter((abi: string) => !native.abiSupported || native.abiSupported.includes(abi));
   const abi = native.abi === undefined || native.abi === 'select' ? candidates[0] : native.abi;
   if (!abi || !candidates.includes(abi)) throw new Error('Cannot find appropriate ABI to use');
-  const libraries = await selectNativeLibraries(options.symbolSearchPaths ?? [], { projectRoot, packageName, abi, storage: storage ?? symbolStorage(), token: cancellationToken(signal) });
-  signal.throwIfAborted();
-  if (!libraries) throw new Error('Native symbol selection cancelled');
-  const libraryCommands = nativeLibraryCommands(libraries);
-  if (!libraries.length) void vscode.window.showWarningMessage('未找到当前项目和 ABI 的 Native 调试库，不会加载项目符号；尚未确认调试器连接成功。');
-  signal.throwIfAborted();
   const selected = await android.getDeviceFromUDID(serial, androidRoot, toolchain);
   if (selected.state !== 'device') throw new Error('Android device is not online: ' + serial);
   const target = { ...selected, udid: serial, androidProjectRoot: androidRoot, androidNativeToolchain: toolchain };
   let server: Awaited<ReturnType<typeof android.startLldbServer>> | undefined;
   let forwarding: NativeForwardLease | undefined;
   let closing: Promise<void> | undefined;
-  /** 功能：一次结算两项明确资源；输入无；输出共享关闭 Promise，保留每项清理失败且不终止应用。 */
+  /** 功能：一次结算两项明确资源；输入无；输出共享关闭Promise，保留每项清理失败。 */
   const close = (): Promise<void> => closing ??= Promise.resolve().then(async () => {
     const results = await Promise.allSettled([Promise.resolve().then(() => server?.stop()), Promise.resolve().then(() => forwarding?.close())]);
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
     if (errors.length) throw new AggregateError(errors, 'Native server and forward cleanup failed');
   });
+  const symbols = selectNativeLibraries(options.symbolSearchPaths ?? [], { projectRoot, packageName, abi, storage: storage ?? symbolStorage(), token: cancellationToken(signal) });
+  const deployment = android.startLldbServer(target, packageName, abi);
+  const forwardingPreparation = android.getDeviceAdb(target).then(adb => NativeForwardLease.create(serial, adb));
   try {
-    server = await android.startLldbServer(target, packageName, abi);
+    const [symbolResult, deploymentResult, forwardingResult] = await Promise.allSettled([symbols, deployment, forwardingPreparation]);
+    if (deploymentResult.status === 'fulfilled') server = deploymentResult.value;
+    if (forwardingResult.status === 'fulfilled') forwarding = forwardingResult.value;
+    const failures = [symbolResult, deploymentResult, forwardingResult].filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    if (failures.length) throw failures.length === 1 ? failures[0] : new AggregateError(failures, 'Native preparation failed');
     signal.throwIfAborted();
+    const libraries = symbolResult.status === 'fulfilled' ? symbolResult.value : undefined;
+    if (!libraries || !server) throw new Error('Native preparation did not produce required resources');
     if (typeof server.socket !== 'string' || !/^\/?[\w./-]+$/.test(server.socket)) throw new Error('Invalid Native server socket');
-    const adb = await android.getDeviceAdb(target);
+    const libraryCommands = nativeLibraryCommands(libraries);
+    if (!libraries.length) void vscode.window.showWarningMessage('未找到当前项目和 ABI 的 Native 调试库，不会加载项目符号；尚未确认调试器连接成功。');
     signal.throwIfAborted();
-    forwarding = await NativeForwardLease.create(serial, adb);
-    signal.throwIfAborted();
+    if (!forwarding) throw new Error('Native forwarding preparation did not produce a lease');
     const config: vscode.DebugConfiguration = {
       ...options, type: 'lldb', request: 'attach', pid, processId: pid, serial, packageName, androidPackageName: packageName,
       projectRoot, androidProjectRoot: androidRoot, androidAbi: abi, androidLldbServerSocket: server.socket,
@@ -154,7 +157,7 @@ export async function prepareNativeConnection(input: vscode.DebugConfiguration, 
       exitCommands: [...(options.exitCommands ?? []), 'platform disconnect', 'log disable lldb platform'],
     };
     for (const key of ['signal', 'native', 'java', 'android', 'mode', 'androidMode', 'target', 'androidTarget', 'apkPath', 'launchActivity', 'resumeProcess',
-      'androidNativeToolchain', 'androidNativeLibraries', 'androidAbiSupported', 'androidAbiMap', 'androidSourceRoots', 'androidJdwpPort',
+      'androidNativeToolchain', 'androidNativeLibraries', 'androidAbiSupported', 'androidAbiMap', 'androidSourceRoots', 'androidJdwpPort', 'androidLaunchPrepared',
       'abi', 'abiSupported', 'abiMap', 'sdkRoot', 'ndkRoot', 'hostName', 'port', 'adapterJvmArgs', 'classPaths', 'modulePaths', 'projectName', 'stepFilters']) delete config[key];
     return { config, close };
   } catch (error) {
